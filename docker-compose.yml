@@ -1,0 +1,45 @@
+# Development environment: just MySQL. The Go app is run locally from VS Code
+# (go run ./cmd/server) so you get fast rebuilds + debugger attach. Uncomment
+# the `app` service below if you'd rather run the API in Docker too.
+services:
+  db:
+    image: mysql:8.0
+    container_name: finnapigo-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secret
+      MYSQL_DATABASE: finnapigo
+      MYSQL_USER: finnapigo
+      MYSQL_PASSWORD: your secret key
+    ports:
+      - "3306:3306"
+    volumes:
+      - finnapigo-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot_secret"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Uncomment to run the API itself in Docker:
+  # app:
+  #   build: .
+  #   container_name: finnapigo-app
+  #   restart: unless-stopped
+  #   depends_on:
+  #     db:
+  #       condition: service_healthy
+  #   environment:
+  #     SERVER_PORT: 8081
+  #     GIN_MODE: release
+  #     DB_HOST: db
+  #     DB_PORT: 3306
+  #     DB_USER: finnapigo
+  #     DB_PASSWORD: your secret key
+  #     DB_NAME: finnapigo
+  #     JWT_SECRET: your secret key
+  #   ports:
+  #     - "8080:8080"
+
+volumes:
+  finnapigo-data:

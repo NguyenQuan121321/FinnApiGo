@@ -1,0 +1,25 @@
+# Binaries
+/finnapigo
+/bin/
+/dist/
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+thumbs.db
+
+# Go test / coverage
+*.test
+*.out
+coverage.txt
+
+# Swagger generated docs (regenerated locally)
+/docs/swagger.json
+/docs/swagger.yaml
