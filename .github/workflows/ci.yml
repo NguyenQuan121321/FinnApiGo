@@ -23,9 +23,7 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: v2.12.2
+        uses: golangci/golangci-lint-action@v7
 
       - name: Go Test
         run: go test ./... -race -cover
