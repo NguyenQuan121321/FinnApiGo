@@ -55,7 +55,7 @@ func respondError(c *gin.Context, err error) {
 	status, msg := statusForError(err)
 	if status == http.StatusInternalServerError {
 		// Log full error server-side; return generic message to client.
-		c.Error(err) // attaches to gin context for the logger middleware
+		_ = c.Error(err) // attaches to gin context for the logger middleware
 	}
 	utils.Respond(c, status, msg, nil)
 }

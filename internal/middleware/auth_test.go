@@ -59,7 +59,9 @@ func TestAuthMiddleware_RejectsResetToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 
 	var res map[string]interface{}
-	json.Unmarshal(w.Body.Bytes(), &res)
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
 	assert.Equal(t, "invalid token type", res["message"])
 }
 

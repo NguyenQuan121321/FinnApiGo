@@ -64,7 +64,7 @@ func (t *TurnstileVerifier) Verify(ctx context.Context, token string) error {
 	if err != nil {
 		return fmt.Errorf("turnstile: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		Success    bool     `json:"success"`

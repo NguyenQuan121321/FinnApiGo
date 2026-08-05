@@ -74,7 +74,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("store: connect redis: %w", err)
 		}
-		defer closeRedis()
+		defer func() { _ = closeRedis() }()
 		kvStore = redisStore
 		log.Println("store: Redis-backed (shared across instances)")
 	} else {
