@@ -1,0 +1,21 @@
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gosec
+    - depguard
+
+linters-settings:
+  depguard:
+    rules:
+      services:
+        files:
+          - "**/internal/services/**/*.go"
+        deny:
+          - pkg: "github.com/gin-gonic/gin"
+            desc: "Services must not depend on HTTP framework"

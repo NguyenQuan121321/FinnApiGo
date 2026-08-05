@@ -17,8 +17,10 @@ func newTestMFAService() (*MFAService, *mockOtpRepo, *mockUserRepo, *mockNotifie
 	notify := &mockNotifier{}
 	store := newMockStore()
 	cfg := config.AuthConfig{OTPTTL: 5 * time.Minute, OTPLength: 6, OTPMaxAttempts: 5}
+	// Generous default so existing OTP behavioral tests aren't affected by the
+	// per-user send limiter; the dedicated limiter test builds a tight service.
 	rateLimitCfg := config.RateLimitConfig{
-		OTPSendPerUserMax: 5,
+		OTPSendPerUserMax: 10000,
 		OTPSendWindow:     time.Minute,
 	}
 	svc := NewMFAService(otps, users, audit, notify, cfg, rateLimitCfg, store)

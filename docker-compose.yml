@@ -10,7 +10,7 @@ services:
       MYSQL_ROOT_PASSWORD: root_secret
       MYSQL_DATABASE: finnapigo
       MYSQL_USER: finnapigo
-      MYSQL_PASSWORD: your key
+      MYSQL_PASSWORD: finnapigo_secret
     ports:
       - "3306:3306"
     volumes:
@@ -35,9 +35,9 @@ services:
   #     DB_HOST: db
   #     DB_PORT: 3306
   #     DB_USER: finnapigo
-  #     DB_PASSWORD: your key
+  #     DB_PASSWORD: 
   #     DB_NAME: finnapigo
-  #     JWT_SECRET: your key
+  #     JWT_SECRET: 
   #   ports:
   #     - "8080:8080"
 

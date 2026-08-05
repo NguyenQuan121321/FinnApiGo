@@ -31,13 +31,13 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 	rateLimitCfg := config.RateLimitConfig{
 		RPS:                    100,
 		Burst:                  20,
-		LoginPerAccountMax:     5,
-		LoginWindow:            time.Minute,
-		RegisterPerIPMax:       10,
-		RegisterWindow:         time.Hour,
-		OTPSendPerUserMax:      5,
+		LoginPerAccountMax:     10000, // generous default so existing behavioral
+		LoginWindow:            time.Minute, // tests are unaffected by velocity
+		RegisterPerIPMax:       10000, // limiters; tight-limit tests build a
+		RegisterWindow:         time.Hour, // dedicated service.
+		OTPSendPerUserMax:      10000,
 		OTPSendWindow:          time.Minute,
-		LoginCaptchaAfterFails: 3,
+		LoginCaptchaAfterFails: 10000,
 	}
 	jwtCfg := config.JWTConfig{
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,

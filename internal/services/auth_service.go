@@ -522,18 +522,24 @@ func (s *AuthService) isLocked(user *models.User) bool {
 // recordFailedLogin increments the counter and triggers a lockout when the
 // threshold is reached. §3 — exponential backoff: repeat offenders get
 // progressively longer lockouts via MaxLockoutMultiplier, tracked in the store.
+// When MaxLockoutMultiplier <= 0 (unset/disabled), the plain base duration is
+// used with no scaling.
 func (s *AuthService) recordFailedLogin(ctx context.Context, user *models.User, email, ip string) {
 	var lockUntil *time.Time
 	if user.FailedLoginAttempts+1 >= s.cfg.MaxLoginAttempts {
 		duration := s.cfg.LoginLockoutDuration
-		if s.store != nil {
+		if s.store != nil && s.cfg.MaxLockoutMultiplier > 0 {
 			// Count how many lockouts this user has had in the last 24h.
 			lockoutKey := fmt.Sprintf("lockouts:%d", user.ID)
 			lockoutCount := s.store.IncrBy(lockoutKey, 1, 24*time.Hour)
-			// Scale: base × min(count, MaxLockoutMultiplier).
+			// Scale: base × min(count, MaxLockoutMultiplier). First lockout
+			// (count=1) → base; second → 2×base; etc., capped.
 			mult := lockoutCount
 			if int(mult) > s.cfg.MaxLockoutMultiplier {
 				mult = int64(s.cfg.MaxLockoutMultiplier)
+			}
+			if mult < 1 {
+				mult = 1
 			}
 			duration = time.Duration(int64(s.cfg.LoginLockoutDuration) * mult)
 		}

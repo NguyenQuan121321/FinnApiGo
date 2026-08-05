@@ -400,6 +400,22 @@ func (m *mockStore) Delete(key string) {
 	delete(m.data, key)
 }
 
+// ---- mock captcha verifier (§3 adaptive CAPTCHA tests) ----
+
+// mockCaptchaVerifier lets tests control whether CAPTCHA verification passes.
+// err != nil => Verify returns that error (simulating a rejected/missing token).
+type mockCaptchaVerifier struct {
+	err  error
+	calls int
+	token string
+}
+
+func (m *mockCaptchaVerifier) Verify(ctx context.Context, token string) error {
+	m.calls++
+	m.token = token
+	return m.err
+}
+
 var errNotFound = errNotFoundErr{}
 
 type errNotFoundErr struct{}

@@ -60,7 +60,9 @@ func run() error {
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
 	otpRepo := repositories.NewOtpRepository(db)
-	auditRepo := repositories.NewAuditRepository(db)
+	baseAuditRepo := repositories.NewAuditRepository(db)
+	auditRepo := services.NewAsyncAuditWriter(baseAuditRepo, baseAuditRepo, cfg.Audit)
+	defer auditRepo.Close()
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
 
 	// --- Store (in-memory default; Redis when REDIS_URL set) ---

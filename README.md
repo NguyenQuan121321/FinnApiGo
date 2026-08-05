@@ -33,7 +33,7 @@ Authentication & MFA backend written in **Go**, built as a reusable module (`han
 | Layer | Choice |
 |---|---|
 | Language | Go 1.24 |
-| HTTP framework | [Gin](https://github.com/gin-gonic/gin) |
+| HTTP framework | [Gin](https://github.com/gin-gonic/gin) v1.12 |
 | ORM / DB | [GORM](https://gorm.io) + MySQL 8 |
 | Auth tokens | [golang-jwt/jwt](https://github.com/golang-jwt/jwt) v5 |
 | Password hashing | `golang.org/x/crypto/bcrypt` |
@@ -62,17 +62,21 @@ FinnApiGo/
 ├── cmd/server/main.go          # config -> DB -> migrate -> wire dependencies -> serve
 ├── internal/
 │   ├── config/                 # env loading, typed config structs
-│   ├── database/                # GORM/MySQL connection
-│   ├── models/                   # User, RefreshToken, OtpCode, AuditLog, UsedToken
-│   ├── repositories/              # GORM-backed repos (context-aware queries only)
-│   ├── services/                   # business logic - auth, MFA, notifier, CAPTCHA
-│   ├── handlers/                    # HTTP layer: parse -> call service -> respond
-│   ├── middleware/                   # AuthMiddleware, rate limiter
-│   ├── routes/                        # route registration + request logging
-│   ├── store/                          # Store interface, in-memory + Redis implementations
-│   └── utils/                           # response envelope, JWT, hashing
-├── docker-compose.yml           # MySQL for local dev
-├── Dockerfile                    # multi-stage build, non-root runtime user
+│   ├── database/               # GORM/MySQL connection
+│   ├── models/                 # User, RefreshToken, OtpCode, AuditLog, UsedToken
+│   ├── repositories/           # GORM-backed repos (context-aware queries only)
+│   ├── services/               # business logic - auth, MFA, notifier, CAPTCHA, async audit
+│   ├── handlers/               # HTTP layer: parse -> call service -> respond
+│   ├── middleware/             # AuthMiddleware, rate limiter
+│   ├── routes/                 # route registration + request logging
+│   ├── store/                  # Store interface, in-memory + Redis implementations
+│   └── utils/                  # response envelope, JWT, hashing
+├── .github/workflows/ci.yml   # CI pipeline (vet, lint, test, build, govulncheck)
+├── .golangci.yml               # linter config (govet, staticcheck, errcheck, gosec, depguard)
+├── ARCHITECTURE.md             # extension patterns & module guide
+├── CHANGELOG.md                # all hardening changes (Keep a Changelog format)
+├── docker-compose.yml          # MySQL for local dev
+├── Dockerfile                  # multi-stage build, non-root runtime user
 └── .env.example
 ```
 
@@ -114,7 +118,7 @@ The schema (`users`, `refresh_tokens`, `otp_codes`, `audit_logs`, `used_tokens`)
 go test ./...
 ```
 
-All business logic (`internal/services`, `internal/store`, `internal/utils`) is covered by unit tests using in-memory fakes — no MySQL or Redis required to run them.
+All business logic (`internal/services`, `internal/store`, `internal/utils`, `internal/middleware`) is covered by unit tests using in-memory fakes — no MySQL or Redis required to run them. The CI pipeline (`.github/workflows/ci.yml`) runs `go test -race -cover`, `go vet`, `golangci-lint`, and `govulncheck` automatically on push and PR.
 
 ---
 
@@ -193,11 +197,10 @@ A few decisions worth knowing if you're extending this:
 - **OTPs and refresh tokens are hashed with SHA-256**, not bcrypt — they're already high-entropy random values, so bcrypt's deliberately slow KDF isn't needed (unlike user-chosen passwords, which are lower-entropy and benefit from that slowness).
 - **The `store.Store` interface is the seam for horizontal scaling.** Nothing above it knows whether counters live in a Go map or Redis — swapping is a config change (`REDIS_URL`), not a code change.
 
-## Known gaps (not yet implemented)
+## Known limitations
 
-- Async audit-log writes (currently synchronous per request — a config surface for a buffered worker exists but isn't wired yet)
-- CI pipeline (lint/vet/test-on-push), `golangci-lint` config, `govulncheck`
-- The per-IP token-bucket limiter (`internal/middleware/rate_limit.go`) stays in-memory even when Redis is configured — only the newer velocity/lockout counters are Redis-backed today
+- The per-IP token-bucket limiter (`internal/middleware/rate_limit.go`) stays in-memory even when Redis is configured — only the store-backed velocity/lockout counters are shared across instances today
+- `-race` requires `CGO_ENABLED=1` on Windows (CI runs it on Linux where cgo is available by default)
 
 ---
 
