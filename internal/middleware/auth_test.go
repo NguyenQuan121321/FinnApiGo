@@ -7,15 +7,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/finnapigo/finnapigo/internal/utils"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )
 
-func setupAuthRouter(jwt *utils.JWTManager) *gin.Engine {
+func setupAuthRouter(jwtMgr *jwt.JWTManager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(AuthMiddleware(jwt))
+	r.Use(AuthMiddleware(jwtMgr))
 	r.GET("/protected", func(c *gin.Context) {
 		userID, _ := c.Get(CtxUserID)
 		role, _ := c.Get(CtxRole)
@@ -32,10 +32,10 @@ func setupAuthRouter(jwt *utils.JWTManager) *gin.Engine {
 }
 
 func TestAuthMiddleware_AcceptsAccessToken(t *testing.T) {
-	jwt := utils.NewJWTManager("secret", "test-issuer")
-	token, _ := jwt.Issue(1, "user", "test@test.com", utils.TokenTypeAccess, time.Hour)
+	jwtMgr := jwt.NewJWTManager("secret", "test-issuer")
+	token, _ := jwtMgr.Issue(1, "user", "test@test.com", jwt.TokenTypeAccess, time.Hour)
 
-	r := setupAuthRouter(jwt)
+	r := setupAuthRouter(jwtMgr)
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -46,10 +46,10 @@ func TestAuthMiddleware_AcceptsAccessToken(t *testing.T) {
 }
 
 func TestAuthMiddleware_RejectsResetToken(t *testing.T) {
-	jwt := utils.NewJWTManager("secret", "test-issuer")
-	token, _ := jwt.Issue(1, "user", "test@test.com", utils.TokenTypeReset, time.Hour)
+	jwtMgr := jwt.NewJWTManager("secret", "test-issuer")
+	token, _ := jwtMgr.Issue(1, "user", "test@test.com", jwt.TokenTypeReset, time.Hour)
 
-	r := setupAuthRouter(jwt)
+	r := setupAuthRouter(jwtMgr)
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -66,10 +66,10 @@ func TestAuthMiddleware_RejectsResetToken(t *testing.T) {
 }
 
 func TestAuthMiddleware_RejectsVerifyEmailToken(t *testing.T) {
-	jwt := utils.NewJWTManager("secret", "test-issuer")
-	token, _ := jwt.Issue(1, "user", "test@test.com", utils.TokenTypeEmailVerify, time.Hour)
+	jwtMgr := jwt.NewJWTManager("secret", "test-issuer")
+	token, _ := jwtMgr.Issue(1, "user", "test@test.com", jwt.TokenTypeEmailVerify, time.Hour)
 
-	r := setupAuthRouter(jwt)
+	r := setupAuthRouter(jwtMgr)
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()
@@ -80,9 +80,9 @@ func TestAuthMiddleware_RejectsVerifyEmailToken(t *testing.T) {
 }
 
 func TestAuthMiddleware_RejectsMissingHeader(t *testing.T) {
-	jwt := utils.NewJWTManager("secret", "test-issuer")
+	jwtMgr := jwt.NewJWTManager("secret", "test-issuer")
 
-	r := setupAuthRouter(jwt)
+	r := setupAuthRouter(jwtMgr)
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	w := httptest.NewRecorder()
 
@@ -92,10 +92,10 @@ func TestAuthMiddleware_RejectsMissingHeader(t *testing.T) {
 }
 
 func TestAuthMiddleware_RejectsExpiredToken(t *testing.T) {
-	jwt := utils.NewJWTManager("secret", "test-issuer")
-	token, _ := jwt.Issue(1, "user", "test@test.com", utils.TokenTypeAccess, -time.Hour)
+	jwtMgr := jwt.NewJWTManager("secret", "test-issuer")
+	token, _ := jwtMgr.Issue(1, "user", "test@test.com", jwt.TokenTypeAccess, -time.Hour)
 
-	r := setupAuthRouter(jwt)
+	r := setupAuthRouter(jwtMgr)
 	req := httptest.NewRequest(http.MethodGet, "/protected", nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	w := httptest.NewRecorder()

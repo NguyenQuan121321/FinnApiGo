@@ -1,8 +1,10 @@
-package utils
+package jwt
 
 import (
 	"testing"
 	"time"
+
+	"github.com/finnapigo/finnapigo/internal/hash"
 )
 
 // TestJWT_TypeDiscrimination verifies the most important token-safety property:
@@ -44,9 +46,9 @@ func TestJWT_WrongSecretRejected(t *testing.T) {
 }
 
 func TestHashToken_DeterministicAndOpaque(t *testing.T) {
-	h1 := HashToken("abc")
-	h2 := HashToken("abc")
-	h3 := HashToken("abd")
+	h1 := hash.HashToken("abc")
+	h2 := hash.HashToken("abc")
+	h3 := hash.HashToken("abd")
 	if h1 != h2 {
 		t.Error("hash must be deterministic")
 	}
@@ -60,7 +62,7 @@ func TestHashToken_DeterministicAndOpaque(t *testing.T) {
 
 func TestGenerateNumericOTP_Length(t *testing.T) {
 	for _, n := range []int{4, 6, 8} {
-		code, err := GenerateNumericOTP(n)
+		code, err := hash.GenerateNumericOTP(n)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -9,8 +9,9 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/hash"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
-	"github.com/finnapigo/finnapigo/internal/utils"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -26,7 +27,7 @@ func buildAuthService(t *testing.T, cfg config.AuthConfig, rlCfg config.RateLimi
 	usedTokens := newMockUsedTokenRepo()
 	store := newMockStore()
 	audit := &mockAuditRepo{}
-	jwtMgr := utils.NewJWTManager("test-secret", "test-issuer")
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
 	notify := &mockNotifier{}
 	jwtCfg := config.JWTConfig{
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
@@ -328,7 +329,7 @@ func TestIsMySQLDup_UsesErrorsAs(t *testing.T) {
 // =====================================================================
 
 func mustHash(pw string) string {
-	h, err := utils.HashPassword(pw)
+	h, err := hash.HashPassword(pw)
 	if err != nil {
 		panic(err)
 	}

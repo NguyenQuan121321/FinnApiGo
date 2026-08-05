@@ -10,8 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/finnapigo/finnapigo/internal/middleware"
+	"github.com/finnapigo/finnapigo/internal/response"
 	"github.com/finnapigo/finnapigo/internal/services"
-	"github.com/finnapigo/finnapigo/internal/utils"
 )
 
 // statusForError maps a service-level sentinel error to its HTTP status code.
@@ -57,7 +57,7 @@ func respondError(c *gin.Context, err error) {
 		// Log full error server-side; return generic message to client.
 		_ = c.Error(err) // attaches to gin context for the logger middleware
 	}
-	utils.Respond(c, status, msg, nil)
+	response.Respond(c, status, msg, nil)
 }
 
 // clientIP is a thin wrapper to keep handler code readable.

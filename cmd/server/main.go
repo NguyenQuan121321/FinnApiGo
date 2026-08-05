@@ -19,13 +19,13 @@ import (
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/routes"
 	"github.com/finnapigo/finnapigo/internal/services"
 	"github.com/finnapigo/finnapigo/internal/store"
-	"github.com/finnapigo/finnapigo/internal/utils"
 )
 
 func main() {
@@ -85,7 +85,7 @@ func run() error {
 	}
 
 	// --- JWT ---
-	jwtMgr := utils.NewJWTManager(cfg.JWT.Secret, cfg.JWT.Issuer)
+	jwtMgr := jwt.NewJWTManager(cfg.JWT.Secret, cfg.JWT.Issuer)
 
 	// --- Notifier (§1.2: SMTP when configured, Console fallback) ---
 	smtpNotif := services.NewSMTPNotifier(cfg.SMTP.Host, cfg.SMTP.Port,

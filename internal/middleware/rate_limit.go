@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
-	"github.com/finnapigo/finnapigo/internal/utils"
+	"github.com/finnapigo/finnapigo/internal/response"
 )
 
 // visitor pairs a token-bucket limiter with the last time it was seen.
@@ -20,13 +20,13 @@ type visitor struct {
 // Entries that haven't been accessed in entryTTL are periodically purged,
 // bounding memory even under sustained traffic from many IPs (§1.3).
 type RateLimiter struct {
-	mu        sync.Mutex
-	visitors  map[string]*visitor
-	rps       rate.Limit
-	burst     int
-	entryTTL  time.Duration
-	stopCh    chan struct{}
-	stopped   bool
+	mu       sync.Mutex
+	visitors map[string]*visitor
+	rps      rate.Limit
+	burst    int
+	entryTTL time.Duration
+	stopCh   chan struct{}
+	stopped  bool
 }
 
 // NewRateLimiter builds a limiter with the given requests/sec, burst, and
@@ -63,7 +63,7 @@ func (rl *RateLimiter) Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		if !rl.get(ip).Allow() {
-			utils.Respond(c, 429, "too many requests, please slow down", nil)
+			response.Respond(c, 429, "too many requests, please slow down", nil)
 			c.Abort()
 			return
 		}

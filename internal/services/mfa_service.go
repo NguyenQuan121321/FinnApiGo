@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/models"
-	"github.com/finnapigo/finnapigo/internal/utils"
 )
 
 // MFAService implements OTP-based two-step verification. It is independent of
@@ -68,13 +68,13 @@ func (s *MFAService) SendOTP(ctx context.Context, in OTPSendInput, ip string) er
 		return ErrUserNotFound
 	}
 
-	code, err := utils.GenerateNumericOTP(s.cfg.OTPLength)
+	code, err := hash.GenerateNumericOTP(s.cfg.OTPLength)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrOTPIssue, err)
 	}
 	otp := &models.OtpCode{
 		UserID:    user.ID,
-		CodeHash:  utils.HashToken(code),
+		CodeHash:  hash.HashToken(code),
 		Purpose:   purpose,
 		ExpiresAt: time.Now().Add(s.cfg.OTPTTL),
 	}
@@ -111,7 +111,7 @@ func (s *MFAService) VerifyOTP(ctx context.Context, in OTPVerifyInput, ip string
 	// OTPs are stored as SHA-256 hashes (HashToken), not bcrypt. Compare the
 	// hash of the submitted code against the stored hash with a constant-time
 	// comparison to remove the timing side-channel (§1.5).
-	submitted := utils.HashToken(in.Code)
+	submitted := hash.HashToken(in.Code)
 	if subtle.ConstantTimeCompare([]byte(otp.CodeHash), []byte(submitted)) != 1 {
 		attempts, _ := s.otps.IncrementAttempts(ctx, otp)
 		if attempts >= s.cfg.OTPMaxAttempts {

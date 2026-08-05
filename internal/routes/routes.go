@@ -11,18 +11,19 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/middleware"
-	"github.com/finnapigo/finnapigo/internal/utils"
+	"github.com/finnapigo/finnapigo/internal/response"
 )
 
 // Deps bundles everything the router needs. Constructed in main.go.
 type Deps struct {
-	Auth      *handlers.AuthHandler
-	MFA       *handlers.MFAHandler
-	JWT       *utils.JWTManager
-	RateLimit *middleware.RateLimiter
-	DB        *gorm.DB // optional, for /readyz
-	MaxRequestBodyBytes int64 // §5 — global body-size cap applied BEFORE routes
+	Auth                *handlers.AuthHandler
+	MFA                 *handlers.MFAHandler
+	JWT                 *jwt.JWTManager
+	RateLimit           *middleware.RateLimiter
+	DB                  *gorm.DB // optional, for /readyz
+	MaxRequestBodyBytes int64    // §5 — global body-size cap applied BEFORE routes
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -44,27 +45,27 @@ func Register(deps Deps) *gin.Engine {
 
 	// health check — process liveness (no DB dependency).
 	r.GET("/healthz", func(c *gin.Context) {
-		utils.Respond(c, 200, "ok", gin.H{"status": "ok"})
+		response.Respond(c, 200, "ok", gin.H{"status": "ok"})
 	})
 
 	// readiness check — pings DB to confirm the app can serve requests (§7).
 	r.GET("/readyz", func(c *gin.Context) {
 		if deps.DB == nil {
-			utils.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "skipped"})
+			response.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "skipped"})
 			return
 		}
 		sqlDB, err := deps.DB.DB()
 		if err != nil {
-			utils.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
+			response.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		if err := sqlDB.PingContext(ctx); err != nil {
-			utils.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
+			response.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
 			return
 		}
-		utils.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "up"})
+		response.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "up"})
 	})
 
 	api := r.Group("/api/v1")

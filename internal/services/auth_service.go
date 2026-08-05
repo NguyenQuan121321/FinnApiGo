@@ -11,8 +11,9 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/hash"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
-	"github.com/finnapigo/finnapigo/internal/utils"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -22,7 +23,7 @@ import (
 var dummyHash string
 
 func init() {
-	h, err := utils.HashPassword("dummy-timing-equalization")
+	h, err := hash.HashPassword("dummy-timing-equalization")
 	if err != nil {
 		panic("auth: failed to generate dummy bcrypt hash: " + err.Error())
 	}
@@ -37,7 +38,7 @@ type AuthService struct {
 	usedTokens UsedTokenRepo
 	audits     AuditRepo
 	store      StoreProvider
-	jwt        *utils.JWTManager
+	jwt        *jwt.JWTManager
 	cfg        config.AuthConfig
 	rlCfg      config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
 	jwtCfg     config.JWTConfig
@@ -63,7 +64,7 @@ func NewAuthService(
 	usedTokens UsedTokenRepo,
 	audits AuditRepo,
 	store StoreProvider,
-	jwt *utils.JWTManager,
+	jwt *jwt.JWTManager,
 	authCfg config.AuthConfig,
 	rlCfg config.RateLimitConfig,
 	jwtCfg config.JWTConfig,
@@ -122,7 +123,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 		return UserProfile{}, ErrUsernameExists
 	}
 
-	hashed, err := utils.HashPassword(in.Password)
+	hashed, err := hash.HashPassword(in.Password)
 	if err != nil {
 		return UserProfile{}, err
 	}
@@ -147,7 +148,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 	// The token is NEVER returned to the client — the user must prove
 	// control of their inbox to self-verify.
 	verifyToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		utils.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL)
+		jwt.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL)
 	if err != nil {
 		return UserProfile{}, err
 	}
@@ -198,7 +199,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	// bcrypt comparison against a dummy hash so both code paths take ~equal
 	// time (~100-300ms). The error message is identical either way.
 	if user == nil {
-		utils.CheckPassword(dummyHash, in.Password)
+		hash.CheckPassword(dummyHash, in.Password)
 		s.recordLoginFailIP(ctx, ip)
 		s.audits.Record(ctx, loginFailedEvent(nil, email, ip, "unknown user"))
 		return TokenPair{}, UserProfile{}, ErrInvalidCredentials
@@ -221,7 +222,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		return TokenPair{}, UserProfile{}, ErrAccountLocked
 	}
 
-	if !utils.CheckPassword(user.Password, in.Password) {
+	if !hash.CheckPassword(user.Password, in.Password) {
 		s.recordFailedLogin(ctx, user, email, ip)
 		return TokenPair{}, UserProfile{}, ErrInvalidCredentials
 	}
@@ -247,7 +248,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 // Logout revokes the supplied refresh token (idempotent — revoking an
 // already-revoked or unknown token is not an error, to avoid leaking state).
 func (s *AuthService) Logout(ctx context.Context, refreshToken, ip string) error {
-	hash := utils.HashToken(refreshToken)
+	hash := hash.HashToken(refreshToken)
 	rt, err := s.tokens.FindByHash(ctx, hash)
 	if err != nil {
 		return fmt.Errorf("logout: find token: %w", err)
@@ -286,7 +287,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uint, ip string) err
 // Refresh validates the presented refresh token, revokes it, and issues a NEW
 // access + refresh pair (rotation). Reuse of the old token is therefore detected.
 func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip string) (TokenPair, error) {
-	hash := utils.HashToken(refreshToken)
+	hash := hash.HashToken(refreshToken)
 	rt, err := s.tokens.FindByHash(ctx, hash)
 	if err != nil {
 		return TokenPair{}, fmt.Errorf("refresh: find token: %w", err)
@@ -351,7 +352,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 		return nil
 	}
 	resetToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		utils.TokenTypeReset, s.jwtCfg.ResetTTL)
+		jwt.TokenTypeReset, s.jwtCfg.ResetTTL)
 	if err != nil {
 		return err
 	}
@@ -368,7 +369,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 // §1.8 — single-use enforcement via jti (SetNX).
 func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, ip string) error {
 	claims, err := s.jwt.Verify(in.Token)
-	if err != nil || claims.Type != utils.TokenTypeReset {
+	if err != nil || claims.Type != jwt.TokenTypeReset {
 		return ErrInvalidToken
 	}
 	if err := validatePassword(in.NewPassword); err != nil {
@@ -387,11 +388,11 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 		return ErrInvalidToken
 	}
 	if s.usedTokens != nil {
-		_, _ = s.usedTokens.MarkUsed(ctx, claims.ID, utils.TokenTypeReset,
+		_, _ = s.usedTokens.MarkUsed(ctx, claims.ID, jwt.TokenTypeReset,
 			user.ID, claims.ExpiresAt.Time)
 	}
 
-	hashed, err := utils.HashPassword(in.NewPassword)
+	hashed, err := hash.HashPassword(in.NewPassword)
 	if err != nil {
 		return err
 	}
@@ -420,13 +421,13 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 	if user == nil {
 		return ErrUserNotFound
 	}
-	if !utils.CheckPassword(user.Password, in.OldPassword) {
+	if !hash.CheckPassword(user.Password, in.OldPassword) {
 		return ErrInvalidCredentials
 	}
 	if err := validatePassword(in.NewPassword); err != nil {
 		return err
 	}
-	hashed, err := utils.HashPassword(in.NewPassword)
+	hashed, err := hash.HashPassword(in.NewPassword)
 	if err != nil {
 		return err
 	}
@@ -463,7 +464,7 @@ func (s *AuthService) Me(ctx context.Context, userID uint) (UserProfile, error) 
 // §1.8 — single-use enforcement via jti (SetNX).
 func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) error {
 	claims, err := s.jwt.Verify(in.Token)
-	if err != nil || claims.Type != utils.TokenTypeEmailVerify {
+	if err != nil || claims.Type != jwt.TokenTypeEmailVerify {
 		return ErrInvalidToken
 	}
 	user, err := s.users.FindByID(ctx, claims.UserID)
@@ -479,7 +480,7 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 		return ErrInvalidToken
 	}
 	if s.usedTokens != nil {
-		_, _ = s.usedTokens.MarkUsed(ctx, claims.ID, utils.TokenTypeEmailVerify,
+		_, _ = s.usedTokens.MarkUsed(ctx, claims.ID, jwt.TokenTypeEmailVerify,
 			user.ID, claims.ExpiresAt.Time)
 	}
 
@@ -491,17 +492,17 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 // issueTokenPair mints an access JWT + opaque refresh token (hash stored).
 func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User) (TokenPair, error) {
 	access, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		utils.TokenTypeAccess, s.jwtCfg.AccessTTL)
+		jwt.TokenTypeAccess, s.jwtCfg.AccessTTL)
 	if err != nil {
 		return TokenPair{}, err
 	}
-	refreshPlain, err := utils.GenerateOpaqueToken()
+	refreshPlain, err := hash.GenerateOpaqueToken()
 	if err != nil {
 		return TokenPair{}, err
 	}
 	rt := &models.RefreshToken{
 		UserID:    user.ID,
-		TokenHash: utils.HashToken(refreshPlain),
+		TokenHash: hash.HashToken(refreshPlain),
 		ExpiresAt: time.Now().Add(s.jwtCfg.RefreshTTL),
 	}
 	if err := s.tokens.Create(ctx, rt); err != nil {

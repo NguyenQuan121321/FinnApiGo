@@ -7,7 +7,8 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
-	"github.com/finnapigo/finnapigo/internal/utils"
+	"github.com/finnapigo/finnapigo/internal/hash"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 )
 
 // newTestAuthService builds an AuthService wired to in-memory mocks. OTP/lockout
@@ -18,7 +19,7 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 	usedTokens := newMockUsedTokenRepo()
 	store := newMockStore()
 	audit := &mockAuditRepo{}
-	jwtMgr := utils.NewJWTManager("test-secret", "test-issuer")
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
 	notify := &mockNotifier{}
 	cfg := config.AuthConfig{
 		MaxLoginAttempts:     5,
@@ -31,10 +32,10 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 	rateLimitCfg := config.RateLimitConfig{
 		RPS:                    100,
 		Burst:                  20,
-		LoginPerAccountMax:     10000, // generous default so existing behavioral
+		LoginPerAccountMax:     10000,       // generous default so existing behavioral
 		LoginWindow:            time.Minute, // tests are unaffected by velocity
-		RegisterPerIPMax:       10000, // limiters; tight-limit tests build a
-		RegisterWindow:         time.Hour, // dedicated service.
+		RegisterPerIPMax:       10000,       // limiters; tight-limit tests build a
+		RegisterWindow:         time.Hour,   // dedicated service.
 		OTPSendPerUserMax:      10000,
 		OTPSendWindow:          time.Minute,
 		LoginCaptchaAfterFails: 10000,
@@ -72,7 +73,7 @@ func TestRegister_Success(t *testing.T) {
 	if u.Password == "Password1" {
 		t.Error("password must be hashed, not stored in plaintext")
 	}
-	if !utils.CheckPassword(u.Password, "Password1") {
+	if !hash.CheckPassword(u.Password, "Password1") {
 		t.Error("hashed password does not verify")
 	}
 }
@@ -325,7 +326,7 @@ func TestResetPassword_EndToEnd(t *testing.T) {
 		t.Fatalf("reset failed: %v", err)
 	}
 	u, _ := users.FindByEmail(context.Background(), "alice@example.com")
-	if !utils.CheckPassword(u.Password, "NewPassword2") {
+	if !hash.CheckPassword(u.Password, "NewPassword2") {
 		t.Error("new password did not take effect")
 	}
 }
@@ -376,7 +377,7 @@ func TestChangePassword_RequiresCorrectOldPassword(t *testing.T) {
 		t.Fatalf("change failed: %v", err)
 	}
 	u, _ := users.FindByID(context.Background(), uid)
-	if !utils.CheckPassword(u.Password, "NewPassword2") {
+	if !hash.CheckPassword(u.Password, "NewPassword2") {
 		t.Error("password not updated")
 	}
 }
@@ -409,8 +410,8 @@ func TestVerifyEmail_RejectsAccessToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jwtMgr := utils.NewJWTManager("test-secret", "test-issuer")
-	access, _ := jwtMgr.Issue(profile.ID, "user", profile.Email, utils.TokenTypeAccess, time.Minute)
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	access, _ := jwtMgr.Issue(profile.ID, "user", profile.Email, jwt.TokenTypeAccess, time.Minute)
 	err = svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: access})
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken when passing an access token, got %v", err)

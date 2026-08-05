@@ -7,7 +7,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/finnapigo/finnapigo/internal/utils"
+	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/response"
 )
 
 // Context keys for values set by AuthMiddleware.
@@ -20,29 +21,29 @@ const (
 // AuthMiddleware verifies the Bearer JWT from the Authorization header.
 // On success it stores user_id / role / email into the Gin context for
 // downstream handlers. On failure it short-circuits with 401.
-func AuthMiddleware(jwt *utils.JWTManager) gin.HandlerFunc {
+func AuthMiddleware(jwtMgr *jwt.JWTManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
-			utils.Respond(c, 401, "missing authorization header", nil)
+			response.Respond(c, 401, "missing authorization header", nil)
 			c.Abort()
 			return
 		}
 		parts := strings.SplitN(header, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
-			utils.Respond(c, 401, "invalid authorization header format", nil)
+			response.Respond(c, 401, "invalid authorization header format", nil)
 			c.Abort()
 			return
 		}
-		claims, err := jwt.Verify(parts[1])
+		claims, err := jwtMgr.Verify(parts[1])
 		if err != nil {
-			utils.Respond(c, 401, "invalid or expired token", nil)
+			response.Respond(c, 401, "invalid or expired token", nil)
 			c.Abort()
 			return
 		}
 		// Only genuine access tokens are accepted on protected endpoints.
-		if claims.Type != utils.TokenTypeAccess {
-			utils.Respond(c, 401, "invalid token type", nil)
+		if claims.Type != jwt.TokenTypeAccess {
+			response.Respond(c, 401, "invalid token type", nil)
 			c.Abort()
 			return
 		}
@@ -63,13 +64,13 @@ func RequireRole(roles ...string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		role, exists := c.Get(CtxRole)
 		if !exists {
-			utils.Respond(c, 401, "authentication required", nil)
+			response.Respond(c, 401, "authentication required", nil)
 			c.Abort()
 			return
 		}
 		roleStr, _ := role.(string)
 		if _, ok := allowed[roleStr]; !ok {
-			utils.Respond(c, 403, "insufficient permissions", nil)
+			response.Respond(c, 403, "insufficient permissions", nil)
 			c.Abort()
 			return
 		}
