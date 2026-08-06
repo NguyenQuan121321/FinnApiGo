@@ -78,6 +78,7 @@ func Register(deps Deps) *gin.Engine {
 	auth.POST("/forgot-password", deps.RateLimit.Handler(), deps.Auth.ForgotPassword)
 	auth.POST("/reset-password", deps.Auth.ResetPassword)
 	auth.POST("/verify-email", deps.Auth.VerifyEmail)
+	auth.POST("/resend-verification", deps.RateLimit.Handler(), deps.Auth.ResendVerifyEmail)
 
 	// ---- Authenticated core-auth endpoints ----
 	authed := auth.Group("")

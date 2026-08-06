@@ -362,6 +362,52 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 	return nil
 }
 
+// ----- 5b. Resend verification email -----
+
+// ResendVerifyEmail issues a fresh type=verify-email JWT and delivers it via
+// the notifier. It NEVER reveals whether the email exists or is already
+// verified — it returns nil for unknown or already-verified users so the
+// handler can emit an identical message. The only error surfaced is
+// ErrRateLimited; transient notifier failures are wrapped and returned so the
+// handler still sees a distinct (non-enumeration-leaking) value.
+func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+
+	// §3 — per-email resend throttle: stops an attacker email-bombing one
+	// inbox by rotating IPs (the per-IP middleware limiter alone is not
+	// enough). Uses the store so the limit is shared across instances.
+	if s.store != nil && email != "" {
+		key := "verify:resend:" + email
+		count := s.store.IncrBy(key, 1, s.rlCfg.VerifyResendWindow)
+		if count > int64(s.rlCfg.VerifyResendPerEmailMax) {
+			return ErrRateLimited
+		}
+	}
+
+	user, err := s.users.FindByEmail(ctx, email)
+	if err != nil {
+		return fmt.Errorf("resend-verify: find user: %w", err)
+	}
+	// Anti-enumeration: unknown email -> nil (handler emits the same message).
+	if user == nil {
+		return nil
+	}
+	// Already verified -> no-op (no redundant email), still nil.
+	if user.IsEmailVerified {
+		return nil
+	}
+
+	verifyToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
+		jwt.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL)
+	if err != nil {
+		return err
+	}
+	if err := s.notify.SendEmailVerification(user.Email, verifyToken); err != nil {
+		return fmt.Errorf("resend-verify: send: %w", err)
+	}
+	return nil
+}
+
 // ----- 6. Reset password -----
 
 // ResetPassword verifies the reset JWT and sets the new password. The JWT

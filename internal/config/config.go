@@ -82,6 +82,10 @@ type RateLimitConfig struct {
 	// OTP send limiter per user (§5).
 	OTPSendPerUserMax int
 	OTPSendWindow     time.Duration
+	// Verify-email resend limiter per email (§3): stops an attacker
+	// email-bombing one inbox by rotating IPs. Mirrors OTPSendPerUserMax.
+	VerifyResendPerEmailMax int
+	VerifyResendWindow      time.Duration
 	// After this many failed logins from one IP, require a CAPTCHA (§3).
 	LoginCaptchaAfterFails int
 }
@@ -166,15 +170,17 @@ func Load() (*Config, error) {
 			RequireEmailVerified:  envBool("REQUIRE_EMAIL_VERIFIED", false),
 		},
 		RateLimit: RateLimitConfig{
-			RPS:                   envFloat("RATE_LIMIT_RPS", 5),
-			Burst:                 envInt("RATE_LIMIT_BURST", 10),
-			LoginPerAccountMax:    envInt("LOGIN_PER_ACCOUNT_MAX", 10),
-			LoginWindow:           envDuration("LOGIN_WINDOW", 1*time.Minute),
-			RegisterPerIPMax:      envInt("REGISTER_PER_IP_MAX", 5),
-			RegisterWindow:        envDuration("REGISTER_WINDOW", 1*time.Hour),
-			OTPSendPerUserMax:     envInt("OTP_SEND_PER_USER_MAX", 5),
-			OTPSendWindow:         envDuration("OTP_SEND_WINDOW", 1*time.Hour),
-			LoginCaptchaAfterFails: envInt("LOGIN_CAPTCHA_AFTER_FAILS", 5),
+			RPS:                     envFloat("RATE_LIMIT_RPS", 5),
+			Burst:                   envInt("RATE_LIMIT_BURST", 10),
+			LoginPerAccountMax:      envInt("LOGIN_PER_ACCOUNT_MAX", 10),
+			LoginWindow:             envDuration("LOGIN_WINDOW", 1*time.Minute),
+			RegisterPerIPMax:        envInt("REGISTER_PER_IP_MAX", 5),
+			RegisterWindow:          envDuration("REGISTER_WINDOW", 1*time.Hour),
+			OTPSendPerUserMax:       envInt("OTP_SEND_PER_USER_MAX", 5),
+			OTPSendWindow:           envDuration("OTP_SEND_WINDOW", 1*time.Hour),
+			VerifyResendPerEmailMax: envInt("VERIFY_RESEND_PER_EMAIL_MAX", 3),
+			VerifyResendWindow:      envDuration("VERIFY_RESEND_WINDOW", 1*time.Hour),
+			LoginCaptchaAfterFails:  envInt("LOGIN_CAPTCHA_AFTER_FAILS", 5),
 		},
 		SMTP: SMTPConfig{
 			Host:     env("SMTP_HOST", ""),

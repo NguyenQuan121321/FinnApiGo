@@ -53,6 +53,10 @@ type VerifyEmailRequest struct {
 	Token string `json:"token" binding:"required"`
 }
 
+type ResendVerifyEmailRequest struct {
+	Email string `json:"email" binding:"required,email,max=255"`
+}
+
 type OTPSendRequest struct {
 	Purpose string `json:"purpose" binding:"required"`
 }

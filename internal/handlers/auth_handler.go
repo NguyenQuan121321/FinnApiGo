@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -188,4 +189,22 @@ func (h *AuthHandler) VerifyEmail(c *gin.Context) {
 		return
 	}
 	response.Respond(c, http.StatusOK, "email verified", nil)
+}
+
+func (h *AuthHandler) ResendVerifyEmail(c *gin.Context) {
+	var req ResendVerifyEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+	err := h.svc.ResendVerifyEmail(c.Request.Context(), req.Email, clientIP(c))
+	// Only the per-email rate limit is surfaced (lets a legitimate client back
+	// off). Every other outcome — unknown email, already verified, transient
+	// notifier failure — returns the identical message so the endpoint never
+	// reveals whether the email exists (OWASP ASVS V3.2 anti-enumeration).
+	if err != nil && errors.Is(err, services.ErrRateLimited) {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "if the email exists, a verification link has been sent", nil)
 }

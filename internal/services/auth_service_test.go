@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,15 +31,17 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 	}
 
 	rateLimitCfg := config.RateLimitConfig{
-		RPS:                    100,
-		Burst:                  20,
-		LoginPerAccountMax:     10000,       // generous default so existing behavioral
-		LoginWindow:            time.Minute, // tests are unaffected by velocity
-		RegisterPerIPMax:       10000,       // limiters; tight-limit tests build a
-		RegisterWindow:         time.Hour,   // dedicated service.
-		OTPSendPerUserMax:      10000,
-		OTPSendWindow:          time.Minute,
-		LoginCaptchaAfterFails: 10000,
+		RPS:                     100,
+		Burst:                   20,
+		LoginPerAccountMax:      10000,       // generous default so existing behavioral
+		LoginWindow:             time.Minute, // tests are unaffected by velocity
+		RegisterPerIPMax:        10000,       // limiters; tight-limit tests build a
+		RegisterWindow:          time.Hour,   // dedicated service.
+		OTPSendPerUserMax:       10000,
+		OTPSendWindow:           time.Minute,
+		VerifyResendPerEmailMax: 10000,
+		VerifyResendWindow:      time.Minute,
+		LoginCaptchaAfterFails:  10000,
 	}
 	jwtCfg := config.JWTConfig{
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
@@ -433,6 +436,118 @@ func TestVerifyEmail_SingleUseToken(t *testing.T) {
 	err := svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: verifyToken})
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken on replay, got %v", err)
+	}
+}
+
+// ----- Resend verification email -----
+
+func TestResendVerifyEmail_SendsFreshToken(t *testing.T) {
+	svc, _, _, _, notify := newTestAuthService()
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	firstToken := notify.lastVerify
+	if firstToken == "" {
+		t.Fatal("register should have sent a verification token")
+	}
+
+	if err := svc.ResendVerifyEmail(context.Background(), "alice@example.com", "ip"); err != nil {
+		t.Fatalf("resend failed: %v", err)
+	}
+	secondToken := notify.lastVerify
+	if secondToken == "" || secondToken == firstToken {
+		t.Fatal("resend should issue a distinct fresh token")
+	}
+
+	// The fresh token must be consumable by VerifyEmail (round-trips to verified).
+	if err := svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: secondToken}); err != nil {
+		t.Fatalf("verify with resent token failed: %v", err)
+	}
+}
+
+func TestResendVerifyEmail_UnknownEmailReturnsNil(t *testing.T) {
+	svc, _, _, _, notify := newTestAuthService()
+	if err := svc.ResendVerifyEmail(context.Background(), "ghost@example.com", "ip"); err != nil {
+		t.Errorf("unknown email must not error (anti-enumeration), got %v", err)
+	}
+	if notify.lastVerify != "" {
+		t.Error("no verification token should be generated for an unknown email")
+	}
+}
+
+func TestResendVerifyEmail_AlreadyVerifiedIsNoOp(t *testing.T) {
+	svc, _, _, _, notify := newTestAuthService()
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Consume the registration token to mark the account verified.
+	if err := svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: notify.lastVerify}); err != nil {
+		t.Fatal(err)
+	}
+	notify.lastVerify = "" // reset so we can detect a new send
+
+	if err := svc.ResendVerifyEmail(context.Background(), "alice@example.com", "ip"); err != nil {
+		t.Fatalf("resend for a verified account should be a no-op (nil), got %v", err)
+	}
+	if notify.lastVerify != "" {
+		t.Error("no verification email should be sent for an already-verified account")
+	}
+}
+
+func TestResendVerifyEmail_RateLimited(t *testing.T) {
+	users := newMockUserRepo()
+	tokens := newMockTokenRepo()
+	usedTokens := newMockUsedTokenRepo()
+	store := newMockStore()
+	audit := &mockAuditRepo{}
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	notify := &mockNotifier{}
+	rlCfg := config.RateLimitConfig{
+		VerifyResendPerEmailMax: 1, // tight limit
+		VerifyResendWindow:      time.Minute,
+	}
+	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr,
+		config.AuthConfig{OTPLength: 6}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil)
+
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// First resend within the limit.
+	if err := svc.ResendVerifyEmail(context.Background(), "alice@example.com", "ip"); err != nil {
+		t.Fatalf("first resend should succeed, got %v", err)
+	}
+	// Second resend must be throttled.
+	err := svc.ResendVerifyEmail(context.Background(), "alice@example.com", "ip")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("expected ErrRateLimited on second resend, got %v", err)
+	}
+}
+
+func TestResendVerifyEmail_NotifierErrorPropagates(t *testing.T) {
+	svc, _, _, _, notify := newTestAuthService()
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	notify.verifySendErr = errors.New("smtp down")
+
+	err := svc.ResendVerifyEmail(context.Background(), "alice@example.com", "ip")
+	if err == nil {
+		t.Fatal("expected an error when the notifier fails")
+	}
+	if errors.Is(err, ErrRateLimited) {
+		t.Errorf("notifier failure must not be masked as ErrRateLimited, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "resend-verify") {
+		t.Errorf("expected wrapped resend-verify error, got %v", err)
 	}
 }
 
