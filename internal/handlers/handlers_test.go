@@ -49,6 +49,16 @@ func (f fakeMFAService) VerifyOTP(context.Context, services.OTPVerifyInput, stri
 	return f.err
 }
 
+type fakeTOTPService struct{ err error }
+
+func (f fakeTOTPService) Enable(context.Context, uint, string) (string, string, error) {
+	return "secret", "otpauth://test", f.err
+}
+func (f fakeTOTPService) VerifyEnable(context.Context, uint, string) ([]string, error) {
+	return []string{"backup"}, f.err
+}
+func (f fakeTOTPService) Validate(context.Context, uint, string) error { return f.err }
+
 func serve(t *testing.T, h gin.HandlerFunc, body string, userID *uint) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -131,6 +141,29 @@ func TestMFAHandlerBoundaryCases(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := serve(t, NewMFAHandler(fakeMFAService{err: tc.err}).SendOTP, tc.body, &uid)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestTOTPHandlers(t *testing.T) {
+	uid := uint(1)
+	for _, tc := range []struct {
+		name, body string
+		err        error
+		want       int
+		handler    func(*MFAHandler) gin.HandlerFunc
+	}{
+		{"enable", "", nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.EnableTOTP }},
+		{"verify malformed", "{", nil, 400, func(h *MFAHandler) gin.HandlerFunc { return h.VerifyTOTP }},
+		{"verify invalid", `{"code":"123456"}`, services.ErrInvalidOTP, 401, func(h *MFAHandler) gin.HandlerFunc { return h.VerifyTOTP }},
+		{"validate", `{"code":"123456"}`, nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.ValidateTOTP }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: tc.err})
+			w := serve(t, tc.handler(h), tc.body, &uid)
 			if w.Code != tc.want {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 			}

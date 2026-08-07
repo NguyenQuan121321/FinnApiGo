@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -17,12 +18,74 @@ type MFAService interface {
 	VerifyOTP(context.Context, services.OTPVerifyInput, string) error
 }
 
-type MFAHandler struct {
-	svc MFAService
+type TOTPService interface {
+	Enable(context.Context, uint, string) (string, string, error)
+	VerifyEnable(context.Context, uint, string) ([]string, error)
+	Validate(context.Context, uint, string) error
 }
 
-func NewMFAHandler(svc MFAService) *MFAHandler {
-	return &MFAHandler{svc: svc}
+type MFAHandler struct {
+	svc  MFAService
+	totp TOTPService
+}
+
+func NewMFAHandler(svc MFAService, totp ...TOTPService) *MFAHandler {
+	h := &MFAHandler{svc: svc}
+	if len(totp) > 0 {
+		h.totp = totp[0]
+	}
+	return h
+}
+
+func (h *MFAHandler) EnableTOTP(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok || h.totp == nil {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	secret, uri, err := h.totp.Enable(c.Request.Context(), uid, fmt.Sprintf("user-%d", uid))
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "TOTP enrollment pending verification", gin.H{"secret": secret, "provisioningURI": uri})
+}
+
+func (h *MFAHandler) VerifyTOTP(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok || h.totp == nil {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req TOTPCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+	codes, err := h.totp.VerifyEnable(c.Request.Context(), uid, req.Code)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "TOTP enabled", gin.H{"recoveryCodes": codes})
+}
+
+func (h *MFAHandler) ValidateTOTP(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok || h.totp == nil {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req TOTPCodeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+	if err := h.totp.Validate(c.Request.Context(), uid, req.Code); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "TOTP validated", nil)
 }
 
 func (h *MFAHandler) SendOTP(c *gin.Context) {

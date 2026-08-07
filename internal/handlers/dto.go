@@ -65,6 +65,9 @@ type OTPVerifyRequest struct {
 	Code    string `json:"code" binding:"required,len=6"`
 	Purpose string `json:"purpose" binding:"required"`
 }
+type TOTPCodeRequest struct {
+	Code string `json:"code" binding:"required,min=6,max=128"`
+}
 
 // ---- response payloads ----
 

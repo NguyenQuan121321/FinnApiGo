@@ -92,6 +92,9 @@ func Register(deps Deps) *gin.Engine {
 	mfa := authed.Group("/mfa")
 	mfa.POST("/send-otp", deps.RateLimit.Handler(), deps.MFA.SendOTP)
 	mfa.POST("/verify-otp", deps.MFA.VerifyOTP)
+	mfa.POST("/totp/enable", deps.MFA.EnableTOTP)
+	mfa.POST("/totp/verify", deps.MFA.VerifyTOTP)
+	mfa.POST("/totp/validate", deps.MFA.ValidateTOTP)
 
 	return r
 }
