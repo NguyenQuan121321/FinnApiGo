@@ -12,12 +12,26 @@ import (
 )
 
 // AuthHandler exposes the core-auth endpoints under /api/v1/auth.
+type AuthService interface {
+	Register(context.Context, services.RegisterInput) (services.UserProfile, error)
+	Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, error)
+	Logout(context.Context, string, string) error
+	LogoutAll(context.Context, uint, string) error
+	Refresh(context.Context, string, string) (services.TokenPair, error)
+	ForgotPassword(context.Context, string, string) error
+	ResetPassword(context.Context, services.ResetPasswordInput, string) error
+	ChangePassword(context.Context, services.ChangePasswordInput, string) error
+	Me(context.Context, uint) (services.UserProfile, error)
+	VerifyEmail(context.Context, services.EmailVerifyInput) error
+	ResendVerifyEmail(context.Context, string, string) error
+}
+
 type AuthHandler struct {
-	svc     *services.AuthService
+	svc     AuthService
 	captcha services.CaptchaVerifier // §2 — nil-safe (NoOpVerifier when off)
 }
 
-func NewAuthHandler(svc *services.AuthService, captcha services.CaptchaVerifier) *AuthHandler {
+func NewAuthHandler(svc AuthService, captcha services.CaptchaVerifier) *AuthHandler {
 	if captcha == nil {
 		captcha = noOpCaptcha{}
 	}
@@ -50,10 +64,10 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-		profile, err := h.svc.Register(c.Request.Context(), services.RegisterInput{
-			Username: req.Username, Email: req.Email, Password: req.Password, FullName: req.FullName,
-			IP: clientIP(c),
-		})
+	profile, err := h.svc.Register(c.Request.Context(), services.RegisterInput{
+		Username: req.Username, Email: req.Email, Password: req.Password, FullName: req.FullName,
+		IP: clientIP(c),
+	})
 	if err != nil {
 		respondError(c, err)
 		return
@@ -68,9 +82,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-		pair, profile, err := h.svc.Login(c.Request.Context(), services.LoginInput{
-			Email: req.Email, Password: req.Password, CaptchaToken: req.CaptchaToken,
-		}, clientIP(c), c.Request.UserAgent())
+	pair, profile, err := h.svc.Login(c.Request.Context(), services.LoginInput{
+		Email: req.Email, Password: req.Password, CaptchaToken: req.CaptchaToken,
+	}, clientIP(c), c.Request.UserAgent())
 	if err != nil {
 		respondError(c, err)
 		return
@@ -125,7 +139,7 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 		return
 	}
 	_ = h.svc.ForgotPassword(c.Request.Context(), req.Email, clientIP(c))
-	
+
 	response.Respond(c, http.StatusOK, "if the email exists, a reset link has been sent", nil)
 }
 
@@ -198,8 +212,8 @@ func (h *AuthHandler) ResendVerifyEmail(c *gin.Context) {
 		return
 	}
 	err := h.svc.ResendVerifyEmail(c.Request.Context(), req.Email, clientIP(c))
-	// Only the per-email rate limit is surfaced (lets a legitimate client back
-	// off). Every other outcome — unknown email, already verified, transient
+	// Any resend rate limit is surfaced (lets a legitimate client back off).
+	// Every other outcome — unknown email, already verified, transient
 	// notifier failure — returns the identical message so the endpoint never
 	// reveals whether the email exists (OWASP ASVS V3.2 anti-enumeration).
 	if err != nil && errors.Is(err, services.ErrRateLimited) {

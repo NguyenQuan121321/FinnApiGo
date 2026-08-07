@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -11,11 +12,16 @@ import (
 )
 
 // MFAHandler exposes the OTP endpoints under /api/v1/auth/mfa.
-type MFAHandler struct {
-	svc *services.MFAService
+type MFAService interface {
+	SendOTP(context.Context, services.OTPSendInput, string) error
+	VerifyOTP(context.Context, services.OTPVerifyInput, string) error
 }
 
-func NewMFAHandler(svc *services.MFAService) *MFAHandler {
+type MFAHandler struct {
+	svc MFAService
+}
+
+func NewMFAHandler(svc MFAService) *MFAHandler {
 	return &MFAHandler{svc: svc}
 }
 

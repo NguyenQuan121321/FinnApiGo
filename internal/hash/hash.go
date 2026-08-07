@@ -10,9 +10,17 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// MaxPasswordBytes is bcrypt's maximum accepted password size. Enforcing it
+// prevents silent truncation, which could otherwise let distinct passwords
+// authenticate as the same credential.
+const MaxPasswordBytes = 72
+
 // HashPassword returns a bcrypt hash of the plaintext password.
 // Use this at registration / password change / reset.
 func HashPassword(plain string) (string, error) {
+	if len(plain) > MaxPasswordBytes {
+		return "", fmt.Errorf("hash password: exceeds bcrypt limit of %d bytes", MaxPasswordBytes)
+	}
 	hashed, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
 	if err != nil {
 		return "", fmt.Errorf("hash password: %w", err)
@@ -22,6 +30,9 @@ func HashPassword(plain string) (string, error) {
 
 // CheckPassword reports whether plain matches the stored bcrypt hash.
 func CheckPassword(hash, plain string) bool {
+	if len(plain) > MaxPasswordBytes {
+		return false
+	}
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 

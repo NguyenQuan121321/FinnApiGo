@@ -26,7 +26,7 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port   string
+	Port    string
 	GinMode string
 }
 
@@ -48,8 +48,8 @@ func (d DBConfig) DSN() string {
 }
 
 type JWTConfig struct {
-	Secret  string
-	Issuer  string
+	Secret     string
+	Issuer     string
 	AccessTTL  time.Duration
 	RefreshTTL time.Duration
 	ResetTTL   time.Duration
@@ -86,6 +86,16 @@ type RateLimitConfig struct {
 	// email-bombing one inbox by rotating IPs. Mirrors OTPSendPerUserMax.
 	VerifyResendPerEmailMax int
 	VerifyResendWindow      time.Duration
+	// Global resend volume cap (§7.6.3 anti-automation): hard circuit-breaker on
+	// total resends across ALL emails+IPs. Stops industrial-scale flooding that
+	// defeats per-key limits (botnet rotating both IPs and emails). Shared
+	// across instances via the store.
+	VerifyResendGlobalMax    int
+	VerifyResendGlobalWindow time.Duration
+	// Per-IP service-layer resend throttle (§7.6.3): store-backed so it is
+	// shared across instances, unlike the in-process middleware limiter.
+	VerifyResendPerIPMax    int
+	VerifyResendPerIPWindow time.Duration
 	// After this many failed logins from one IP, require a CAPTCHA (§3).
 	LoginCaptchaAfterFails int
 }
@@ -109,7 +119,8 @@ type RedisConfig struct {
 type SecurityConfig struct {
 	// MaxRequestBodyBytes caps every request body (§5) to prevent large-payload DoS.
 	MaxRequestBodyBytes int64
-	// MaxPasswordLength caps password length before bcrypt (§5).
+	// MaxPasswordLength is retained for deployment compatibility. Password
+	// validation enforces bcrypt's 72-byte hard limit in the service layer.
 	MaxPasswordLength int
 	// RateLimiterEntryTTL bounds the per-IP rate-limiter map (§1.3).
 	RateLimiterEntryTTL time.Duration
@@ -161,26 +172,30 @@ func Load() (*Config, error) {
 			VerifyTTL:  envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
 		},
 		Auth: AuthConfig{
-			MaxLoginAttempts:      envInt("MAX_LOGIN_ATTEMPTS", 5),
-			LoginLockoutDuration:  envDuration("LOGIN_LOCKOUT_DURATION", 15*time.Minute),
-			MaxLockoutMultiplier:  envInt("MAX_LOCKOUT_MULTIPLIER", 4),
-			OTPTTL:                envDuration("OTP_TTL", 5*time.Minute),
-			OTPLength:             envInt("OTP_LENGTH", 6),
-			OTPMaxAttempts:        envInt("OTP_MAX_ATTEMPTS", 5),
-			RequireEmailVerified:  envBool("REQUIRE_EMAIL_VERIFIED", false),
+			MaxLoginAttempts:     envInt("MAX_LOGIN_ATTEMPTS", 5),
+			LoginLockoutDuration: envDuration("LOGIN_LOCKOUT_DURATION", 15*time.Minute),
+			MaxLockoutMultiplier: envInt("MAX_LOCKOUT_MULTIPLIER", 4),
+			OTPTTL:               envDuration("OTP_TTL", 5*time.Minute),
+			OTPLength:            envInt("OTP_LENGTH", 6),
+			OTPMaxAttempts:       envInt("OTP_MAX_ATTEMPTS", 5),
+			RequireEmailVerified: envBool("REQUIRE_EMAIL_VERIFIED", false),
 		},
 		RateLimit: RateLimitConfig{
-			RPS:                     envFloat("RATE_LIMIT_RPS", 5),
-			Burst:                   envInt("RATE_LIMIT_BURST", 10),
-			LoginPerAccountMax:      envInt("LOGIN_PER_ACCOUNT_MAX", 10),
-			LoginWindow:             envDuration("LOGIN_WINDOW", 1*time.Minute),
-			RegisterPerIPMax:        envInt("REGISTER_PER_IP_MAX", 5),
-			RegisterWindow:          envDuration("REGISTER_WINDOW", 1*time.Hour),
-			OTPSendPerUserMax:       envInt("OTP_SEND_PER_USER_MAX", 5),
-			OTPSendWindow:           envDuration("OTP_SEND_WINDOW", 1*time.Hour),
-			VerifyResendPerEmailMax: envInt("VERIFY_RESEND_PER_EMAIL_MAX", 3),
-			VerifyResendWindow:      envDuration("VERIFY_RESEND_WINDOW", 1*time.Hour),
-			LoginCaptchaAfterFails:  envInt("LOGIN_CAPTCHA_AFTER_FAILS", 5),
+			RPS:                      envFloat("RATE_LIMIT_RPS", 5),
+			Burst:                    envInt("RATE_LIMIT_BURST", 10),
+			LoginPerAccountMax:       envInt("LOGIN_PER_ACCOUNT_MAX", 10),
+			LoginWindow:              envDuration("LOGIN_WINDOW", 1*time.Minute),
+			RegisterPerIPMax:         envInt("REGISTER_PER_IP_MAX", 5),
+			RegisterWindow:           envDuration("REGISTER_WINDOW", 1*time.Hour),
+			OTPSendPerUserMax:        envInt("OTP_SEND_PER_USER_MAX", 5),
+			OTPSendWindow:            envDuration("OTP_SEND_WINDOW", 1*time.Hour),
+			VerifyResendPerEmailMax:  envInt("VERIFY_RESEND_PER_EMAIL_MAX", 3),
+			VerifyResendWindow:       envDuration("VERIFY_RESEND_WINDOW", 1*time.Hour),
+			VerifyResendGlobalMax:    envInt("VERIFY_RESEND_GLOBAL_MAX", 100),
+			VerifyResendGlobalWindow: envDuration("VERIFY_RESEND_GLOBAL_WINDOW", 1*time.Hour),
+			VerifyResendPerIPMax:     envInt("VERIFY_RESEND_PER_IP_MAX", 5),
+			VerifyResendPerIPWindow:  envDuration("VERIFY_RESEND_PER_IP_WINDOW", 1*time.Hour),
+			LoginCaptchaAfterFails:   envInt("LOGIN_CAPTCHA_AFTER_FAILS", 5),
 		},
 		SMTP: SMTPConfig{
 			Host:     env("SMTP_HOST", ""),
@@ -193,9 +208,9 @@ func Load() (*Config, error) {
 			URL: env("REDIS_URL", ""),
 		},
 		Security: SecurityConfig{
-			MaxRequestBodyBytes:  envInt64("MAX_REQUEST_BODY_BYTES", 1<<20), // 1 MiB
-			MaxPasswordLength:    envInt("MAX_PASSWORD_LENGTH", 128),
-			RateLimiterEntryTTL:  envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
+			MaxRequestBodyBytes: envInt64("MAX_REQUEST_BODY_BYTES", 1<<20), // 1 MiB
+			MaxPasswordLength:   envInt("MAX_PASSWORD_LENGTH", 72),
+			RateLimiterEntryTTL: envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
 		},
 		Captcha: CaptchaConfig{
 			Provider: env("CAPTCHA_PROVIDER", ""),

@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6] - 2026-08-07
+
+### Security
+- Added shared global and per-IP verification-email resend circuit breakers, alongside the existing per-email cap; blocked abuse is audited.
+- Reject passwords above bcrypt's 72-byte limit during hashing and comparison, preventing credential confusion from bcrypt truncation.
+- Added HTTP tests for malformed input, sentinel-error status mapping, protected-route missing-identity handling, response envelopes, and request-log redaction.
+
+### Quality
+- Added tests for hash primitives, configuration loading/defaults, response envelopes, handlers, route wiring, and all GORM repositories.
+- Repository tests use per-test in-memory SQLite databases; MySQL error-code-specific duplicate mapping remains covered at the service boundary.
+- Added the pure-Go `github.com/glebarez/sqlite` test dependency; no CGO runtime dependency was added.
+
 ## [1.5] - 2026-08-05
 
 ### Security
@@ -59,4 +71,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Notes
 - The per-IP token-bucket limiter (`internal/middleware/rate_limit.go`) stays in-memory even when Redis is configured — only the newer velocity/lockout counters are Redis-backed
-

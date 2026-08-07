@@ -17,6 +17,7 @@ Authentication & MFA backend written in **Go**, built as a reusable module (`han
   - Timing-safe comparisons for OTP verification; login response time is equalized for unknown vs. wrong-password accounts to resist enumeration
   - Account lockout after repeated failed logins, with optional exponential backoff for repeat offenders
   - Per-IP **and** per-account rate limiting on login; per-IP registration velocity limiting; per-user OTP send limiting
+  - Verification-email resend protection with per-email, shared per-IP, and shared global circuit-breaker limits; blocked abuse is audited
   - Optional CAPTCHA (Cloudflare Turnstile) on registration and adaptively after repeated login failures
   - Disposable-email domain blocking and a honeypot field on registration
   - Global request body-size cap
@@ -32,8 +33,8 @@ Authentication & MFA backend written in **Go**, built as a reusable module (`han
 
 | Layer | Choice |
 |---|---|
-| Language | Go 1.24 |
-| HTTP framework | [Gin](https://github.com/gin-gonic/gin) v1.12 |
+| Language | Go 1.25 |
+| HTTP framework | [Gin](https://github.com/gin-gonic/gin) v1.10.1 |
 | ORM / DB | [GORM](https://gorm.io) + MySQL 8 |
 | Auth tokens | [golang-jwt/jwt](https://github.com/golang-jwt/jwt) v5 |
 | Password hashing | `golang.org/x/crypto/bcrypt` |
@@ -70,7 +71,9 @@ FinnApiGo/
 │   ├── middleware/             # AuthMiddleware, rate limiter
 │   ├── routes/                 # route registration + request logging
 │   ├── store/                  # Store interface, in-memory + Redis implementations
-│   └── utils/                  # response envelope, JWT, hashing
+│   ├── hash/                   # bcrypt password and SHA-256 token primitives
+│   ├── jwt/                    # JWT issuance and verification
+│   └── response/               # HTTP response envelope
 ├── .github/workflows/ci.yml   # CI pipeline (vet, lint, test, build, govulncheck)
 ├── .golangci.yml               # linter config (govet, staticcheck, errcheck, gosec, depguard)
 ├── ARCHITECTURE.md             # extension patterns & module guide
@@ -118,7 +121,7 @@ The schema (`users`, `refresh_tokens`, `otp_codes`, `audit_logs`, `used_tokens`)
 go test ./...
 ```
 
-All business logic (`internal/services`, `internal/store`, `internal/utils`, `internal/middleware`) is covered by unit tests using in-memory fakes — no MySQL or Redis required to run them. The CI pipeline (`.github/workflows/ci.yml`) runs `go test -race -cover`, `go vet`, `golangci-lint`, and `govulncheck` automatically on push and PR.
+Unit tests cover hashing, configuration, HTTP response envelopes, handlers, routes, service rules, store behavior, and GORM repositories. Repository tests use isolated in-memory SQLite databases; MySQL duplicate-key mapping remains covered at the service boundary with fakes. The CI pipeline runs `go test -race -cover`, `go vet`, `golangci-lint`, and `govulncheck` on push and PR.
 
 ---
 
@@ -133,7 +136,7 @@ Everything is read from environment variables (`.env` supported). See `.env.exam
 | JWT | `JWT_SECRET` (required, no default), `JWT_ISSUER`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `RESET_TOKEN_TTL`, `EMAIL_VERIFY_TOKEN_TTL` | |
 | Account security | `MAX_LOGIN_ATTEMPTS`, `LOGIN_LOCKOUT_DURATION`, `MAX_LOCKOUT_MULTIPLIER`, `REQUIRE_EMAIL_VERIFIED` | `MAX_LOCKOUT_MULTIPLIER` scales lockout duration for repeat offenders |
 | MFA / OTP | `OTP_TTL`, `OTP_LENGTH`, `OTP_MAX_ATTEMPTS`, `OTP_SEND_PER_USER_MAX`, `OTP_SEND_WINDOW` | |
-| Rate limiting | `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `LOGIN_PER_ACCOUNT_MAX`, `LOGIN_WINDOW`, `REGISTER_PER_IP_MAX`, `REGISTER_WINDOW`, `LOGIN_CAPTCHA_AFTER_FAILS` | |
+| Rate limiting | `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `LOGIN_PER_ACCOUNT_MAX`, `LOGIN_WINDOW`, `REGISTER_PER_IP_MAX`, `REGISTER_WINDOW`, `VERIFY_RESEND_PER_EMAIL_MAX`, `VERIFY_RESEND_PER_IP_MAX`, `VERIFY_RESEND_GLOBAL_MAX`, `LOGIN_CAPTCHA_AFTER_FAILS` | Resend limits are shared when `REDIS_URL` is configured. |
 | Email | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Empty `SMTP_HOST` -> tokens/OTPs are logged to console instead of emailed |
 | CAPTCHA | `CAPTCHA_PROVIDER` (`turnstile` \| empty), `CAPTCHA_SECRET`, `CAPTCHA_SITE_KEY` | Off unless a provider + secret are set |
 | Shared store | `REDIS_URL` | Empty -> in-memory store (single instance only) |
@@ -155,6 +158,7 @@ Base path: `/api/v1/auth`. MFA endpoints are nested under `/api/v1/auth/mfa`.
 | POST | `/forgot-password` | – | Request a password reset (same response whether or not the email exists) |
 | POST | `/reset-password` | – | Set a new password using a reset token |
 | POST | `/verify-email` | – | Confirm email ownership using a verification token |
+| POST | `/resend-verification` | – | Request a fresh verification link without account enumeration |
 | POST | `/logout` | Yes | Revoke one refresh token |
 | POST | `/logout-all` | Yes | Revoke every refresh token for the current user |
 | POST | `/change-password` | Yes | Change password (revokes all sessions afterward) |
@@ -193,6 +197,7 @@ Every response, success or error, has the same shape:
 A few decisions worth knowing if you're extending this:
 
 - **Password reset / email verification use JWTs with a `type` claim** (`reset`, `verify-email`) rather than a separate token table — reuses the existing JWT infrastructure and gets expiry for free. Single-use is enforced separately via the JWT ID, tracked in `store.Store`.
+- **Passwords are capped at bcrypt's 72-byte limit.** This prevents bcrypt truncation from treating two distinct long passwords as the same credential.
 - **`locked_until` is a nullable timestamp**, distinct from `is_active` — a boolean can't express a *temporary* lock, only a permanent enable/disable state.
 - **OTPs and refresh tokens are hashed with SHA-256**, not bcrypt — they're already high-entropy random values, so bcrypt's deliberately slow KDF isn't needed (unlike user-chosen passwords, which are lower-entropy and benefit from that slowness).
 - **The `store.Store` interface is the seam for horizontal scaling.** Nothing above it knows whether counters live in a Go map or Redis — swapping is a config change (`REDIS_URL`), not a code change.

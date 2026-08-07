@@ -1,61 +1,36 @@
-# Architecture of FinnApiGo
+# FinnApiGo Architecture
 
-## Project Structure
-The project follows a standard Go backend layout:
-- `cmd/server/`: Application entry point and dependency wiring.
-- `internal/config/`: Configuration loading and environment variable management.
-- `internal/database/`: Database connection and initialization.
-- `internal/handlers/`: HTTP/transport layer. Maps requests to service calls.
-- `internal/middleware/`: HTTP middlewares (auth, rate limit, logging, etc.).
-- `internal/models/`: Domain models and GORM entities.
-- `internal/repositories/`: Data access layer (persistence).
-- `internal/routes/`: HTTP route registration.
-- `internal/services/`: Core business logic and interface definitions.
-- `internal/store/`: Ephemeral state management (e.g., rate limits, tokens).
-- `internal/utils/`: Helper functions (hashing, response formatting, etc.).
-
-## 3-Layer Architecture
-The application uses a strict 3-layer architecture:
+## Runtime flow
 
 ```mermaid
-graph TD
-    Client[Client] -->|HTTP Request| Handlers
-    Handlers[Handlers<br/>internal/handlers] -->|DTOs| Services
-    Services[Services<br/>internal/services] -->|Models| Repositories
-    Repositories[Repositories<br/>internal/repositories] -->|SQL/GORM| DB[(MySQL Database)]
-    Services -.->|Interface| Repositories
+flowchart LR
+    Client --> Routes --> Middleware --> Handlers --> Services --> Repositories --> MySQL
+    Services --> Store["In-memory Store or Redis"]
 ```
 
-1. **Handlers (HTTP/Transport):** Parse requests, validate DTOs, call services, format responses.
-2. **Services (Business Logic):** Implement business rules, handle errors, orchestrate repositories.
-3. **Repositories (Persistence):** Abstract database interactions, return domain models.
+The application enforces a transport-to-domain flow: handlers parse and validate HTTP, services own business decisions, and repositories perform persistence only. `context.Context` flows from handlers through repository I/O.
 
-## How to Add a New Module
-To add a new feature (e.g., Tier 2 User Management or a new business domain):
+## Package boundaries
 
-1. **Define Models:** Add your GORM entities in `internal/models/`.
-2. **Define Interfaces:** Add repository and service interfaces in `internal/services/interfaces.go`.
-3. **Implement Repositories:** Create the concrete repository in `internal/repositories/`.
-4. **Implement Services:** Create the business logic in `internal/services/`, ensuring you return appropriate sentinel errors.
-5. **Create Handlers:** Add HTTP handlers in `internal/handlers/` to map requests to your service.
-6. **Wire Routes:** Register endpoints in `internal/routes/routes.go`.
-7. **Wire Dependencies:** Instantiate repositories, services, and handlers in `cmd/server/main.go`.
+- `cmd/server`: composition root, migration, dependency wiring, lifecycle, and shutdown.
+- `internal/config`: typed twelve-factor configuration; `JWT_SECRET` is mandatory.
+- `internal/handlers`: HTTP adapters. Constructors accept handler-owned service interfaces, enabling isolation from the database in HTTP tests.
+- `internal/services`: authentication, MFA, notification, audit, CAPTCHA, and policy rules.
+- `internal/repositories`: context-aware GORM persistence adapters.
+- `internal/store`: TTL-aware state abstraction; Redis shares replay and rate-limit state between instances.
+- `internal/hash`, `internal/jwt`, and `internal/response`: focused primitives that replace the former generic utilities boundary.
 
-## Key Conventions
-- **Sentinel Errors:** Services return sentinel errors (e.g., `ErrUserNotFound`).
-- **Error Mapping:** Handlers use `statusForError` to map sentinel errors to HTTP status codes.
-- **Response Envelope:** All API responses follow a strict `{ "code": int, "message": string, "data": any }` format.
-- **Context Threading:** `context.Context` must be passed from the HTTP request down to the repository layer (e.g., for cancellation and timeouts).
-- **Audit Logging:** Important actions should be logged asynchronously via the `AuditRepo`.
-- **Testing:** Unit tests use in-memory mocks (e.g., `mock_repositories`). No real database is required for unit tests. Mocks are generated/written in `_test.go` files.
+## Security-critical decisions
 
-## Security Patterns
-- **Authentication:** JWT with distinct type claims (access, refresh, verify, reset). Single-use tokens enforced via `Store.SetNX` and a `UsedToken` DB table.
-- **Password Security:** `bcrypt` hashing. Login includes dummy hash comparisons for timing attack equalization.
-- **Rate Limiting & Anti-Abuse:** IP-based tracking, adaptive CAPTCHA, disposable email blocking, honeypot fields, and endpoint-specific rate limits.
-- **Constant-Time Comparison:** OTP and token checks use `crypto/subtle.ConstantTimeCompare`.
-- **Validation:** Strict body size caps, max-length validations on all string inputs (e.g., max 128 chars for passwords).
-- **Session Management:** Refresh token reuse detection triggers a "revoke-all" on suspected theft.
+- Passwords use bcrypt and are rejected above 72 bytes so bcrypt truncation cannot equate distinct credentials.
+- JWTs are purpose-bound; reset and verification tokens are single-use through `jti` tracking.
+- Refresh tokens are opaque, stored only as SHA-256 hashes, rotated on use, and reuse revokes all user sessions.
+- Public auth flows avoid account enumeration. Verification resend combines per-email, shared per-IP, and global volume caps; rejected abuse is audited.
+- Request logging emits only method, path, status, latency, and request ID. Authorization values, credentials, and OTPs are excluded.
 
-## Configuration
-All configuration is managed via environment variables and loaded into a typed struct in `internal/config/config.go`.
+## Testing strategy
+
+- Hash, config, response, handler, route, service, store, middleware, and repository packages have unit tests.
+- Handler tests use fakes through narrow interfaces; service tests use in-memory repository/store fakes.
+- Repository tests use fresh pure-Go SQLite databases. MySQL duplicate-key translation is intentionally tested at the service boundary rather than emulated in SQLite.
+- `cmd/server`, `internal/database`, and plain model structs remain composition/data-only packages; meaningful behavior is tested through repository and integration seams rather than field-existence tests.

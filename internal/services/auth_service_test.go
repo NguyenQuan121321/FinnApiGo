@@ -10,6 +10,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/models"
 )
 
 // newTestAuthService builds an AuthService wired to in-memory mocks. OTP/lockout
@@ -31,17 +32,21 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 	}
 
 	rateLimitCfg := config.RateLimitConfig{
-		RPS:                     100,
-		Burst:                   20,
-		LoginPerAccountMax:      10000,       // generous default so existing behavioral
-		LoginWindow:             time.Minute, // tests are unaffected by velocity
-		RegisterPerIPMax:        10000,       // limiters; tight-limit tests build a
-		RegisterWindow:          time.Hour,   // dedicated service.
-		OTPSendPerUserMax:       10000,
-		OTPSendWindow:           time.Minute,
-		VerifyResendPerEmailMax: 10000,
-		VerifyResendWindow:      time.Minute,
-		LoginCaptchaAfterFails:  10000,
+		RPS:                      100,
+		Burst:                    20,
+		LoginPerAccountMax:       10000,       // generous default so existing behavioral
+		LoginWindow:              time.Minute, // tests are unaffected by velocity
+		RegisterPerIPMax:         10000,       // limiters; tight-limit tests build a
+		RegisterWindow:           time.Hour,   // dedicated service.
+		OTPSendPerUserMax:        10000,
+		OTPSendWindow:            time.Minute,
+		VerifyResendPerEmailMax:  10000,
+		VerifyResendWindow:       time.Minute,
+		VerifyResendGlobalMax:    10000,
+		VerifyResendGlobalWindow: time.Minute,
+		VerifyResendPerIPMax:     10000,
+		VerifyResendPerIPWindow:  time.Minute,
+		LoginCaptchaAfterFails:   10000,
 	}
 	jwtCfg := config.JWTConfig{
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
@@ -548,6 +553,162 @@ func TestResendVerifyEmail_NotifierErrorPropagates(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "resend-verify") {
 		t.Errorf("expected wrapped resend-verify error, got %v", err)
+	}
+}
+
+// newResendTestService builds an AuthService with a custom RateLimitConfig and
+// the supplied mocks, so each hardening test can tighten exactly one layer
+// while leaving the others disabled (max=0 => disabled by the > 0 guard).
+func newResendTestService(rlCfg config.RateLimitConfig, users *mockUserRepo, audit *mockAuditRepo, notify *mockNotifier) *AuthService {
+	return NewAuthService(
+		users, newMockTokenRepo(), newMockUsedTokenRepo(), audit, newMockStore(),
+		jwt.NewJWTManager("test-secret", "test-issuer"),
+		config.AuthConfig{OTPLength: 6}, rlCfg,
+		config.JWTConfig{VerifyTTL: time.Hour}, notify, nil,
+	)
+}
+
+func TestResendVerifyEmail_GlobalCap(t *testing.T) {
+	users := newMockUserRepo()
+	audit := &mockAuditRepo{}
+	notify := &mockNotifier{}
+	// Global cap = 1: only ONE resend across ALL emails+IPs per window. Other
+	// layers disabled (0). This proves the cap defeats unique-email flooding.
+	svc := newResendTestService(config.RateLimitConfig{
+		VerifyResendGlobalMax:    1,
+		VerifyResendGlobalWindow: time.Minute,
+	}, users, audit, notify)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "bob", Email: "bob@example.com", Password: "Password1", FullName: "Bob",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// First resend (alice) consumes the single global slot.
+	if err := svc.ResendVerifyEmail(context.Background(), "alice@example.com", "1.1.1.1"); err != nil {
+		t.Fatalf("first resend should succeed, got %v", err)
+	}
+	// Second resend (DIFFERENT email + IP) must still trip the global cap.
+	err := svc.ResendVerifyEmail(context.Background(), "bob@example.com", "2.2.2.2")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("expected ErrRateLimited from global cap on different email/IP, got %v", err)
+	}
+}
+
+func TestResendVerifyEmail_PerIPCap(t *testing.T) {
+	users := newMockUserRepo()
+	audit := &mockAuditRepo{}
+	notify := &mockNotifier{}
+	svc := newResendTestService(config.RateLimitConfig{
+		VerifyResendPerIPMax:    1,
+		VerifyResendPerIPWindow: time.Minute,
+	}, users, audit, notify)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "bob", Email: "bob@example.com", Password: "Password1", FullName: "Bob",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// First resend from this IP succeeds.
+	if err := svc.ResendVerifyEmail(context.Background(), "alice@example.com", "9.9.9.9"); err != nil {
+		t.Fatalf("first resend should succeed, got %v", err)
+	}
+	// Second resend from the SAME IP (different email) must be throttled.
+	err := svc.ResendVerifyEmail(context.Background(), "bob@example.com", "9.9.9.9")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Errorf("expected ErrRateLimited from per-IP cap, got %v", err)
+	}
+}
+
+func TestResendVerifyEmail_DisposableDomainSwallowed(t *testing.T) {
+	svc, _, _, _, notify := newTestAuthService()
+	// Disposable domain must be swallowed as success-like (anti-enumeration)
+	// and must NOT trigger any email send.
+	err := svc.ResendVerifyEmail(context.Background(), "spammer@mailinator.com", "1.2.3.4")
+	if err != nil {
+		t.Errorf("disposable email must not surface an error (anti-enumeration), got %v", err)
+	}
+	if notify.lastVerify != "" {
+		t.Error("no verification email should be sent for a disposable domain")
+	}
+}
+
+func TestResendVerifyEmail_GlobalCapRecordsAudit(t *testing.T) {
+	users := newMockUserRepo()
+	audit := &mockAuditRepo{}
+	notify := &mockNotifier{}
+	svc := newResendTestService(config.RateLimitConfig{
+		VerifyResendGlobalMax:    1,
+		VerifyResendGlobalWindow: time.Minute,
+	}, users, audit, notify)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = svc.ResendVerifyEmail(context.Background(), "alice@example.com", "1.1.1.1")
+	_ = svc.ResendVerifyEmail(context.Background(), "alice@example.com", "1.1.1.1") // trips global cap
+
+	blocked := audit.byEvent(models.AuditEventVerifyResendBlocked)
+	if len(blocked) == 0 {
+		t.Fatal("expected an audit entry for the global-cap block")
+	}
+	if blocked[0].Detail != "global cap" {
+		t.Errorf("expected detail 'global cap', got %q", blocked[0].Detail)
+	}
+}
+
+func TestResendVerifyEmail_PerIPCapRecordsAudit(t *testing.T) {
+	users := newMockUserRepo()
+	audit := &mockAuditRepo{}
+	notify := &mockNotifier{}
+	svc := newResendTestService(config.RateLimitConfig{
+		VerifyResendPerIPMax:    1,
+		VerifyResendPerIPWindow: time.Minute,
+	}, users, audit, notify)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = svc.ResendVerifyEmail(context.Background(), "alice@example.com", "8.8.8.8")
+	_ = svc.ResendVerifyEmail(context.Background(), "alice@example.com", "8.8.8.8") // trips per-IP cap
+
+	blocked := audit.byEvent(models.AuditEventVerifyResendBlocked)
+	if len(blocked) == 0 {
+		t.Fatal("expected an audit entry for the per-IP block")
+	}
+	if blocked[0].Detail != "per-ip cap" {
+		t.Errorf("expected detail 'per-ip cap', got %q", blocked[0].Detail)
+	}
+}
+
+func TestResendVerifyEmail_DisposableRecordsAudit(t *testing.T) {
+	users := newMockUserRepo()
+	audit := &mockAuditRepo{}
+	notify := &mockNotifier{}
+	svc := newResendTestService(config.RateLimitConfig{}, users, audit, notify)
+
+	_ = svc.ResendVerifyEmail(context.Background(), "spammer@mailinator.com", "5.5.5.5")
+
+	blocked := audit.byEvent(models.AuditEventVerifyResendBlocked)
+	if len(blocked) == 0 {
+		t.Fatal("expected an audit entry for the disposable-domain rejection")
+	}
+	if blocked[0].Detail != "disposable domain" {
+		t.Errorf("expected detail 'disposable domain', got %q", blocked[0].Detail)
 	}
 }
 

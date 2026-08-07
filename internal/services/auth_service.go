@@ -169,7 +169,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	// §3 — per-account login velocity limit: throttle repeated attempts against
 	// one email even when spread across many IPs. Uses the store so the limit
 	// is shared across instances.
-	if s.store != nil && email != "" {
+	if s.store != nil && email != "" && s.rlCfg.LoginPerAccountMax > 0 {
 		key := "login:acct:" + email
 		count := s.store.IncrBy(key, 1, s.rlCfg.LoginWindow)
 		if count > int64(s.rlCfg.LoginPerAccountMax) {
@@ -366,24 +366,75 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 
 // ResendVerifyEmail issues a fresh type=verify-email JWT and delivers it via
 // the notifier. It NEVER reveals whether the email exists or is already
-// verified — it returns nil for unknown or already-verified users so the
-// handler can emit an identical message. The only error surfaced is
-// ErrRateLimited; transient notifier failures are wrapped and returned so the
-// handler still sees a distinct (non-enumeration-leaking) value.
+// verified — unknown/verified/disposable/blocked all surface identically
+// (anti-enumeration, ASVS v4.0-2.1.1) except ErrRateLimited, which lets a
+// legitimate client back off.
+//
+// Defense-in-depth layering (each layer short-circuits before the next, and
+// every store-backed layer is shared across instances via the StoreProvider):
+//  1. per-IP middleware limiter (process-local, cheap first filter)
+//  2. GLOBAL volume cap — circuit-breaker vs botnet floods rotating IPs+emails
+//  3. per-IP service throttle — store-backed, survives IP rotation
+//  4. disposable-domain rejection — O(1) lookup before any DB hit
+//  5. per-email throttle — stops repeat bombing of one inbox
+//  6. FindByEmail → issue JWT → notify
+//
+// All rate-limit trips and disposable rejections are recorded as audit events
+// (ASVS v4.0-7.3.1) for SOC visibility.
 func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
 
-	// §3 — per-email resend throttle: stops an attacker email-bombing one
-	// inbox by rotating IPs (the per-IP middleware limiter alone is not
-	// enough). Uses the store so the limit is shared across instances.
-	if s.store != nil && email != "" {
-		key := "verify:resend:" + email
-		count := s.store.IncrBy(key, 1, s.rlCfg.VerifyResendWindow)
-		if count > int64(s.rlCfg.VerifyResendPerEmailMax) {
+	// Layer 2 (§7.6.3) — GLOBAL volume cap: the only control that stops an
+	// attacker rotating BOTH IPs and emails (per-key limiters cannot). Acts as
+	// a hard circuit-breaker on the entire resend endpoint.
+	if s.store != nil && s.rlCfg.VerifyResendGlobalMax > 0 {
+		if n := s.store.IncrBy("verify:resend:global", 1, s.rlCfg.VerifyResendGlobalWindow); n > int64(s.rlCfg.VerifyResendGlobalMax) {
+			s.audits.Record(ctx, &models.AuditLog{
+				Event: models.AuditEventVerifyResendBlocked, Email: email,
+				IPAddress: ip, Success: false, Detail: "global cap",
+			})
 			return ErrRateLimited
 		}
 	}
 
+	// Layer 3 (§7.6.3) — per-IP service throttle. Store-backed, so unlike the
+	// in-process middleware limiter it is shared across instances and survives
+	// IP rotation toward a single target inbox.
+	if s.store != nil && ip != "" && s.rlCfg.VerifyResendPerIPMax > 0 {
+		if n := s.store.IncrBy("verify:resend:ip:"+ip, 1, s.rlCfg.VerifyResendPerIPWindow); n > int64(s.rlCfg.VerifyResendPerIPMax) {
+			s.audits.Record(ctx, &models.AuditLog{
+				Event: models.AuditEventVerifyResendBlocked, Email: email,
+				IPAddress: ip, Success: false, Detail: "per-ip cap",
+			})
+			return ErrRateLimited
+		}
+	}
+
+	// Layer 4 (§2.1.1) — disposable-domain rejection at the source. Reuses the
+	// existing isDisposableEmail O(1) lookup; runs BEFORE the DB query. Returns
+	// nil (success-like) so an attacker cannot probe which addresses are blocked.
+	if isDisposableEmail(email) {
+		s.audits.Record(ctx, &models.AuditLog{
+			Event: models.AuditEventVerifyResendBlocked, Email: email,
+			IPAddress: ip, Success: false, Detail: "disposable domain",
+		})
+		return nil
+	}
+
+	// Layer 5 — per-email throttle: stops repeat bombing of a single inbox.
+	if s.store != nil && email != "" && s.rlCfg.VerifyResendPerEmailMax > 0 {
+		key := "verify:resend:" + email
+		count := s.store.IncrBy(key, 1, s.rlCfg.VerifyResendWindow)
+		if count > int64(s.rlCfg.VerifyResendPerEmailMax) {
+			s.audits.Record(ctx, &models.AuditLog{
+				Event: models.AuditEventVerifyResendBlocked, Email: email,
+				IPAddress: ip, Success: false, Detail: "per-email cap",
+			})
+			return ErrRateLimited
+		}
+	}
+
+	// Layer 6 — lookup, issue, notify.
 	user, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
 		return fmt.Errorf("resend-verify: find user: %w", err)
@@ -624,7 +675,7 @@ func validatePassword(pw string) error {
 		return ErrPasswordTooWeak
 	}
 	// §5 — password length cap before bcrypt.
-	if len(pw) > 128 {
+	if len(pw) > hash.MaxPasswordBytes {
 		return ErrPasswordTooWeak
 	}
 	var hasLetter, hasNumber bool
