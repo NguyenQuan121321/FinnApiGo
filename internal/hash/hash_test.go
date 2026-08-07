@@ -38,10 +38,12 @@ func TestHashPasswordUsesUniqueSalts(t *testing.T) {
 }
 
 func TestHashTokenDeterministic(t *testing.T) {
-	if HashToken("token-a") != HashToken("token-a") {
+	first := HashToken("token-a")
+	second := HashToken("token-a")
+	if first != second {
 		t.Fatal("same token must hash identically")
 	}
-	if HashToken("token-a") == HashToken("token-b") {
+	if first == HashToken("token-b") {
 		t.Fatal("distinct tokens must not hash identically")
 	}
 }
