@@ -123,7 +123,8 @@ func run() error {
 	mfaHandler := handlers.NewMFAHandler(mfaSvc)
 
 	// --- Rate limiter ---
-	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL)
+	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
+	defer rateLimiter.Close()
 
 	// --- Router ---
 	router := routes.Register(routes.Deps{
