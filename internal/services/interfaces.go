@@ -46,6 +46,14 @@ type OtpRepo interface {
 	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
 }
 
+type TOTPRepo interface {
+	Upsert(context.Context, *models.TOTPDevice) error
+	FindByUserID(context.Context, uint) (*models.TOTPDevice, error)
+	CreateRecoveryCodes(context.Context, []*models.RecoveryCode) error
+	ActiveRecoveryCodes(context.Context, uint) ([]models.RecoveryCode, error)
+	MarkRecoveryCodeUsed(context.Context, *models.RecoveryCode) error
+}
+
 // AuditRepo abstracts audit logging.
 type AuditRepo interface {
 	Record(ctx context.Context, entry *models.AuditLog)

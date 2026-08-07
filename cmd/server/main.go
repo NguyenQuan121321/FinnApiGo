@@ -51,7 +51,7 @@ func run() error {
 	// --- Migrations (explicit; safe to run on every boot) ---
 	if err := db.AutoMigrate(
 		&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
-		&models.AuditLog{}, &models.UsedToken{},
+		&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
 	); err != nil {
 		return errors.Join(errors.New("auto-migrate failed"), err)
 	}
@@ -64,6 +64,7 @@ func run() error {
 	auditRepo := services.NewAsyncAuditWriter(baseAuditRepo, baseAuditRepo, cfg.Audit)
 	defer auditRepo.Close()
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
+	totpRepo := repositories.NewTOTPRepository(db)
 
 	// --- Store (in-memory default; Redis when REDIS_URL set) ---
 	// §1.3/§7 — rate-limit counters, velocity windows, and jti tracking are
@@ -117,10 +118,11 @@ func run() error {
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier,
 	)
 	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
+	totpSvc := services.NewTOTPService(totpRepo, kvStore, cfg.JWT.Issuer)
 
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
-	mfaHandler := handlers.NewMFAHandler(mfaSvc)
+	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc)
 
 	// --- Rate limiter ---
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
