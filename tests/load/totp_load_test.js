@@ -126,7 +126,10 @@ function sendValidate(code) {
     const res = http.post(
         VALIDATE_URL,
         JSON.stringify({ code: code }),
-        { headers: authHeaders() }
+        { 
+            headers: authHeaders(),
+            responseCallback: http.expectedStatuses(400, 401, 413, 429, 200)
+        }
     );
 
     validateLatency.add(res.timings.duration);
