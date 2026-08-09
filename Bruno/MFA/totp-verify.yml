@@ -1,0 +1,20 @@
+info:
+  name: totp-verify
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/mfa/totp/verify
+  body:
+    type: json
+    data: '{ "code": "042727" }'
+  auth:
+    type: bearer
+    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjEsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJhbGljZUBleGFtcGxlLmNvbSIsInR5cGUiOiJhY2Nlc3MiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIxIiwiZXhwIjoxNzg2MTg1Nzg0LCJuYmYiOjE3ODYxODQ4ODQsImlhdCI6MTc4NjE4NDg4NH0.5c8ThSHOI31njdO8o33hfymbdBcn5HkNwK2MLodjc68
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

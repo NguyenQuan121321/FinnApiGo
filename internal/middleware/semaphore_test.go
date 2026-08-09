@@ -1,0 +1,152 @@
+package middleware
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+)
+
+func init() { gin.SetMode(gin.TestMode) }
+
+func TestConcurrencyLimiter_PassthroughWhenDisabled(t *testing.T) {
+	cl := NewConcurrencyLimiter(0) // disabled
+	r := gin.New()
+	r.GET("/", cl.Handler(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestConcurrencyLimiter_NilIsPassthrough(t *testing.T) {
+	var cl *ConcurrencyLimiter // nil
+	r := gin.New()
+	r.GET("/", cl.Handler(), func(c *gin.Context) {
+		c.Status(http.StatusOK)
+	})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestConcurrencyLimiter_AllowsUpToCapacity(t *testing.T) {
+	cl := NewConcurrencyLimiter(5)
+	if cl.Capacity() != 5 {
+		t.Fatalf("capacity=%d want=5", cl.Capacity())
+	}
+	if cl.Available() != 5 {
+		t.Fatalf("available=%d want=5", cl.Available())
+	}
+
+	var running atomic.Int64
+	var served atomic.Int64
+	var rejected atomic.Int64
+
+	handler := cl.Handler()
+	r := gin.New()
+	r.GET("/", handler, func(c *gin.Context) {
+		n := running.Add(1)
+		if n > 5 {
+			t.Errorf("concurrency exceeded: %d > 5", n)
+		}
+		time.Sleep(20 * time.Millisecond) // hold the slot so concurrent reqs collide
+		running.Add(-1)
+		served.Add(1)
+		c.Status(http.StatusOK)
+	})
+
+	// Fire 10 concurrent requests while the semaphore is full — since the
+	// acquire is non-blocking, only up to 5 can run; the rest are rejected.
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+			if w.Code == http.StatusTooManyRequests {
+				rejected.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	total := served.Load() + rejected.Load()
+	if total != 10 {
+		t.Fatalf("total handled=%d want=10 (served=%d rejected=%d)", total, served.Load(), rejected.Load())
+	}
+	if served.Load() > 5 {
+		t.Fatalf("served=%d should not exceed capacity 5", served.Load())
+	}
+}
+
+func TestConcurrencyLimiter_RejectsExcessWith429(t *testing.T) {
+	cl := NewConcurrencyLimiter(2)
+
+	var running atomic.Int64
+
+	handler := cl.Handler()
+	r := gin.New()
+	r.GET("/", handler, func(c *gin.Context) {
+		running.Add(1)
+		time.Sleep(200 * time.Millisecond) // hold slots for a while
+		defer running.Add(-1)
+		c.Status(http.StatusOK)
+	})
+
+	rejected := atomic.Int64{}
+	var wg sync.WaitGroup
+
+	// Start 2 slow requests to fill the semaphore.
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	}()
+	go func() {
+		defer wg.Done()
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	}()
+
+	// Give them time to acquire tokens.
+	time.Sleep(50 * time.Millisecond)
+
+	// Now fire a request that should be rejected immediately.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		if w.Code == http.StatusTooManyRequests {
+			rejected.Add(1)
+		}
+	}()
+
+	wg.Wait()
+
+	if rejected.Load() == 0 {
+		t.Fatal("expected at least one request to be rejected with 429")
+	}
+}
+
+func TestConcurrencyLimiter_AvailableAndCapacity(t *testing.T) {
+	cl := NewConcurrencyLimiter(3)
+	if cl.Available() != 3 {
+		t.Fatalf("initial available=%d want=3", cl.Available())
+	}
+	if cl.Capacity() != 3 {
+		t.Fatalf("capacity=%d want=3", cl.Capacity())
+	}
+}

@@ -1,0 +1,24 @@
+info:
+  name: verify-otp
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/mfa/verify-otp
+  body:
+    type: json
+    data: |-
+      {
+        "code": "647003",
+        "purpose": "login"
+      }
+  auth:
+    type: bearer
+    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjIsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJ0ZXN0MUBleGFtcGxlLmNvbSIsInR5cGUiOiJhY2Nlc3MiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIyIiwiZXhwIjoxNzg1NTk2OTUxLCJuYmYiOjE3ODU1OTYwNTEsImlhdCI6MTc4NTU5NjA1MX0.kshdlYq9DhCWsgzU4iGvuNa3G7V2jwTGisAKsRv72pw
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -14,6 +14,10 @@ const (
 	AuditEventRefreshToken        = "refresh_token"
 	AuditEventTokenReuse          = "token_reuse"
 	AuditEventVerifyResendBlocked = "verify_resend_blocked" // §7.6.3 — anti-automation event
+	AuditEventTOTPEnabled         = "totp_enabled"
+	AuditEventTOTPValidated       = "totp_validated"
+	AuditEventTOTPFailed          = "totp_failed"
+	AuditEventRecoveryCodeUsed    = "recovery_code_used"
 )
 
 // AuditLog records security-relevant actions for compliance / forensics.

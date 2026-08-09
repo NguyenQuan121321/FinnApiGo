@@ -22,8 +22,9 @@ type Deps struct {
 	MFA                 *handlers.MFAHandler
 	JWT                 *jwt.JWTManager
 	RateLimit           *middleware.RateLimiter
-	DB                  *gorm.DB // optional, for /readyz
-	MaxRequestBodyBytes int64    // §5 — global body-size cap applied BEFORE routes
+	TOTPCluster         *middleware.ConcurrencyLimiter // caps concurrent CPU-bound TOTP validations
+	DB                  *gorm.DB                      // optional, for /readyz
+	MaxRequestBodyBytes int64                         // §5 — global body-size cap applied BEFORE routes
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -92,9 +93,20 @@ func Register(deps Deps) *gin.Engine {
 	mfa := authed.Group("/mfa")
 	mfa.POST("/send-otp", deps.RateLimit.Handler(), deps.MFA.SendOTP)
 	mfa.POST("/verify-otp", deps.MFA.VerifyOTP)
-	mfa.POST("/totp/enable", deps.MFA.EnableTOTP)
-	mfa.POST("/totp/verify", deps.MFA.VerifyTOTP)
-	mfa.POST("/totp/validate", deps.MFA.ValidateTOTP)
+
+	// ---- TOTP endpoints (rate-limited + concurrency-gated) ----
+	// The concurrency limiter (deps.TOTPCluster) is installed BEFORE the
+	// handler so excess CPU-bound validation requests are rejected with 429
+	// before they can starve worker threads or saturate the DB pool.
+	if deps.TOTPCluster != nil && deps.TOTPCluster.Capacity() > 0 {
+		mfa.POST("/totp/enable", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.EnableTOTP)
+		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.VerifyTOTP)
+		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.ValidateTOTP)
+	} else {
+		mfa.POST("/totp/enable", deps.RateLimit.Handler(), deps.MFA.EnableTOTP)
+		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.MFA.VerifyTOTP)
+		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.MFA.ValidateTOTP)
+	}
 
 	return r
 }

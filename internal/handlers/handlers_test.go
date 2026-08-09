@@ -170,3 +170,44 @@ func TestTOTPHandlers(t *testing.T) {
 		})
 	}
 }
+
+func TestTOTPHandlers_BodySizeGuard(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{})
+
+	// Body > 1 KiB should be rejected with 413.
+	bigBody := `{"code":"` + strings.Repeat("A", 2048) + `"}`
+	w := serve(t, h.ValidateTOTP, bigBody, &uid)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestTOTPHandlers_EmptyBody(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{})
+
+	w := serve(t, h.ValidateTOTP, "", &uid)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("empty body: status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestTOTPHandlers_MissingAuth(t *testing.T) {
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{})
+	for _, handler := range []gin.HandlerFunc{h.EnableTOTP, h.VerifyTOTP, h.ValidateTOTP} {
+		w := serve(t, handler, `{}`, nil)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d body=%s", w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestTOTPHandlers_RateLimited(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: services.ErrRateLimited})
+	w := serve(t, h.ValidateTOTP, `{"code":"123456"}`, &uid)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429, got %d body=%s", w.Code, w.Body.String())
+	}
+}

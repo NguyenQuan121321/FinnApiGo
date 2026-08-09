@@ -1,0 +1,21 @@
+info:
+  name: login
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/login
+  body:
+    type: json
+    data: |-
+      {
+        "email": "test1@example.com",
+        "password": "Password123"
+      }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

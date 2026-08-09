@@ -416,6 +416,86 @@ func (m *mockCaptchaVerifier) Verify(ctx context.Context, token string) error {
 	return m.err
 }
 
+// ---- mock TOTP repo ----
+
+type mockTOTPRepo struct {
+	mu       sync.Mutex
+	devices  map[uint]*models.TOTPDevice
+	codes    map[uint][]models.RecoveryCode
+	nextID   uint
+	upsertErr error
+}
+
+func newMockTOTPRepo() *mockTOTPRepo {
+	return &mockTOTPRepo{
+		devices: map[uint]*models.TOTPDevice{},
+		codes:   map[uint][]models.RecoveryCode{},
+	}
+}
+
+func (m *mockTOTPRepo) Upsert(ctx context.Context, d *models.TOTPDevice) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.upsertErr != nil {
+		return m.upsertErr
+	}
+	if d.ID == 0 {
+		m.nextID++
+		d.ID = m.nextID
+	}
+	clone := *d
+	m.devices[d.UserID] = &clone
+	return nil
+}
+
+func (m *mockTOTPRepo) FindByUserID(ctx context.Context, userID uint) (*models.TOTPDevice, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.devices[userID]
+	if !ok {
+		return nil, nil
+	}
+	c := *d
+	return &c, nil
+}
+
+func (m *mockTOTPRepo) CreateRecoveryCodes(ctx context.Context, codes []*models.RecoveryCode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, c := range codes {
+		c.ID = m.nextID
+		m.nextID++
+		m.codes[c.UserID] = append(m.codes[c.UserID], *c)
+	}
+	return nil
+}
+
+func (m *mockTOTPRepo) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]models.RecoveryCode, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.RecoveryCode
+	for _, c := range m.codes[userID] {
+		if c.UsedAt == nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (m *mockTOTPRepo) MarkRecoveryCodeUsed(ctx context.Context, c *models.RecoveryCode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	c.UsedAt = &now
+	for i := range m.codes[c.UserID] {
+		if m.codes[c.UserID][i].ID == c.ID {
+			m.codes[c.UserID][i].UsedAt = &now
+			break
+		}
+	}
+	return nil
+}
+
 var errNotFound = errNotFoundErr{}
 
 type errNotFoundErr struct{}

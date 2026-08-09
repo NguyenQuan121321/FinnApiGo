@@ -118,7 +118,7 @@ func run() error {
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier,
 	)
 	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
-	totpSvc := services.NewTOTPService(totpRepo, kvStore, cfg.JWT.Issuer)
+	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth)
 
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
@@ -128,12 +128,16 @@ func run() error {
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
 	defer rateLimiter.Close()
 
+	// --- TOTP concurrency limiter (caps CPU-bound validations) ---
+	totpCluster := middleware.NewConcurrencyLimiter(cfg.Security.TOTPMaxConcurrent)
+
 	// --- Router ---
 	router := routes.Register(routes.Deps{
 		Auth:                authHandler,
 		MFA:                 mfaHandler,
 		JWT:                 jwtMgr,
 		RateLimit:           rateLimiter,
+		TOTPCluster:         totpCluster,
 		DB:                  db,
 		MaxRequestBodyBytes: cfg.Security.MaxRequestBodyBytes,
 	})

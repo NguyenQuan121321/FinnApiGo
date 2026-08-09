@@ -1,0 +1,20 @@
+info:
+  name: totp-enable
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/mfa/totp/enable
+  body:
+    type: json
+    data: ""
+  auth:
+    type: bearer
+    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjEsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJhbGljZUBleGFtcGxlLmNvbSIsInR5cGUiOiJhY2Nlc3MiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIxIiwiZXhwIjoxNzg2MTg1MTYwLCJuYmYiOjE3ODYxODQyNjAsImlhdCI6MTc4NjE4NDI2MH0.ew8TLCiEgQmGbaKFLkG6IHBTqFGO4qpDELwNydzhzlg
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

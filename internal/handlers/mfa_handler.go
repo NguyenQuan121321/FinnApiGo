@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/response"
 	"github.com/finnapigo/finnapigo/internal/services"
@@ -43,7 +44,15 @@ func (h *MFAHandler) EnableTOTP(c *gin.Context) {
 		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
 		return
 	}
-	secret, uri, err := h.totp.Enable(c.Request.Context(), uid, fmt.Sprintf("user-%d", uid))
+	// Prefer the authenticated user's email as the TOTP account name when the
+	// auth middleware populated it; fall back to a stable synthetic name so
+	// enrollment never fails just because the claim was absent.
+	email, _ := c.Get(middleware.CtxEmail)
+	account := fmt.Sprintf("user-%d", uid)
+	if e, ok := email.(string); ok && e != "" {
+		account = e
+	}
+	secret, uri, err := h.totp.Enable(c.Request.Context(), uid, account)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -58,8 +67,7 @@ func (h *MFAHandler) VerifyTOTP(c *gin.Context) {
 		return
 	}
 	var req TOTPCodeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+	if !bindJSON(c, &req) {
 		return
 	}
 	codes, err := h.totp.VerifyEnable(c.Request.Context(), uid, req.Code)
@@ -77,8 +85,7 @@ func (h *MFAHandler) ValidateTOTP(c *gin.Context) {
 		return
 	}
 	var req TOTPCodeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+	if !bindJSON(c, &req) {
 		return
 	}
 	if err := h.totp.Validate(c.Request.Context(), uid, req.Code); err != nil {
