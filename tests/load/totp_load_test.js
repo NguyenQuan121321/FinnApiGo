@@ -17,7 +17,7 @@
 //   k6 run tests/load/totp_load_test.js
 //
 //   # Point at a different host / with a valid JWT:
-//   TOTP_BASE_URL=http://localhost:8080 TOTP_JWT=eyJ... k6 run tests/load/totp_load_test.js
+//   TOTP_BASE_URL=http://localhost:8081 TOTP_JWT=eyJ... k6 run tests/load/totp_load_test.js
 //
 //   # Run only one scenario:
 //   k6 run --scenario normal  tests/load/totp_load_test.js
@@ -31,7 +31,7 @@ import { Counter, Trend } from 'k6/metrics';
 // Configuration
 // ---------------------------------------------------------------------------
 
-const BASE_URL = __ENV.TOTP_BASE_URL || 'http://localhost:8080';
+const BASE_URL = __ENV.TOTP_BASE_URL || 'http://localhost:8081';
 const VALIDATE_URL = `${BASE_URL}/api/v1/auth/mfa/totp/validate`;
 
 // A JWT for an authenticated user. In a real run this must be a LIVE access
