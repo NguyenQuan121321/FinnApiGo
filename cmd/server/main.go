@@ -115,7 +115,7 @@ func run() error {
 	// --- Services ---
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
-		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier,
+		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
 	)
 	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
 	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth)
@@ -123,6 +123,7 @@ func run() error {
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
 	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc)
+	sessionHandler := handlers.NewSessionHandler(authSvc)
 
 	// --- Rate limiter ---
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
@@ -135,11 +136,13 @@ func run() error {
 	router := routes.Register(routes.Deps{
 		Auth:                authHandler,
 		MFA:                 mfaHandler,
+		Sessions:            sessionHandler,
 		JWT:                 jwtMgr,
 		RateLimit:           rateLimiter,
 		TOTPCluster:         totpCluster,
 		DB:                  db,
 		MaxRequestBodyBytes: cfg.Security.MaxRequestBodyBytes,
+		TrustedProxies:      cfg.Server.TrustedProxies,
 	})
 
 	// --- HTTP server with graceful shutdown ---

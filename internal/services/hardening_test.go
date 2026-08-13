@@ -33,7 +33,7 @@ func buildAuthService(t *testing.T, cfg config.AuthConfig, rlCfg config.RateLimi
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
-	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rlCfg, jwtCfg, notify, captcha)
+	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rlCfg, jwtCfg, notify, captcha, nil)
 	return svc, users, tokens, audit, notify, store
 }
 

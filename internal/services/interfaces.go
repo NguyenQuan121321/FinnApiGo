@@ -27,12 +27,24 @@ type UserRepo interface {
 	SetEmailVerified(ctx context.Context, user *models.User, verified bool) error
 }
 
-// RefreshTokenRepo abstracts persistence for refresh tokens.
+// RefreshTokenRepo abstracts persistence for refresh tokens. Each token row
+// also serves as a session/device record (see §Session & Device Management).
 type RefreshTokenRepo interface {
 	Create(ctx context.Context, rt *models.RefreshToken) error
 	FindByHash(ctx context.Context, hash string) (*models.RefreshToken, error)
+	// FindActiveByUser returns the caller's non-expired, non-revoked sessions,
+	// ordered by most-recently-active first (for the "your devices" list).
+	FindActiveByUser(ctx context.Context, userID uint) ([]models.RefreshToken, error)
+	// RevokeByID marks the session with the given id as revoked. It must scope
+	// the update to the supplied userID so one user cannot revoke another's
+	// session (defense against IDOR). Returns ErrSessionNotFound (via gorm's
+	// ErrRecordNotFound sentinel → mapped by the service) when no row matches.
+	RevokeByID(ctx context.Context, id, userID uint) error
 	Revoke(ctx context.Context, rt *models.RefreshToken) error
 	RevokeAllForUser(ctx context.Context, userID uint) error
+	// TouchLastActive bumps last_active_at for the token — called whenever the
+	// session is used (login / refresh rotation). Bounded to the given row id.
+	TouchLastActive(ctx context.Context, id uint) error
 	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
 }
 

@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/device"
+	"github.com/finnapigo/finnapigo/internal/geo"
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
 )
 
 // dummyHash is a pre-computed bcrypt hash of a static string. It is compared
@@ -43,7 +46,8 @@ type AuthService struct {
 	rlCfg      config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
 	jwtCfg     config.JWTConfig
 	notify     Notifier
-	captcha    CaptchaVerifier // §3 — nil-safe (NoOp when off)
+	captcha    CaptchaVerifier   // §3 — nil-safe (NoOp when off)
+	geo        geo.Resolver      // IP -> location label; nil-safe (Unknown)
 }
 
 // StoreProvider abstracts the key-value store for per-account/per-IP counters
@@ -58,6 +62,7 @@ type StoreProvider interface {
 // NewAuthService constructs the service. Repos are interfaces so mocks can be
 // passed in tests. store may be nil (some features will be no-ops). rlCfg drives
 // the §2/§3 velocity limiters and adaptive CAPTCHA; captcha may be nil.
+// geoResolver may be nil (defaults to NoOp — all locations "Unknown").
 func NewAuthService(
 	users UserRepo,
 	tokens RefreshTokenRepo,
@@ -70,14 +75,18 @@ func NewAuthService(
 	jwtCfg config.JWTConfig,
 	notify Notifier,
 	captcha CaptchaVerifier,
+	geoResolver geo.Resolver,
 ) *AuthService {
 	if captcha == nil {
 		captcha = NoOpCaptchaVerifier{}
 	}
+	if geoResolver == nil {
+		geoResolver = geo.NewNoOpResolver()
+	}
 	return &AuthService{
 		users: users, tokens: tokens, usedTokens: usedTokens, audits: audits,
 		store: store, jwt: jwt, cfg: authCfg, rlCfg: rlCfg, jwtCfg: jwtCfg,
-		notify: notify, captcha: captcha,
+		notify: notify, captcha: captcha, geo: geoResolver,
 	}
 }
 
@@ -232,7 +241,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		return TokenPair{}, UserProfile{}, err
 	}
 
-	pair, err := s.issueTokenPair(ctx, user)
+	pair, err := s.issueTokenPair(ctx, user, ip, ua)
 	if err != nil {
 		return TokenPair{}, UserProfile{}, err
 	}
@@ -286,7 +295,8 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uint, ip string) err
 
 // Refresh validates the presented refresh token, revokes it, and issues a NEW
 // access + refresh pair (rotation). Reuse of the old token is therefore detected.
-func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip string) (TokenPair, error) {
+// The caller's ip/ua are stamped onto the new session and used for audit events.
+func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) (TokenPair, error) {
 	hash := hash.HashToken(refreshToken)
 	rt, err := s.tokens.FindByHash(ctx, hash)
 	if err != nil {
@@ -297,10 +307,9 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip string) (Tok
 		return TokenPair{}, ErrInvalidToken
 	}
 
-	// §4 — Refresh-token reuse detection: if a *revoked* (not just expired)
-	// token is presented, it is a strong theft signal. Revoke ALL tokens for
-	// the user and log a high-severity event. Expired-but-not-revoked keeps
-	// the simple rejection (no blowback).
+	// §Session — a revoked session can NEVER rotate. Block instantly and treat
+	// it as a reuse/theft signal: revoke ALL of the user's sessions (per the
+	// existing security spec) and record a high-severity audit event.
 	if rt.Revoked {
 		_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
 		s.audits.Record(ctx, &models.AuditLog{
@@ -323,11 +332,12 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip string) (Tok
 		return TokenPair{}, ErrInvalidToken
 	}
 
-	// Rotate: revoke the old, issue a new pair.
+	// Rotate: revoke the old, issue a new pair (carrying the caller's device
+	// metadata so the "sessions" list reflects the rotating device).
 	if err := s.tokens.Revoke(ctx, rt); err != nil {
 		return TokenPair{}, err
 	}
-	pair, err := s.issueTokenPair(ctx, user)
+	pair, err := s.issueTokenPair(ctx, user, ip, ua)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -587,7 +597,9 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 // ----- internal helpers -----
 
 // issueTokenPair mints an access JWT + opaque refresh token (hash stored).
-func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User) (TokenPair, error) {
+// The caller's ip/ua are stamped onto the new refresh-token row so it doubles
+// as a session/device record (location is resolved via the geo resolver).
+func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, error) {
 	access, err := s.jwt.Issue(user.ID, user.Role, user.Email,
 		jwt.TokenTypeAccess, s.jwtCfg.AccessTTL)
 	if err != nil {
@@ -597,10 +609,16 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User) (To
 	if err != nil {
 		return TokenPair{}, err
 	}
+	now := time.Now()
 	rt := &models.RefreshToken{
-		UserID:    user.ID,
-		TokenHash: hash.HashToken(refreshPlain),
-		ExpiresAt: time.Now().Add(s.jwtCfg.RefreshTTL),
+		UserID:          user.ID,
+		TokenHash:       hash.HashToken(refreshPlain),
+		ExpiresAt:       now.Add(s.jwtCfg.RefreshTTL),
+		IPAddress:       ip,
+		UserAgent:       ua,
+		DeviceName:      device.Parse(ua),
+		LocationEstimate: s.resolveLocation(ip),
+		LastActiveAt:    now,
 	}
 	if err := s.tokens.Create(ctx, rt); err != nil {
 		return TokenPair{}, err
@@ -608,8 +626,66 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User) (To
 	return TokenPair{
 		AccessToken:  access,
 		RefreshToken: refreshPlain,
-		ExpiresAt:    time.Now().Add(s.jwtCfg.AccessTTL),
+		ExpiresAt:    now.Add(s.jwtCfg.AccessTTL),
 	}, nil
+}
+
+// resolveLocation maps an IP to a location label, defaulting to "Unknown" when
+// no resolver is wired or the lookup fails. Never blocks: the geo resolver is
+// expected to honor the request context; a nil resolver is treated as NoOp.
+func (s *AuthService) resolveLocation(ip string) string {
+	if s.geo == nil || ip == "" {
+		return geo.UnknownLocation
+	}
+	if loc := s.geo.Resolve(context.Background(), ip); loc != "" {
+		return loc
+	}
+	return geo.UnknownLocation
+}
+
+// ----- 10. Session & Device Management -----
+
+// ListSessions returns all active (non-expired, non-revoked) sessions for the
+// authenticated user, as sanitized SessionInfo projections (token hash omitted).
+// Ordered most-recently-active first by the repository.
+func (s *AuthService) ListSessions(ctx context.Context, userID uint) ([]SessionInfo, error) {
+	rows, err := s.tokens.FindActiveByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	out := make([]SessionInfo, 0, len(rows))
+	for i := range rows {
+		rt := &rows[i]
+		out = append(out, SessionInfo{
+			ID:               rt.ID,
+			IPAddress:        rt.IPAddress,
+			UserAgent:        rt.UserAgent,
+			DeviceName:       rt.DeviceName,
+			LocationEstimate: rt.LocationEstimate,
+			CreatedAt:        rt.CreatedAt,
+			LastActiveAt:     rt.LastActiveAt,
+			ExpiresAt:        rt.ExpiresAt,
+		})
+	}
+	return out, nil
+}
+
+// RevokeSession revokes a single session (device) by id, scoped to the caller's
+// userID so one user cannot revoke another user's session (IDOR defense).
+// The device is then instantly blocked from rotating its refresh token.
+func (s *AuthService) RevokeSession(ctx context.Context, id, userID uint, ip string) error {
+	if err := s.tokens.RevokeByID(ctx, id, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	uid := userID
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &uid, Event: models.AuditEventSessionRevoked,
+		IPAddress: ip, Success: true,
+	})
+	return nil
 }
 
 // isLocked reports whether the account is currently in a temporary lockout.

@@ -17,7 +17,7 @@ type AuthService interface {
 	Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, error)
 	Logout(context.Context, string, string) error
 	LogoutAll(context.Context, uint, string) error
-	Refresh(context.Context, string, string) (services.TokenPair, error)
+	Refresh(context.Context, string, string, string) (services.TokenPair, error)
 	ForgotPassword(context.Context, string, string) error
 	ResetPassword(context.Context, services.ResetPasswordInput, string) error
 	ChangePassword(context.Context, services.ChangePasswordInput, string) error
@@ -124,7 +124,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	pair, err := h.svc.Refresh(c.Request.Context(), req.RefreshToken, clientIP(c))
+	pair, err := h.svc.Refresh(c.Request.Context(), req.RefreshToken, clientIP(c), c.Request.UserAgent())
 	if err != nil {
 		respondError(c, err)
 		return

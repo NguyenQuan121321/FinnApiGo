@@ -20,11 +20,16 @@ import (
 type Deps struct {
 	Auth                *handlers.AuthHandler
 	MFA                 *handlers.MFAHandler
+	Sessions            *handlers.SessionHandler
 	JWT                 *jwt.JWTManager
 	RateLimit           *middleware.RateLimiter
 	TOTPCluster         *middleware.ConcurrencyLimiter // caps concurrent CPU-bound TOTP validations
 	DB                  *gorm.DB                      // optional, for /readyz
 	MaxRequestBodyBytes int64                         // §5 — global body-size cap applied BEFORE routes
+	// TrustedProxies configures which direct peers may set X-Forwarded-For /
+	// X-Real-IP, so c.ClientIP() resolves the real client IP securely behind a
+	// reverse proxy (Cloudflare/Nginx). Empty trusts no one (RemoteAddr only).
+	TrustedProxies []string
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -32,6 +37,14 @@ type Deps struct {
 // under /api/v1/auth/mfa — exactly per the prompt's structure.
 func Register(deps Deps) *gin.Engine {
 	r := gin.New()
+	// §Session — securely honor X-Forwarded-For / X-Real-IP ONLY from the
+	// configured reverse-proxy CIDRs. When TrustedProxies is empty we trust no
+	// peer, so c.ClientIP() returns the direct RemoteAddr (un-spoofable). This
+	// drives the client_ip recorded on each session.
+	//
+	// SetTrustedProxies(nil) means "trust no proxies"; passing the operator's
+	// list restricts header trust to exactly those peers.
+	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 	// §5 — global body-size limit. Applied here (before any route group) so it
@@ -88,6 +101,14 @@ func Register(deps Deps) *gin.Engine {
 	authed.POST("/logout-all", deps.Auth.LogoutAll)
 	authed.POST("/change-password", deps.Auth.ChangePassword)
 	authed.GET("/me", deps.Auth.Me)
+
+	// ---- Session & device management (authenticated) ----
+	// GET    /api/v1/auth/sessions      — list the caller's active devices
+	// DELETE /api/v1/auth/sessions/:id  — revoke one device's session
+	if deps.Sessions != nil {
+		authed.GET("/sessions", deps.Sessions.List)
+		authed.DELETE("/sessions/:id", deps.Sessions.Revoke)
+	}
 
 	// ---- MFA sub-group (authenticated) ----
 	mfa := authed.Group("/mfa")

@@ -55,3 +55,53 @@ func TestDBConfigDSN(t *testing.T) {
 		t.Fatalf("DSN=%q", dsn)
 	}
 }
+
+func TestEnvCSV(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want []string
+	}{
+		{"unset", "", nil},
+		{"whitespace only", "  ", nil},
+		{"single", "10.0.0.1", []string{"10.0.0.1"}},
+		{"multiple", "10.0.0.1, 172.16.0.0/12", []string{"10.0.0.1", "172.16.0.0/12"}},
+		{"trims spaces", "  a , b , c  ", []string{"a", "b", "c"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TEST_CSV_PROXY", tc.env)
+			got := envCSV("TEST_CSV_PROXY")
+			if len(got) != len(tc.want) {
+				t.Fatalf("len=%d want=%d", len(got), len(tc.want))
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestLoad_TrustedProxies(t *testing.T) {
+	// Ensure TrustedProxies is nil (secure default) when unset.
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("TRUSTED_PROXIES", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.TrustedProxies != nil {
+		t.Fatalf("expected nil TrustedProxies, got %v", cfg.Server.TrustedProxies)
+	}
+	// When set, should parse into a slice.
+	t.Setenv("TRUSTED_PROXIES", "10.0.0.1, 172.16.0.0/12")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Server.TrustedProxies) != 2 || cfg.Server.TrustedProxies[0] != "10.0.0.1" {
+		t.Fatalf("TrustedProxies=%v", cfg.Server.TrustedProxies)
+	}
+}

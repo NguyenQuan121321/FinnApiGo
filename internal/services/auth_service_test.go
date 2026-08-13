@@ -53,7 +53,7 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
 
-	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil)
+	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil)
 	return svc, users, tokens, audit, notify
 }
 
@@ -253,7 +253,7 @@ func TestRefresh_RotatesAndInvalidatesOldToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := svc.Refresh(context.Background(), first.RefreshToken, "ip")
+	second, err := svc.Refresh(context.Background(), first.RefreshToken, "ip", "test-agent")
 	if err != nil {
 		t.Fatalf("refresh failed: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestRefresh_RotatesAndInvalidatesOldToken(t *testing.T) {
 		t.Error("refresh token must be rotated (new value expected)")
 	}
 	// Reusing the old token must now fail.
-	_, err = svc.Refresh(context.Background(), first.RefreshToken, "ip")
+	_, err = svc.Refresh(context.Background(), first.RefreshToken, "ip", "test-agent")
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken on replay, got %v", err)
 	}
@@ -278,17 +278,17 @@ func TestRefresh_ReuseDetection_RevokesAll(t *testing.T) {
 		Email: "alice@example.com", Password: "Password1",
 	}, "ip", "test-agent")
 	// First refresh rotates to a new token.
-	first, err := svc.Refresh(context.Background(), pair.RefreshToken, "ip")
+	first, err := svc.Refresh(context.Background(), pair.RefreshToken, "ip", "test-agent")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Present the OLD (now revoked) token again — theft signal.
-	_, err = svc.Refresh(context.Background(), pair.RefreshToken, "evil-ip")
+	_, err = svc.Refresh(context.Background(), pair.RefreshToken, "evil-ip", "evil-agent")
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken for reused token, got %v", err)
 	}
 	// The NEW token should also be revoked (revoke-all).
-	_, err = svc.Refresh(context.Background(), first.RefreshToken, "ip")
+	_, err = svc.Refresh(context.Background(), first.RefreshToken, "ip", "test-agent")
 	if !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expected ErrInvalidToken after revoke-all, got %v", err)
 	}
@@ -516,7 +516,7 @@ func TestResendVerifyEmail_RateLimited(t *testing.T) {
 		VerifyResendWindow:      time.Minute,
 	}
 	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr,
-		config.AuthConfig{OTPLength: 6}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil)
+		config.AuthConfig{OTPLength: 6}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil)
 
 	if _, err := svc.Register(context.Background(), RegisterInput{
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
@@ -564,7 +564,7 @@ func newResendTestService(rlCfg config.RateLimitConfig, users *mockUserRepo, aud
 		users, newMockTokenRepo(), newMockUsedTokenRepo(), audit, newMockStore(),
 		jwt.NewJWTManager("test-secret", "test-issuer"),
 		config.AuthConfig{OTPLength: 6}, rlCfg,
-		config.JWTConfig{VerifyTTL: time.Hour}, notify, nil,
+		config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil,
 	)
 }
 
@@ -728,3 +728,246 @@ func TestLogoutAll(t *testing.T) {
 	}
 	// All tokens should now be revoked — refresh must fail.
 }
+
+// ----- Session & Device Management -----
+
+func TestListSessions_AfterLogin(t *testing.T) {
+	svc, _, _, _, _ := newTestAuthService()
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Login twice to create two sessions.
+	_, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "1.2.3.4", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0")
+	if err != nil {
+		t.Fatalf("login1: %v", err)
+	}
+	_, _, err = svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "5.6.7.8", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Safari/605.1")
+	if err != nil {
+		t.Fatalf("login2: %v", err)
+	}
+	sessions, err := svc.ListSessions(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("len(sessions)=%d, want 2", len(sessions))
+	}
+	// Most recently active first — the second login created the freshest session.
+	if sessions[0].DeviceName != "Safari on iPhone" {
+		t.Errorf("first session device = %q, want %q", sessions[0].DeviceName, "Safari on iPhone")
+	}
+	if sessions[0].LocationEstimate != "Unknown" {
+		t.Errorf("default location should be Unknown, got %q", sessions[0].LocationEstimate)
+	}
+}
+
+func TestListSessions_SkipsRevokedAndExpired(t *testing.T) {
+	svc, _, tokens, _, _ := newTestAuthService()
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Login creates session id=1.
+	_, _, _ = svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "1.1.1.1", "agent")
+	// Manually revoke session 1 and add an expired row.
+	tokens.mu.Lock()
+	for _, rt := range tokens.rows {
+		if rt.UserID == 1 {
+			rt.Revoked = true
+		}
+	}
+	expired := &models.RefreshToken{
+		ID: 999, UserID: 1, TokenHash: "exp", Revoked: false,
+		ExpiresAt: time.Now().Add(-time.Hour), LastActiveAt: time.Now().Add(-time.Hour),
+		DeviceName: "old",
+	}
+	tokens.rows[999] = expired
+	tokens.byHash["exp"] = 999
+	tokens.mu.Unlock()
+
+	sessions, err := svc.ListSessions(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("len(sessions)=%d, want 0 (all revoked/expired)", len(sessions))
+	}
+}
+
+func TestRevokeSession_Success(t *testing.T) {
+	svc, _, _, audit, _ := newTestAuthService()
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _ = svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "1.2.3.4", "agent")
+	// Revoke session id=1.
+	if err := svc.RevokeSession(context.Background(), 1, 1, "10.0.0.1"); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	// Verify it no longer appears in the active list.
+	sessions, _ := svc.ListSessions(context.Background(), 1)
+	if len(sessions) != 0 {
+		t.Fatalf("expected 0 sessions after revoke, got %d", len(sessions))
+	}
+	// Audit event must be recorded.
+	events := audit.byEvent(models.AuditEventSessionRevoked)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 session_revoked event, got %d", len(events))
+	}
+	if events[0].IPAddress != "10.0.0.1" {
+		t.Errorf("audit ip = %q, want %q", events[0].IPAddress, "10.0.0.1")
+	}
+}
+
+func TestRevokeSession_NotFound(t *testing.T) {
+	svc, _, _, _, _ := newTestAuthService()
+	err := svc.RevokeSession(context.Background(), 9999, 1, "ip")
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("expected ErrSessionNotFound, got %v", err)
+	}
+}
+
+func TestRevokeSession_IDOR_WrongUser(t *testing.T) {
+	svc, _, _, _, _ := newTestAuthService()
+	// Register two users.
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "bob", Email: "bob@example.com", Password: "Password1", FullName: "Bob",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Login alice (session belongs to user 1).
+	_, _, _ = svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "1.1.1.1", "agent")
+	// Bob tries to revoke alice's session → should get ErrSessionNotFound (scoped to bob's id=2).
+	err := svc.RevokeSession(context.Background(), 1, 2, "evil")
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("expected ErrSessionNotFound for cross-user revoke, got %v", err)
+	}
+}
+
+func TestRefresh_MetadataPopulated(t *testing.T) {
+	svc, _, tokens, _, _ := newTestAuthService()
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pair, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "10.0.0.1", "Mozilla/5.0 (Windows NT 10.0) Chrome/120.0")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	// Find the session row the login created.
+	tokens.mu.Lock()
+	var loginRT *models.RefreshToken
+	for _, rt := range tokens.rows {
+		if rt.UserID == 1 && !rt.Revoked {
+			loginRT = rt
+		}
+	}
+	tokens.mu.Unlock()
+	if loginRT == nil {
+		t.Fatal("no active session found after login")
+	}
+	if loginRT.IPAddress != "10.0.0.1" {
+		t.Errorf("ip = %q, want %q", loginRT.IPAddress, "10.0.0.1")
+	}
+	if loginRT.DeviceName != "Chrome on Windows" {
+		t.Errorf("device = %q, want %q", loginRT.DeviceName, "Chrome on Windows")
+	}
+	if loginRT.LocationEstimate != "Unknown" {
+		t.Errorf("location = %q, want %q", loginRT.LocationEstimate, "Unknown")
+	}
+	if loginRT.LastActiveAt.IsZero() {
+		t.Error("LastActiveAt should be set")
+	}
+	// Refresh — the NEW session should carry the new caller's metadata.
+	second, err := svc.Refresh(context.Background(), pair.RefreshToken, "20.0.0.2", "Mozilla/5.0 (iPhone) Safari/605.1")
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	tokens.mu.Lock()
+	var refreshRT *models.RefreshToken
+	for _, rt := range tokens.rows {
+		if rt.UserID == 1 && !rt.Revoked {
+			refreshRT = rt
+		}
+	}
+	tokens.mu.Unlock()
+	if refreshRT == nil {
+		t.Fatal("no active session found after refresh")
+	}
+	if refreshRT.IPAddress != "20.0.0.2" {
+		t.Errorf("refreshed session ip = %q, want %q", refreshRT.IPAddress, "20.0.0.2")
+	}
+	if refreshRT.DeviceName != "Safari on iPhone" {
+		t.Errorf("refreshed session device = %q, want %q", refreshRT.DeviceName, "Safari on iPhone")
+	}
+	_ = second // consumed
+}
+
+func TestListSessions_WithCustomGeoResolver(t *testing.T) {
+	users := newMockUserRepo()
+	tokens := newMockTokenRepo()
+	usedTokens := newMockUsedTokenRepo()
+	store := newMockStore()
+	audit := &mockAuditRepo{}
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	notify := &mockNotifier{}
+	geoResolver := mockGeoResolver{loc: "Berlin, DE"}
+
+	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr,
+		config.AuthConfig{MaxLoginAttempts: 5},
+		config.RateLimitConfig{},
+		config.JWTConfig{AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour},
+		notify, nil, geoResolver,
+	)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "1.2.3.4", "Chrome/120.0")
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	sessions, err := svc.ListSessions(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("len=%d, want 1", len(sessions))
+	}
+	if sessions[0].LocationEstimate != "Berlin, DE" {
+		t.Errorf("location = %q, want %q", sessions[0].LocationEstimate, "Berlin, DE")
+	}
+}
+
+// mockGeoResolver is a test geo.Resolver returning a fixed label.
+type mockGeoResolver struct {
+	loc string
+}
+
+func (m mockGeoResolver) Resolve(_ context.Context, _ string) string { return m.loc }

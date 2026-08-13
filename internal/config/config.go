@@ -28,6 +28,12 @@ type Config struct {
 type ServerConfig struct {
 	Port    string
 	GinMode string
+	// TrustedProxies is the comma-separated list (TRUSTED_PROXIES) of CIDR/IPs
+	// that may set X-Forwarded-For / X-Real-IP. Empty (default) trusts NO proxy,
+	// so c.ClientIP() returns the direct RemoteAddr — the spoof-proof default.
+	// Set this to your load balancer / Cloudflare / Nginx egress CIDRs in
+	// production so the app resolves the real client IP for session metadata.
+	TrustedProxies []string
 }
 
 type DBConfig struct {
@@ -169,8 +175,9 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:    env("SERVER_PORT", "8080"),
-			GinMode: env("GIN_MODE", "debug"),
+			Port:            env("SERVER_PORT", "8080"),
+			GinMode:         env("GIN_MODE", "debug"),
+			TrustedProxies:  envCSV("TRUSTED_PROXIES"),
 		},
 		DB: DBConfig{
 			Host:         env("DB_HOST", "127.0.0.1"),
@@ -308,3 +315,20 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 
 // TrimSpace centralises whitespace cleanup for request fields.
 func TrimSpace(s string) string { return strings.TrimSpace(s) }
+
+// envCSV reads a comma-separated env var into a trimmed slice. Returns nil
+// (len 0) when unset/empty — which callers treat as "trust nothing".
+func envCSV(key string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}

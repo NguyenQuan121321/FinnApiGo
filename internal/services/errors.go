@@ -27,6 +27,7 @@ var (
 
 	// 404
 	ErrUserNotFound          = errors.New("user not found")
+	ErrSessionNotFound       = errors.New("session not found")
 
 	// 409
 	ErrEmailExists           = errors.New("email already registered")

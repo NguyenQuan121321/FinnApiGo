@@ -98,6 +98,100 @@ func TestRefreshTokenRepository(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenRepository_FindActiveByUser(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	u2 := &models.User{Username: "bob", Email: "bob@example.com", Password: "h", Role: models.RoleUser, IsActive: true}
+	if err := db.Create(u2).Error; err != nil {
+		t.Fatal(err)
+	}
+	repo := NewRefreshTokenRepository(db)
+
+	// user u: two active sessions + one revoked + one expired
+	now := time.Now()
+	sessA := &models.RefreshToken{UserID: u.ID, TokenHash: "a", ExpiresAt: now.Add(time.Hour), LastActiveAt: now, DeviceName: "Chrome on Windows"}
+	sessB := &models.RefreshToken{UserID: u.ID, TokenHash: "b", ExpiresAt: now.Add(2 * time.Hour), LastActiveAt: now.Add(-time.Minute), DeviceName: "Safari on iPhone"}
+	revoked := &models.RefreshToken{UserID: u.ID, TokenHash: "rev", ExpiresAt: now.Add(time.Hour), Revoked: true}
+	expired := &models.RefreshToken{UserID: u.ID, TokenHash: "exp", ExpiresAt: now.Add(-time.Hour)}
+	for _, rt := range []*models.RefreshToken{sessA, sessB, revoked, expired} {
+		if err := repo.Create(ctx, rt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// user u2: one active (should NOT appear in u1's listing)
+	other := &models.RefreshToken{UserID: u2.ID, TokenHash: "other", ExpiresAt: now.Add(time.Hour)}
+	if err := repo.Create(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := repo.FindActiveByUser(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("FindActiveByUser err=%v", err)
+	}
+	// Only sessA + sessB should appear (revoked + expired filtered, u2 excluded).
+	if len(rows) != 2 {
+		t.Fatalf("len(active) = %d, want 2", len(rows))
+	}
+	// sessA is newest activity (now > now-1min) → should be first.
+	if rows[0].TokenHash != "a" {
+		t.Errorf("first row hash = %q, want %q", rows[0].TokenHash, "a")
+	}
+	if rows[1].TokenHash != "b" {
+		t.Errorf("second row hash = %q, want %q", rows[1].TokenHash, "b")
+	}
+}
+
+func TestRefreshTokenRepository_RevokeByID(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	repo := NewRefreshTokenRepository(db)
+	rt := &models.RefreshToken{UserID: u.ID, TokenHash: "target", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := repo.Create(ctx, rt); err != nil {
+		t.Fatal(err)
+	}
+	// RevokeByID scoped to correct user must succeed.
+	if err := repo.RevokeByID(ctx, rt.ID, u.ID); err != nil {
+		t.Fatalf("RevokeByID err=%v", err)
+	}
+	// Verify it is actually revoked.
+	got, err := repo.FindByHash(ctx, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Revoked {
+		t.Error("expected Revoked=true after RevokeByID")
+	}
+	// RevokeByID scoped to WRONG user → not found.
+	err = repo.RevokeByID(ctx, rt.ID, u.ID+1)
+	if err == nil {
+		t.Fatal("expected error when revoking other user's session")
+	}
+}
+
+func TestRefreshTokenRepository_TouchLastActive(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	repo := NewRefreshTokenRepository(db)
+	rt := &models.RefreshToken{UserID: u.ID, TokenHash: "touch", ExpiresAt: time.Now().Add(time.Hour), LastActiveAt: time.Now().Add(-time.Hour)}
+	if err := repo.Create(ctx, rt); err != nil {
+		t.Fatal(err)
+	}
+	original := rt.LastActiveAt
+	if err := repo.TouchLastActive(ctx, rt.ID); err != nil {
+		t.Fatalf("TouchLastActive err=%v", err)
+	}
+	got, err := repo.FindByHash(ctx, "touch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastActiveAt.After(original) {
+		t.Error("expected LastActiveAt to be bumped")
+	}
+}
+
 func TestOtpAndUsedTokenRepositories(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)

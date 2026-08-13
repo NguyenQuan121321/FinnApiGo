@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/finnapigo/finnapigo/internal/models"
 )
 
@@ -186,6 +188,57 @@ func (m *mockTokenRepo) RevokeAllForUser(ctx context.Context, userID uint) error
 		if rt.UserID == userID {
 			rt.Revoked = true
 		}
+	}
+	return nil
+}
+
+// FindActiveByUser returns the caller's non-expired, non-revoked sessions,
+// newest activity first — mirrors the GORM repository ordering for parity.
+func (m *mockTokenRepo) FindActiveByUser(ctx context.Context, userID uint) ([]models.RefreshToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	var out []models.RefreshToken
+	for _, rt := range m.rows {
+		if rt.UserID == userID && !rt.Revoked && rt.ExpiresAt.After(now) {
+			out = append(out, *rt)
+		}
+	}
+	// Sort by LastActiveAt desc, then ID desc (stable enough for assertions).
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0; j-- {
+			a, b := out[j-1], out[j]
+			if a.LastActiveAt.Before(b.LastActiveAt) ||
+				(a.LastActiveAt.Equal(b.LastActiveAt) && a.ID < b.ID) {
+				out[j-1], out[j] = out[j], out[j-1]
+			} else {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// RevokeByID mimics the GORM repo: scope to userID, return gorm.ErrRecordNotFound
+// when no row matched (the service maps that sentinel to ErrSessionNotFound).
+func (m *mockTokenRepo) RevokeByID(ctx context.Context, id, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, rt := range m.rows {
+		if rt.ID == id && rt.UserID == userID {
+			rt.Revoked = true
+			return nil
+		}
+	}
+	return gorm.ErrRecordNotFound
+}
+
+// TouchLastActive bumps last_active_at for the given row id (best-effort).
+func (m *mockTokenRepo) TouchLastActive(ctx context.Context, id uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rt, ok := m.rows[id]; ok {
+		rt.LastActiveAt = time.Now()
 	}
 	return nil
 }

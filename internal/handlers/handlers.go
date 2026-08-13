@@ -33,8 +33,8 @@ func statusForError(err error) (int, string) {
 		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrEmailNotVerified):
 		return http.StatusForbidden, err.Error()
-	case errors.Is(err, services.ErrUserNotFound):
-		return http.StatusNotFound, err.Error()
+		case errors.Is(err, services.ErrUserNotFound), errors.Is(err, services.ErrSessionNotFound):
+			return http.StatusNotFound, err.Error()
 	case errors.Is(err, services.ErrEmailExists), errors.Is(err, services.ErrUsernameExists):
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, services.ErrInvalidInput), errors.Is(err, services.ErrPasswordTooWeak),

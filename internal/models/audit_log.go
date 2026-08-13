@@ -18,6 +18,7 @@ const (
 	AuditEventTOTPValidated       = "totp_validated"
 	AuditEventTOTPFailed          = "totp_failed"
 	AuditEventRecoveryCodeUsed    = "recovery_code_used"
+	AuditEventSessionRevoked      = "session_revoked" // user revoked a single device/session
 )
 
 // AuditLog records security-relevant actions for compliance / forensics.
