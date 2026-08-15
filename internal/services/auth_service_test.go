@@ -1027,8 +1027,10 @@ func TestLogin_TOTPActive_ReturnsMFAPending(t *testing.T) {
 	})
 	// Simulate TOTP enabled for this user.
 	totpRepo.mu.Lock()
+	//nolint:gosec
 	totpRepo.devices[1] = &models.TOTPDevice{ID: 1, UserID: 1, Secret: "JBSWY3DPEHPK3PXP", Enabled: true}
 	totpRepo.mu.Unlock()
+	// ... rest of test
 
 	pair, _, mfaPending, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
@@ -1083,8 +1085,10 @@ func TestCompleteMFALogin_CorrectCode(t *testing.T) {
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
 	})
 	totpRepo.mu.Lock()
+	//nolint:gosec
 	totpRepo.devices[1] = &models.TOTPDevice{ID: 1, UserID: 1, Secret: "JBSWY3DPEHPK3PXP", Enabled: true}
 	totpRepo.mu.Unlock()
+	// ... rest of test
 
 	pair, profile, err := svc.CompleteMFALogin(context.Background(), CompleteMFALoginInput{
 		UserID: 1, Code: "123456", IP: "1.2.3.4", UA: "Mozilla/5.0 (Windows NT 10.0) Chrome/120.0",
@@ -1128,8 +1132,10 @@ func TestCompleteMFALogin_WrongCode(t *testing.T) {
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
 	})
 	totpRepo.mu.Lock()
+	//nolint:gosec
 	totpRepo.devices[1] = &models.TOTPDevice{ID: 1, UserID: 1, Secret: "JBSWY3DPEHPK3PXP", Enabled: true}
 	totpRepo.mu.Unlock()
+	// ... rest of test
 
 	// Set up mock to reject the code.
 	totpVal.err = ErrInvalidOTP
