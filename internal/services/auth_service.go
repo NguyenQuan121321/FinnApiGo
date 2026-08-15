@@ -690,14 +690,14 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip,
 	}
 	now := time.Now()
 	rt := &models.RefreshToken{
-		UserID:          user.ID,
-		TokenHash:       hash.HashToken(refreshPlain),
-		ExpiresAt:       now.Add(s.jwtCfg.RefreshTTL),
-		IPAddress:       ip,
-		UserAgent:       ua,
-		DeviceName:      device.Parse(ua),
+		UserID:           user.ID,
+		TokenHash:        hash.HashToken(refreshPlain),
+		ExpiresAt:        now.Add(s.jwtCfg.RefreshTTL),
+		IPAddress:        ip,
+		UserAgent:        ua,
+		DeviceName:       device.Parse(ua),
 		LocationEstimate: s.resolveLocation(ip),
-		LastActiveAt:    now,
+		LastActiveAt:     now,
 	}
 	if err := s.tokens.Create(ctx, rt); err != nil {
 		return TokenPair{}, err

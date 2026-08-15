@@ -48,14 +48,14 @@ type EmailVerifyInput struct {
 
 // OTPSendInput is the input to MFAService.SendOTP.
 type OTPSendInput struct {
-	UserID uint
+	UserID  uint
 	Purpose string
 }
 
 // OTPVerifyInput is the input to MFAService.VerifyOTP.
 type OTPVerifyInput struct {
-	UserID uint
-	Code   string
+	UserID  uint
+	Code    string
 	Purpose string
 }
 
@@ -105,12 +105,12 @@ func FromUser(u *models.User) UserProfile {
 // SessionInfo is the sanitized projection of one active refresh-token row for
 // the "your devices / sessions" list. It deliberately omits the token hash.
 type SessionInfo struct {
-	ID              uint      `json:"id"`
-	IPAddress       string    `json:"ipAddress"`
-	UserAgent       string    `json:"userAgent"`
-	DeviceName      string    `json:"deviceName"`
-	LocationEstimate string   `json:"locationEstimate"`
-	CreatedAt       time.Time `json:"createdAt"`
-	LastActiveAt    time.Time `json:"lastActiveAt"`
-	ExpiresAt       time.Time `json:"expiresAt"`
+	ID               uint      `json:"id"`
+	IPAddress        string    `json:"ipAddress"`
+	UserAgent        string    `json:"userAgent"`
+	DeviceName       string    `json:"deviceName"`
+	LocationEstimate string    `json:"locationEstimate"`
+	CreatedAt        time.Time `json:"createdAt"`
+	LastActiveAt     time.Time `json:"lastActiveAt"`
+	ExpiresAt        time.Time `json:"expiresAt"`
 }

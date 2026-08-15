@@ -13,17 +13,17 @@ import (
 
 // Config holds every runtime knob for the application.
 type Config struct {
-	Server     ServerConfig
-	DB         DBConfig
-	JWT        JWTConfig
-	Auth       AuthConfig
-	RateLimit  RateLimitConfig
-	SMTP       SMTPConfig
-	Redis      RedisConfig
-	Security   SecurityConfig
-	Captcha    CaptchaConfig
+	Server      ServerConfig
+	DB          DBConfig
+	JWT         JWTConfig
+	Auth        AuthConfig
+	RateLimit   RateLimitConfig
+	SMTP        SMTPConfig
+	Redis       RedisConfig
+	Security    SecurityConfig
+	Captcha     CaptchaConfig
 	GoogleOAuth GoogleOAuthConfig
-	Audit      AuditConfig
+	Audit       AuditConfig
 }
 
 type ServerConfig struct {
@@ -62,6 +62,11 @@ type JWTConfig struct {
 	ResetTTL      time.Duration
 	VerifyTTL     time.Duration
 	MFAPendingTTL time.Duration
+	// SudoTTL is the lifetime of the short-lived "sudo" token minted after a
+	// successful TOTP verification on the recovery-codes view endpoint.
+	// Within this window the user may regenerate codes without re-entering
+	// a TOTP code (GitHub-style sudo mode).
+	SudoTTL time.Duration
 }
 
 type AuthConfig struct {
@@ -89,6 +94,10 @@ type AuthConfig struct {
 	// RecoveryCodeBytes is the entropy (in bytes) of each recovery code before
 	// hex encoding (16 => 128-bit codes, 32 hex chars).
 	RecoveryCodeBytes int
+	// RecoveryCodeKey is an optional hex-encoded 32-byte AES-256 key used to
+	// seal the re-viewable copy of each recovery code. When empty the key is
+	// derived from JWT_SECRET (see cmd/server wiring).
+	RecoveryCodeKey string
 }
 
 type RateLimitConfig struct {
@@ -186,9 +195,9 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:            env("SERVER_PORT", "8080"),
-			GinMode:         env("GIN_MODE", "debug"),
-			TrustedProxies:  envCSV("TRUSTED_PROXIES"),
+			Port:           env("SERVER_PORT", "8080"),
+			GinMode:        env("GIN_MODE", "debug"),
+			TrustedProxies: envCSV("TRUSTED_PROXIES"),
 		},
 		DB: DBConfig{
 			Host:         env("DB_HOST", "127.0.0.1"),
@@ -207,6 +216,7 @@ func Load() (*Config, error) {
 			ResetTTL:      envDuration("RESET_TOKEN_TTL", 15*time.Minute),
 			VerifyTTL:     envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
 			MFAPendingTTL: envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
+			SudoTTL:       envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
 		},
 		Auth: AuthConfig{
 			MaxLoginAttempts:     envInt("MAX_LOGIN_ATTEMPTS", 5),
@@ -220,6 +230,7 @@ func Load() (*Config, error) {
 			TOTPAttemptWindow:    envDuration("TOTP_ATTEMPT_WINDOW", 5*time.Minute),
 			RecoveryCodeCount:    envInt("RECOVERY_CODE_COUNT", 10),
 			RecoveryCodeBytes:    envInt("RECOVERY_CODE_BYTES", 16),
+			RecoveryCodeKey:      env("RECOVERY_CODE_KEY", ""),
 		},
 		RateLimit: RateLimitConfig{
 			RPS:                      envFloat("RATE_LIMIT_RPS", 5),
@@ -254,17 +265,17 @@ func Load() (*Config, error) {
 			RateLimiterEntryTTL: envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
 			TOTPMaxConcurrent:   envInt("TOTP_MAX_CONCURRENT", 64),
 		},
-			Captcha: CaptchaConfig{
-				Provider: env("CAPTCHA_PROVIDER", ""),
-				Secret:   env("CAPTCHA_SECRET", ""),
-				SiteKey:  env("CAPTCHA_SITE_KEY", ""),
-			},
-			GoogleOAuth: GoogleOAuthConfig{
-				ClientID:     env("GOOGLE_CLIENT_ID", ""),
-				ClientSecret: env("GOOGLE_CLIENT_SECRET", ""),
-				RedirectURL:  env("GOOGLE_REDIRECT_URL", ""),
-			},
-			Audit: AuditConfig{
+		Captcha: CaptchaConfig{
+			Provider: env("CAPTCHA_PROVIDER", ""),
+			Secret:   env("CAPTCHA_SECRET", ""),
+			SiteKey:  env("CAPTCHA_SITE_KEY", ""),
+		},
+		GoogleOAuth: GoogleOAuthConfig{
+			ClientID:     env("GOOGLE_CLIENT_ID", ""),
+			ClientSecret: env("GOOGLE_CLIENT_SECRET", ""),
+			RedirectURL:  env("GOOGLE_REDIRECT_URL", ""),
+		},
+		Audit: AuditConfig{
 			BufferSize: envInt("AUDIT_BUFFER_SIZE", 1024),
 			FlushBatch: envInt("AUDIT_FLUSH_BATCH", 64),
 		},

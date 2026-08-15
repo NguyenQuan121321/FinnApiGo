@@ -10,7 +10,7 @@ http:
     type: json
     data: |-
       {
-        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjIsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJ0ZXN0MUBleGFtcGxlLmNvbSIsInR5cGUiOiJ2ZXJpZnktZW1haWwiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIyIiwiZXhwIjoxNzg2MDg1ODE2LCJuYmYiOjE3ODU5OTk0MTYsImlhdCI6MTc4NTk5OTQxNiwianRpIjoiNTFiMGFjN2ItOWMxZC00MDdjLWIwZTctNmJhZjNmYWUzZTBmIn0.TwjwJnrnF1s60VNgNxuFPwfy_5iW_swD-0OC0zkuLrY"
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjI2NDYsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJpdHp0aGVjbG91ZDI5MUBnbWFpbC5jb20iLCJ0eXBlIjoiYWNjZXNzIiwiaXNzIjoiZmlubmFwaWdvIiwic3ViIjoiMjY0NiIsImV4cCI6MTc4NjgwOTk5MywibmJmIjoxNzg2ODA5MDkzLCJpYXQiOjE3ODY4MDkwOTN9.90yMjsYL_0Dcg-L2E5TQwmVibV2356tQHmA40LZ15D4"
       }
 
 settings:

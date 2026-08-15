@@ -22,8 +22,21 @@ func (r *TOTPRepository) FindByUserID(ctx context.Context, userID uint) (*models
 	}
 	return &d, err
 }
-func (r *TOTPRepository) CreateRecoveryCodes(ctx context.Context, codes []*models.RecoveryCode) error {
-	return r.db.WithContext(ctx).Create(codes).Error
+
+// ReplaceRecoveryCodes atomically swaps the user's entire recovery-code set:
+// all existing rows (used and unused) are deleted and the new batch inserted
+// within one transaction, so a regenerate can never leave a mixed old/new set
+// or drop the user to zero codes if the insert fails.
+func (r *TOTPRepository) ReplaceRecoveryCodes(ctx context.Context, userID uint, codes []*models.RecoveryCode) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&models.RecoveryCode{}).Error; err != nil {
+			return err
+		}
+		if len(codes) == 0 {
+			return nil
+		}
+		return tx.Create(codes).Error
+	})
 }
 func (r *TOTPRepository) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]models.RecoveryCode, error) {
 	var c []models.RecoveryCode

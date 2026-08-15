@@ -10,8 +10,16 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
+	"github.com/finnapigo/finnapigo/internal/models"
 )
+
+// testEncKey is a fixed 32-byte AES-256 key for sealing recovery codes in
+// tests. The value is public test data — only its length matters.
+func testEncKey() []byte {
+	return []byte("test-recovery-encryption-key-32b")
+}
 
 // newTestTOTPService builds a TOTPService with sensible test defaults. Pass
 // nil for store/audits to disable those subsystems.
@@ -25,7 +33,7 @@ func newTestTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, cf
 	if len(cfgOverrides) > 0 {
 		cfg = cfgOverrides[0]
 	}
-	return NewTOTPService(repo, store, audits, "TestIssuer", cfg)
+	return NewTOTPService(repo, store, audits, "TestIssuer", cfg, testEncKey())
 }
 
 // enableAndVerify is a test helper that runs Enable then VerifyEnable, returning
@@ -357,6 +365,231 @@ func TestIsTOTPError(t *testing.T) {
 	}
 	if IsTOTPError(ErrInvalidInput) {
 		t.Fatal("should not match unrelated errors")
+	}
+}
+
+// ---------- View recovery codes ----------
+
+func TestTOTPService_ViewRecoveryCodes_ValidTOTP(t *testing.T) {
+	repo := newMockTOTPRepo()
+	audit := &mockAuditRepo{}
+	svc := newTestTOTPService(repo, nil, audit)
+
+	secret, issued := enableAndVerify(t, svc, 1)
+
+	viewed, err := svc.ViewRecoveryCodes(context.Background(), 1, totpCode(t, secret))
+	if err != nil {
+		t.Fatalf("ViewRecoveryCodes failed: %v", err)
+	}
+	if len(viewed) != len(issued) {
+		t.Fatalf("viewed %d codes, want %d", len(viewed), len(issued))
+	}
+	for i := range issued {
+		if viewed[i] != issued[i] {
+			t.Fatalf("code[%d] mismatch: viewed=%q issued=%q", i, viewed[i], issued[i])
+		}
+	}
+	if len(audit.byEvent(models.AuditEventRecoveryCodesViewed)) == 0 {
+		t.Fatal("expected recovery_codes_viewed audit entry")
+	}
+}
+
+func TestTOTPService_ViewRecoveryCodes_BadCode(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(repo, nil, nil)
+
+	_, _ = enableAndVerify(t, svc, 1)
+
+	_, err := svc.ViewRecoveryCodes(context.Background(), 1, "000000")
+	if !errors.Is(err, ErrInvalidOTP) {
+		t.Fatalf("expected ErrInvalidOTP, got %v", err)
+	}
+}
+
+func TestTOTPService_ViewRecoveryCodes_RecoveryCodeNotAllowed(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(repo, nil, nil)
+
+	_, codes := enableAndVerify(t, svc, 1)
+
+	// A recovery code must NOT unlock viewing the saved codes.
+	_, err := svc.ViewRecoveryCodes(context.Background(), 1, codes[0])
+	if !errors.Is(err, ErrInvalidOTP) {
+		t.Fatalf("expected ErrInvalidOTP for recovery code, got %v", err)
+	}
+}
+
+func TestTOTPService_ViewRecoveryCodes_ReplayRejected(t *testing.T) {
+	repo := newMockTOTPRepo()
+	store := newMockStore()
+	svc := newTestTOTPService(repo, store, nil)
+
+	secret, _ := enableAndVerify(t, svc, 1)
+
+	code := totpCode(t, secret)
+	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, code); err != nil {
+		t.Fatalf("first view should succeed: %v", err)
+	}
+	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, code); !errors.Is(err, ErrInvalidOTP) {
+		t.Fatalf("replayed TOTP code should be rejected, got %v", err)
+	}
+}
+
+func TestTOTPService_ViewRecoveryCodes_DeviceNotEnabled(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(repo, nil, nil)
+
+	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
+
+	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, "123456"); !errors.Is(err, ErrInvalidOTP) {
+		t.Fatalf("expected ErrInvalidOTP for unverified device, got %v", err)
+	}
+}
+
+func TestTOTPService_ViewRecoveryCodes_ExcludesUsedCodes(t *testing.T) {
+	repo := newMockTOTPRepo()
+	store := newMockStore()
+	svc := newTestTOTPService(repo, store, nil)
+
+	secret, codes := enableAndVerify(t, svc, 1)
+	// Burn one recovery code at login.
+	if err := svc.Validate(context.Background(), 1, codes[0]); err != nil {
+		t.Fatalf("Validate with recovery code failed: %v", err)
+	}
+
+	viewed, err := svc.ViewRecoveryCodes(context.Background(), 1, totpCode(t, secret))
+	if err != nil {
+		t.Fatalf("ViewRecoveryCodes failed: %v", err)
+	}
+	if len(viewed) != len(codes)-1 {
+		t.Fatalf("viewed %d codes, want %d (used code excluded)", len(viewed), len(codes)-1)
+	}
+	for _, v := range viewed {
+		if v == codes[0] {
+			t.Fatal("used recovery code must not be re-displayed")
+		}
+	}
+}
+
+func TestTOTPService_ViewRecoveryCodes_SkipsLegacyUnencryptedRows(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(repo, nil, nil)
+
+	secret, _ := enableAndVerify(t, svc, 1)
+	// Simulate rows written before the encrypted column existed: hashes only.
+	if err := repo.ReplaceRecoveryCodes(context.Background(), 1, []*models.RecoveryCode{
+		{UserID: 1, CodeHash: hash.HashRecoveryCode("legacy-code-1")},
+	}); err != nil {
+		t.Fatalf("seed legacy rows: %v", err)
+	}
+
+	viewed, err := svc.ViewRecoveryCodes(context.Background(), 1, totpCode(t, secret))
+	if err != nil {
+		t.Fatalf("ViewRecoveryCodes should succeed, got %v", err)
+	}
+	if len(viewed) != 0 {
+		t.Fatalf("legacy rows must be skipped, got %d codes", len(viewed))
+	}
+}
+
+// ---------- Regenerate recovery codes ----------
+
+func TestTOTPService_RegenerateRecoveryCodes_ReplacesSet(t *testing.T) {
+	repo := newMockTOTPRepo()
+	store := newMockStore()
+	svc := newTestTOTPService(repo, store, nil)
+
+	_, oldCodes := enableAndVerify(t, svc, 1)
+
+	newCodes, err := svc.RegenerateRecoveryCodes(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("RegenerateRecoveryCodes failed: %v", err)
+	}
+	if len(newCodes) != 3 {
+		t.Fatalf("expected 3 new codes (test cfg), got %d", len(newCodes))
+	}
+	for _, oc := range oldCodes {
+		if err := svc.Validate(context.Background(), 1, oc); err == nil {
+			t.Fatal("old recovery code must be invalid after regenerate")
+		}
+	}
+	if err := svc.Validate(context.Background(), 1, newCodes[0]); err != nil {
+		t.Fatalf("new recovery code should validate: %v", err)
+	}
+	// The old rows must be gone entirely (used or not).
+	active, _ := repo.ActiveRecoveryCodes(context.Background(), 1)
+	if len(active) != len(newCodes)-1 { // one was just consumed above
+		t.Fatalf("expected %d active rows after regenerate+use, got %d", len(newCodes)-1, len(active))
+	}
+}
+
+func TestTOTPService_RegenerateRecoveryCodes_EncryptedAtRest(t *testing.T) {
+	repo := newMockTOTPRepo()
+	audit := &mockAuditRepo{}
+	svc := newTestTOTPService(repo, nil, audit)
+
+	_, _ = enableAndVerify(t, svc, 1)
+	newCodes, err := svc.RegenerateRecoveryCodes(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("RegenerateRecoveryCodes failed: %v", err)
+	}
+
+	active, _ := repo.ActiveRecoveryCodes(context.Background(), 1)
+	if len(active) != len(newCodes) {
+		t.Fatalf("stored %d rows, want %d", len(active), len(newCodes))
+	}
+	for i, row := range active {
+		if row.CodeEncrypted == "" {
+			t.Fatalf("row[%d] has no encrypted copy", i)
+		}
+		if row.CodeEncrypted == newCodes[i] {
+			t.Fatalf("row[%d] stores plaintext!", i)
+		}
+		plain, err := crypto.Decrypt(testEncKey(), row.CodeEncrypted)
+		if err != nil {
+			t.Fatalf("row[%d] decrypt: %v", i, err)
+		}
+		if plain != newCodes[i] {
+			t.Fatalf("row[%d] decrypts to %q, want %q", i, plain, newCodes[i])
+		}
+	}
+	if len(audit.byEvent(models.AuditEventRecoveryCodesRegenerated)) == 0 {
+		t.Fatal("expected recovery_codes_regenerated audit entry")
+	}
+}
+
+func TestTOTPService_RegenerateRecoveryCodes_DeviceNotEnabled(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(repo, nil, nil)
+
+	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
+
+	if _, err := svc.RegenerateRecoveryCodes(context.Background(), 1); !errors.Is(err, ErrInvalidOTP) {
+		t.Fatalf("expected ErrInvalidOTP for unverified device, got %v", err)
+	}
+}
+
+func TestTOTPService_RegenerateRecoveryCodes_NewSetViewable(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(repo, nil, nil)
+
+	secret, _ := enableAndVerify(t, svc, 1)
+	newCodes, err := svc.RegenerateRecoveryCodes(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("RegenerateRecoveryCodes failed: %v", err)
+	}
+
+	viewed, err := svc.ViewRecoveryCodes(context.Background(), 1, totpCode(t, secret))
+	if err != nil {
+		t.Fatalf("viewing the regenerated set failed: %v", err)
+	}
+	if len(viewed) != len(newCodes) {
+		t.Fatalf("viewed %d codes, want %d", len(viewed), len(newCodes))
+	}
+	for i := range newCodes {
+		if viewed[i] != newCodes[i] {
+			t.Fatalf("code[%d] mismatch: viewed=%q regenerated=%q", i, viewed[i], newCodes[i])
+		}
 	}
 }
 

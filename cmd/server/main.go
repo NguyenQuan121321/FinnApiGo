@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
@@ -49,11 +52,11 @@ func run() error {
 	log.Printf("database connected: %s:%s/%s", cfg.DB.Host, cfg.DB.Port, cfg.DB.Name)
 
 	// --- Migrations (explicit; safe to run on every boot) ---
-		if err := db.AutoMigrate(
-			&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
-			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
-			&models.OAuthIdentity{},
-		); err != nil {
+	if err := db.AutoMigrate(
+		&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
+		&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
+		&models.OAuthIdentity{},
+	); err != nil {
 		return errors.Join(errors.New("auto-migrate failed"), err)
 	}
 
@@ -115,7 +118,16 @@ func run() error {
 	}
 
 	// --- Services ---
-	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth)
+	// recoveryEncKey seals the re-viewable copy of each MFA recovery code
+	// (AES-256-GCM). RECOVERY_CODE_KEY (hex, 32 bytes) wins when set; otherwise
+	// the key is domain-separated-derived from JWT_SECRET so deployments
+	// without the extra variable still work. Rotating JWT_SECRET (or the key)
+	// orphans previously sealed codes — users regenerate a fresh set.
+	recoveryEncKey, err := recoveryEncryptionKey(cfg)
+	if err != nil {
+		return err
+	}
+	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEncKey)
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
@@ -136,7 +148,7 @@ func run() error {
 
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
-	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc)
+	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc, jwtMgr, cfg.JWT.SudoTTL)
 	sessionHandler := handlers.NewSessionHandler(authSvc)
 
 	// --- Rate limiter ---
@@ -198,6 +210,28 @@ func run() error {
 	}
 	log.Println("server stopped cleanly")
 	return nil
+}
+
+// recoveryEncryptionKey resolves the AES-256 key that seals the re-viewable
+// copy of MFA recovery codes: RECOVERY_CODE_KEY (64-char hex) when provided,
+// otherwise a domain-separated SHA-256 derivation of JWT_SECRET. The fallback
+// keeps deployments without the extra variable working; a dedicated key is
+// still preferred so the two secrets rotate independently. Rotating either
+// orphans previously sealed codes — affected users regenerate a fresh set.
+func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
+	if cfg.Auth.RecoveryCodeKey != "" {
+		key, err := hex.DecodeString(cfg.Auth.RecoveryCodeKey)
+		if err != nil || len(key) != crypto.KeyLen {
+			return nil, errors.New("RECOVERY_CODE_KEY must be 64 hex chars (32 bytes)")
+		}
+		return key, nil
+	}
+	if cfg.JWT.Secret == "" {
+		return nil, errors.New("cannot derive recovery-code key: JWT_SECRET is empty")
+	}
+	log.Println("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
+	sum := sha256.Sum256([]byte(cfg.JWT.Secret + ":finnapigo:recovery-codes:v1"))
+	return sum[:], nil
 }
 
 // startCleanup periodically purges expired refresh tokens, OTP codes, and

@@ -317,9 +317,9 @@ func (m *mockOtpRepo) PurgeExpired(ctx context.Context, before time.Time) (int64
 // ---- mock used-token repo (§1.8) ----
 
 type mockUsedTokenRepo struct {
-	mu      sync.Mutex
-	used    map[string]bool
-	markOK  bool // what MarkUsed should return (true = first use wins)
+	mu     sync.Mutex
+	used   map[string]bool
+	markOK bool // what MarkUsed should return (true = first use wins)
 }
 
 func newMockUsedTokenRepo() *mockUsedTokenRepo {
@@ -376,12 +376,12 @@ func (m *mockAuditRepo) count() int {
 // ---- mock notifier (captures last sent values) ----
 
 type mockNotifier struct {
-	mu                sync.Mutex
-	lastOTPCode       string
-	lastOTPPurpose    string
-	lastReset         string
-	lastVerify        string
-	verifySendErr     error
+	mu             sync.Mutex
+	lastOTPCode    string
+	lastOTPPurpose string
+	lastReset      string
+	lastVerify     string
+	verifySendErr  error
 }
 
 func (n *mockNotifier) SendOTP(to, code, purpose string) error {
@@ -412,8 +412,8 @@ func (n *mockNotifier) SendEmailVerification(to, verifyToken string) error {
 // ---- mock store (for §1.8 jti tracking in tests) ----
 
 type mockStore struct {
-	mu       sync.Mutex
-	data     map[string]any
+	mu         sync.Mutex
+	data       map[string]any
 	setNXCalls int
 }
 
@@ -459,7 +459,7 @@ func (m *mockStore) Delete(key string) {
 // mockCaptchaVerifier lets tests control whether CAPTCHA verification passes.
 // err != nil => Verify returns that error (simulating a rejected/missing token).
 type mockCaptchaVerifier struct {
-	err  error
+	err   error
 	calls int
 	token string
 }
@@ -473,11 +473,12 @@ func (m *mockCaptchaVerifier) Verify(ctx context.Context, token string) error {
 // ---- mock TOTP repo ----
 
 type mockTOTPRepo struct {
-	mu       sync.Mutex
-	devices  map[uint]*models.TOTPDevice
-	codes    map[uint][]models.RecoveryCode
-	nextID   uint
-	upsertErr error
+	mu         sync.Mutex
+	devices    map[uint]*models.TOTPDevice
+	codes      map[uint][]models.RecoveryCode
+	nextID     uint
+	upsertErr  error
+	replaceErr error
 }
 
 func newMockTOTPRepo() *mockTOTPRepo {
@@ -513,9 +514,13 @@ func (m *mockTOTPRepo) FindByUserID(ctx context.Context, userID uint) (*models.T
 	return &c, nil
 }
 
-func (m *mockTOTPRepo) CreateRecoveryCodes(ctx context.Context, codes []*models.RecoveryCode) error {
+func (m *mockTOTPRepo) ReplaceRecoveryCodes(ctx context.Context, userID uint, codes []*models.RecoveryCode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.replaceErr != nil {
+		return m.replaceErr
+	}
+	delete(m.codes, userID)
 	for _, c := range codes {
 		c.ID = m.nextID
 		m.nextID++

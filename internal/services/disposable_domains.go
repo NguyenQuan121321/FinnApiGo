@@ -9,9 +9,9 @@ import (
 // a third-party lookup. Kept short intentionally; the goal is to raise the bar
 // for scripted mass registration, not to be a complete blocklist.
 var disposableDomains = map[string]struct{}{
-	"mailinator.com":   {},
+	"mailinator.com":    {},
 	"guerrillamail.com": {},
-	"10minutemail.com": {},
+	"10minutemail.com":  {},
 	"tempmail.com":      {},
 	"temp-mail.org":     {},
 	"throwawaymail.com": {},

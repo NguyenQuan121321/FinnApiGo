@@ -45,6 +45,31 @@ func TestJWT_WrongSecretRejected(t *testing.T) {
 	}
 }
 
+func TestJWT_SudoTokenRoundTrip(t *testing.T) {
+	mgr := NewJWTManager("secret", "issuer")
+	tok, err := mgr.Issue(42, "user", "a@b.com", TokenTypeSudo, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := mgr.Verify(tok)
+	if err != nil {
+		t.Fatalf("verify failed: %v", err)
+	}
+	if claims.Type != TokenTypeSudo {
+		t.Errorf("type = %q, want %q", claims.Type, TokenTypeSudo)
+	}
+	if claims.UserID != 42 {
+		t.Errorf("uid = %d, want 42", claims.UserID)
+	}
+	if claims.ExpiresAt == nil || claims.ExpiresAt.IsZero() {
+		t.Error("sudo token must carry an expiry for SudoMiddleware")
+	}
+	// A sudo token must never pass as an access token.
+	if claims.Type == TokenTypeAccess {
+		t.Error("sudo token must not appear as an access token")
+	}
+}
+
 func TestHashToken_DeterministicAndOpaque(t *testing.T) {
 	h1 := hash.HashToken("abc")
 	h2 := hash.HashToken("abc")

@@ -2,12 +2,15 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/services"
 	"github.com/gin-gonic/gin"
 )
@@ -61,6 +64,12 @@ func (f fakeTOTPService) VerifyEnable(context.Context, uint, string) ([]string, 
 	return []string{"backup"}, f.err
 }
 func (f fakeTOTPService) Validate(context.Context, uint, string) error { return f.err }
+func (f fakeTOTPService) ViewRecoveryCodes(context.Context, uint, string) ([]string, error) {
+	return []string{"backup"}, f.err
+}
+func (f fakeTOTPService) RegenerateRecoveryCodes(context.Context, uint) ([]string, error) {
+	return []string{"fresh"}, f.err
+}
 
 func serve(t *testing.T, h gin.HandlerFunc, body string, userID *uint) *httptest.ResponseRecorder {
 	t.Helper()
@@ -82,10 +91,10 @@ func TestStatusForError(t *testing.T) {
 		err    error
 		status int
 	}{
-			{services.ErrInvalidCredentials, 401}, {services.ErrInvalidToken, 401}, {services.ErrInvalidOTP, 401},
-			{services.ErrOTPMaxAttempts, 429}, {services.ErrAccountLocked, 403}, {services.ErrAccountDisabled, 403},
-			{services.ErrEmailNotVerified, 403}, {services.ErrUserNotFound, 404}, {services.ErrSessionNotFound, 404},
-			{services.ErrEmailExists, 409},
+		{services.ErrInvalidCredentials, 401}, {services.ErrInvalidToken, 401}, {services.ErrInvalidOTP, 401},
+		{services.ErrOTPMaxAttempts, 429}, {services.ErrAccountLocked, 403}, {services.ErrAccountDisabled, 403},
+		{services.ErrEmailNotVerified, 403}, {services.ErrUserNotFound, 404}, {services.ErrSessionNotFound, 404},
+		{services.ErrEmailExists, 409},
 		{services.ErrUsernameExists, 409}, {services.ErrInvalidInput, 400}, {services.ErrPasswordTooWeak, 400},
 		{services.ErrCaptchaRequired, 400}, {services.ErrDisposableEmail, 422}, {services.ErrRateLimited, 429}, {errors.New("unexpected"), 500},
 	} {
@@ -124,7 +133,7 @@ func TestAuthHandlerBoundaryCases(t *testing.T) {
 
 func TestProtectedHandlersRejectMissingIdentity(t *testing.T) {
 	auth := NewAuthHandler(fakeAuthService{}, nil)
-	mfa := NewMFAHandler(fakeMFAService{})
+	mfa := NewMFAHandler(fakeMFAService{}, nil, nil, 0)
 	for _, h := range []gin.HandlerFunc{auth.Me, auth.ChangePassword, auth.LogoutAll, mfa.SendOTP, mfa.VerifyOTP} {
 		w := serve(t, h, `{}`, nil)
 		if w.Code != http.StatusUnauthorized {
@@ -144,7 +153,7 @@ func TestMFAHandlerBoundaryCases(t *testing.T) {
 		{"rate limited", `{"purpose":"login"}`, services.ErrRateLimited, 429}, {"success", `{"purpose":"login"}`, nil, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := serve(t, NewMFAHandler(fakeMFAService{err: tc.err}).SendOTP, tc.body, &uid)
+			w := serve(t, NewMFAHandler(fakeMFAService{err: tc.err}, nil, nil, 0).SendOTP, tc.body, &uid)
 			if w.Code != tc.want {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 			}
@@ -164,9 +173,14 @@ func TestTOTPHandlers(t *testing.T) {
 		{"verify malformed", "{", nil, 400, func(h *MFAHandler) gin.HandlerFunc { return h.VerifyTOTP }},
 		{"verify invalid", `{"code":"123456"}`, services.ErrInvalidOTP, 401, func(h *MFAHandler) gin.HandlerFunc { return h.VerifyTOTP }},
 		{"validate", `{"code":"123456"}`, nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.ValidateTOTP }},
+		{"view malformed", "{", nil, 400, func(h *MFAHandler) gin.HandlerFunc { return h.ViewRecoveryCodes }},
+		{"view invalid", `{"code":"123456"}`, services.ErrInvalidOTP, 401, func(h *MFAHandler) gin.HandlerFunc { return h.ViewRecoveryCodes }},
+		{"view", `{"code":"123456"}`, nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.ViewRecoveryCodes }},
+		{"regenerate", "", nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.RegenerateRecoveryCodes }},
+		{"regenerate invalid", "", services.ErrInvalidOTP, 401, func(h *MFAHandler) gin.HandlerFunc { return h.RegenerateRecoveryCodes }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: tc.err})
+			h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: tc.err}, nil, 0)
 			w := serve(t, tc.handler(h), tc.body, &uid)
 			if w.Code != tc.want {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -177,7 +191,7 @@ func TestTOTPHandlers(t *testing.T) {
 
 func TestTOTPHandlers_BodySizeGuard(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{})
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
 
 	// Body > 1 KiB should be rejected with 413.
 	bigBody := `{"code":"` + strings.Repeat("A", 2048) + `"}`
@@ -189,7 +203,7 @@ func TestTOTPHandlers_BodySizeGuard(t *testing.T) {
 
 func TestTOTPHandlers_EmptyBody(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{})
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
 
 	w := serve(t, h.ValidateTOTP, "", &uid)
 	if w.Code != http.StatusBadRequest {
@@ -198,8 +212,8 @@ func TestTOTPHandlers_EmptyBody(t *testing.T) {
 }
 
 func TestTOTPHandlers_MissingAuth(t *testing.T) {
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{})
-	for _, handler := range []gin.HandlerFunc{h.EnableTOTP, h.VerifyTOTP, h.ValidateTOTP} {
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+	for _, handler := range []gin.HandlerFunc{h.EnableTOTP, h.VerifyTOTP, h.ValidateTOTP, h.ViewRecoveryCodes, h.RegenerateRecoveryCodes} {
 		w := serve(t, handler, `{}`, nil)
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("expected 401, got %d body=%s", w.Code, w.Body.String())
@@ -209,18 +223,94 @@ func TestTOTPHandlers_MissingAuth(t *testing.T) {
 
 func TestTOTPHandlers_RateLimited(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: services.ErrRateLimited})
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: services.ErrRateLimited}, nil, 0)
 	w := serve(t, h.ValidateTOTP, `{"code":"123456"}`, &uid)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 
+// ---------- Recovery-code endpoints (view + sudo, regenerate) ----------
+
+func TestViewRecoveryCodes_HandlerIssuesSudoToken(t *testing.T) {
+	uid := uint(1)
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, jwtMgr, 15*time.Minute)
+
+	w := serve(t, h.ViewRecoveryCodes, `{"code":"123456"}`, &uid)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			RecoveryCodes    []string `json:"recoveryCodes"`
+			SudoToken        string   `json:"sudoToken"`
+			SudoExpiresInSec int      `json:"sudoExpiresInSec"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Data.RecoveryCodes) != 1 || resp.Data.RecoveryCodes[0] != "backup" {
+		t.Fatalf("unexpected recovery codes: %v", resp.Data.RecoveryCodes)
+	}
+	if resp.Data.SudoExpiresInSec != 900 {
+		t.Fatalf("sudoExpiresInSec = %d, want 900", resp.Data.SudoExpiresInSec)
+	}
+	claims, err := jwtMgr.Verify(resp.Data.SudoToken)
+	if err != nil {
+		t.Fatalf("minted sudo token should verify: %v", err)
+	}
+	if claims.Type != jwt.TokenTypeSudo {
+		t.Fatalf("token type = %q, want %q", claims.Type, jwt.TokenTypeSudo)
+	}
+	if claims.UserID != uid {
+		t.Fatalf("sudo token uid = %d, want %d", claims.UserID, uid)
+	}
+}
+
+func TestViewRecoveryCodes_NoJWTManager_OmitsSudoToken(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+
+	w := serve(t, h.ViewRecoveryCodes, `{"code":"123456"}`, &uid)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "sudoToken") {
+		t.Fatalf("degraded mode should omit sudo token: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "recoveryCodes") {
+		t.Fatalf("codes missing from response: %s", w.Body.String())
+	}
+}
+
+func TestRegenerateRecoveryCodes_HandlerReturnsFreshSet(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+
+	w := serve(t, h.RegenerateRecoveryCodes, "", &uid)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Data struct {
+			RecoveryCodes []string `json:"recoveryCodes"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v (%s)", err, w.Body.String())
+	}
+	if len(resp.Data.RecoveryCodes) != 1 || resp.Data.RecoveryCodes[0] != "fresh" {
+		t.Fatalf("unexpected regenerated codes: %v", resp.Data.RecoveryCodes)
+	}
+}
+
 // ---- fake session service ----
 
 type fakeSessionService struct {
-	sessions []services.SessionInfo
-	listErr  error
+	sessions  []services.SessionInfo
+	listErr   error
 	revokeErr error
 }
 

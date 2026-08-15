@@ -10,10 +10,10 @@ http:
     type: json
     data: |-
       {
-        "username": "finn",
-        "email": "noclone0001@gmail.com",
+        "username": "clouds",
+        "email": "itzthecloud291@gmail.com",
         "password": "Password123",
-        "fullName": "admin"
+        "fullName": "Mây bél"
       }
 
 settings:

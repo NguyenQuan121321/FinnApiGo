@@ -61,7 +61,9 @@ type OtpRepo interface {
 type TOTPRepo interface {
 	Upsert(context.Context, *models.TOTPDevice) error
 	FindByUserID(context.Context, uint) (*models.TOTPDevice, error)
-	CreateRecoveryCodes(context.Context, []*models.RecoveryCode) error
+	// ReplaceRecoveryCodes atomically deletes the user's existing recovery
+	// codes (used and unused) and inserts the new batch in one transaction.
+	ReplaceRecoveryCodes(context.Context, uint, []*models.RecoveryCode) error
 	ActiveRecoveryCodes(context.Context, uint) ([]models.RecoveryCode, error)
 	MarkRecoveryCodeUsed(context.Context, *models.RecoveryCode) error
 }

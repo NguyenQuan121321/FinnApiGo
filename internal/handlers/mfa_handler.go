@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/response"
@@ -23,19 +25,25 @@ type TOTPService interface {
 	Enable(context.Context, uint, string) (string, string, error)
 	VerifyEnable(context.Context, uint, string) ([]string, error)
 	Validate(context.Context, uint, string) error
+	// ViewRecoveryCodes re-displays the saved codes after a current TOTP code.
+	ViewRecoveryCodes(context.Context, uint, string) ([]string, error)
+	// RegenerateRecoveryCodes invalidates the old set and issues a new one.
+	// TOTP/sudo enforcement lives in the route middleware, not the service.
+	RegenerateRecoveryCodes(context.Context, uint) ([]string, error)
 }
 
 type MFAHandler struct {
-	svc  MFAService
-	totp TOTPService
+	svc     MFAService
+	totp    TOTPService
+	jwtMgr  *jwt.JWTManager
+	sudoTTL time.Duration
 }
 
-func NewMFAHandler(svc MFAService, totp ...TOTPService) *MFAHandler {
-	h := &MFAHandler{svc: svc}
-	if len(totp) > 0 {
-		h.totp = totp[0]
-	}
-	return h
+// NewMFAHandler constructs the handler. jwtMgr mints the sudo token returned
+// by ViewRecoveryCodes; when nil no token is issued (degraded mode for tests
+// that don't exercise sudo). sudoTTL <= 0 falls back to 15 minutes.
+func NewMFAHandler(svc MFAService, totp TOTPService, jwtMgr *jwt.JWTManager, sudoTTL time.Duration) *MFAHandler {
+	return &MFAHandler{svc: svc, totp: totp, jwtMgr: jwtMgr, sudoTTL: sudoTTL}
 }
 
 func (h *MFAHandler) EnableTOTP(c *gin.Context) {
@@ -93,6 +101,80 @@ func (h *MFAHandler) ValidateTOTP(c *gin.Context) {
 		return
 	}
 	response.Respond(c, http.StatusOK, "TOTP validated", nil)
+}
+
+// ViewRecoveryCodes re-displays the caller's saved recovery codes. The request
+// must carry a current TOTP code (validated by the service); on success the
+// handler also mints a short-lived sudo token so the client can regenerate
+// codes within the sudo window without a second TOTP prompt.
+func (h *MFAHandler) ViewRecoveryCodes(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok || h.totp == nil {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req TOTPCodeRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	codes, err := h.totp.ViewRecoveryCodes(c.Request.Context(), uid, req.Code)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	resp := gin.H{"recoveryCodes": nonNil(codes)}
+	if h.jwtMgr != nil {
+		ttl := h.sudoTTL
+		if ttl <= 0 {
+			ttl = 15 * time.Minute
+		}
+		sudo, err := h.jwtMgr.Issue(uid, ctxString(c, middleware.CtxRole), ctxString(c, middleware.CtxEmail), jwt.TokenTypeSudo, ttl)
+		if err != nil {
+			respondError(c, err)
+			return
+		}
+		resp["sudoToken"] = sudo
+		resp["sudoExpiresInSec"] = int(ttl.Seconds())
+	}
+	response.Respond(c, http.StatusOK, "Recovery codes", resp)
+}
+
+// RegenerateRecoveryCodes invalidates the caller's existing recovery codes and
+// returns a brand-new set. Sudo enforcement (X-Sudo-Token bound to the current
+// user) happens in the route middleware before this handler runs.
+func (h *MFAHandler) RegenerateRecoveryCodes(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok || h.totp == nil {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	codes, err := h.totp.RegenerateRecoveryCodes(c.Request.Context(), uid)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "New recovery codes generated", gin.H{"recoveryCodes": nonNil(codes)})
+}
+
+// ctxString reads a string-valued context key set by the auth middleware.
+func ctxString(c *gin.Context, key string) string {
+	v, ok := c.Get(key)
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// nonNil keeps JSON arrays from serializing as null when empty.
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
 }
 
 func (h *MFAHandler) SendOTP(c *gin.Context) {

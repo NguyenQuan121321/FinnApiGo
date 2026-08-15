@@ -25,8 +25,8 @@ type Deps struct {
 	JWT                 *jwt.JWTManager
 	RateLimit           *middleware.RateLimiter
 	TOTPCluster         *middleware.ConcurrencyLimiter // caps concurrent CPU-bound TOTP validations
-	DB                  *gorm.DB                      // optional, for /readyz
-	MaxRequestBodyBytes int64                         // §5 — global body-size cap applied BEFORE routes
+	DB                  *gorm.DB                       // optional, for /readyz
+	MaxRequestBodyBytes int64                          // §5 — global body-size cap applied BEFORE routes
 	// TrustedProxies configures which direct peers may set X-Forwarded-For /
 	// X-Real-IP, so c.ClientIP() resolves the real client IP securely behind a
 	// reverse proxy (Cloudflare/Nginx). Empty trusts no one (RemoteAddr only).
@@ -143,11 +143,20 @@ func Register(deps Deps) *gin.Engine {
 		mfa.POST("/totp/enable", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.EnableTOTP)
 		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.VerifyTOTP)
 		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.ValidateTOTP)
+		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.ViewRecoveryCodes)
 	} else {
 		mfa.POST("/totp/enable", deps.RateLimit.Handler(), deps.MFA.EnableTOTP)
 		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.MFA.VerifyTOTP)
 		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.MFA.ValidateTOTP)
+		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.MFA.ViewRecoveryCodes)
 	}
+
+	// ---- Recovery-code regeneration (GitHub-style sudo mode) ----
+	// POST /api/v1/auth/mfa/totp/recovery-codes/regenerate — requires the
+	// X-Sudo-Token minted by the view endpoint above (which itself demands a
+	// current TOTP code), so a stolen access token alone cannot mint fresh
+	// recovery codes. No TOTP validation happens here, hence no TOTPCluster.
+	mfa.POST("/totp/recovery-codes/regenerate", deps.RateLimit.Handler(), middleware.SudoMiddleware(deps.JWT), deps.MFA.RegenerateRecoveryCodes)
 
 	return r
 }

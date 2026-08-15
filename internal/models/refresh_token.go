@@ -18,8 +18,8 @@ type RefreshToken struct {
 
 	// ---- Device/IP metadata for session management (§4) ----
 	// Nullable so existing rows are unaffected by the migration.
-	IPAddress  string `gorm:"size:45" json:"ipAddress"`  // caller's IP (IPv4/IPv6)
-	UserAgent  string `gorm:"size:500" json:"userAgent"` // raw User-Agent header
+	IPAddress  string `gorm:"size:45" json:"ipAddress"`   // caller's IP (IPv4/IPv6)
+	UserAgent  string `gorm:"size:500" json:"userAgent"`  // raw User-Agent header
 	DeviceName string `gorm:"size:120" json:"deviceName"` // human-readable e.g. "Chrome on Windows"
 
 	// LocationEstimate is a best-effort geo label derived from the IP at login.

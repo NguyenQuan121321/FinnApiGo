@@ -8,7 +8,7 @@ http:
   url: http://localhost:8081/api/v1/auth/resend-verification
   body:
     type: json
-    data: '{"email": "test1@example.com"}'
+    data: '{"email": "itzthecloud291@gmail.com"}'
   auth: inherit
 
 settings:

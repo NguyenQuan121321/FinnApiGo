@@ -16,6 +16,9 @@ const (
 	CtxUserID = "user_id"
 	CtxRole   = "role"
 	CtxEmail  = "email"
+	// CtxSudoUntil holds the expiry time.Time of the verified sudo token —
+	// set by SudoMiddleware, which must run after AuthMiddleware.
+	CtxSudoUntil = "sudo_until"
 )
 
 // AuthMiddleware verifies the Bearer JWT from the Authorization header.

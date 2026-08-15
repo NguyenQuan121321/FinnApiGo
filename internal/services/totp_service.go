@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/pquerna/otp"
@@ -47,6 +48,11 @@ type TOTPService struct {
 	audits AuditRepo
 	issuer string
 	cfg    config.AuthConfig
+	// encKey seals the re-viewable copy of each recovery code (AES-256-GCM).
+	// The SHA-256 hash remains the only thing the login-verification path
+	// touches; the sealed copy is decrypted solely for the TOTP-gated view
+	// endpoint.
+	encKey []byte
 }
 
 // NewTOTPService constructs the service. store may be nil (replay protection
@@ -54,7 +60,9 @@ type TOTPService struct {
 // writes are skipped). cfg drives recovery-code entropy/count and the
 // brute-force window; when zero-valued the fields default to safe values so
 // callers that only care about the core flow (e.g. legacy tests) still work.
-func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer string, cfg config.AuthConfig) *TOTPService {
+// encKey must be a 32-byte AES-256 key; it seals the displayable recovery-code
+// copies (see cmd/server wiring for how it is sourced).
+func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer string, cfg config.AuthConfig, encKey []byte) *TOTPService {
 	if cfg.TOTPMaxAttempts <= 0 {
 		cfg.TOTPMaxAttempts = 5
 	}
@@ -67,7 +75,7 @@ func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer
 	if cfg.RecoveryCodeBytes <= 0 {
 		cfg.RecoveryCodeBytes = 16
 	}
-	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg}
+	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, encKey: encKey}
 }
 
 // Enable starts (or restarts) TOTP enrollment: it generates a fresh shared
@@ -103,7 +111,10 @@ func (s *TOTPService) Enable(ctx context.Context, userID uint, email string) (st
 // VerifyEnable confirms an enrollment: validates the provided 6-digit code
 // against the pending secret and, on success, activates the device and issues
 // a fresh batch of recovery codes. The plaintext recovery codes are returned
-// exactly once — only their SHA-256 hashes are persisted.
+// to the caller; at rest only their SHA-256 hashes (for login verification)
+// and an AES-256-GCM sealed copy (for the TOTP-gated view endpoint) persist.
+// Issuing a fresh batch also replaces any codes left over from a previous
+// enrollment.
 func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string) ([]string, error) {
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return nil, err
@@ -132,7 +143,7 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 		// Roll back activation so the user can retry Enable -> VerifyEnable.
 		d.Enabled = false
 		_ = s.repo.Upsert(ctx, d)
-		return nil, fmt.Errorf("không thể tạo mã khôi phục: %w", err)
+		return nil, fmt.Errorf("generate recovery codes: %w", err)
 	}
 	s.recordSuccess(ctx, userID, models.AuditEventTOTPEnabled, "totp enabled")
 	return codes, nil
@@ -164,15 +175,11 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 		// Replay protection: a code may only be used once within its validity
 		// window. SetNX is atomic, so concurrent identical submissions collide
 		// and exactly one wins.
-		sum := sha256.Sum256([]byte(code))
-		if s.store != nil {
-			key := "totp:replay:" + fmt.Sprint(userID) + ":" + hex.EncodeToString(sum[:])
-			if !s.store.SetNX(key, "1", totpReplayTTL) {
-				// Same code reused within the window — treat as a failed
-				// attempt so repeat offenders hit the brute-force cap.
-				s.recordFailure(ctx, userID, "totp replay")
-				return ErrInvalidOTP
-			}
+		if !s.replayGuard(ctx, userID, code) {
+			// Same code reused within the window — treat as a failed
+			// attempt so repeat offenders hit the brute-force cap.
+			s.recordFailure(ctx, userID, "totp replay")
+			return ErrInvalidOTP
 		}
 		s.recordSuccess(ctx, userID, models.AuditEventTOTPValidated, "totp validated")
 		return nil
@@ -197,8 +204,80 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 	return ErrInvalidOTP
 }
 
-// newRecoveryCodes generates a batch of high-entropy recovery codes, persists
-// their SHA-256 hashes, and returns the plaintext codes (once) to the caller.
+// ViewRecoveryCodes re-displays the user's saved (unused) recovery codes.
+// GitHub-style: the request must carry a CURRENT 6-digit TOTP code — a
+// recovery code deliberately cannot unlock the list, since a leaked recovery
+// code would then reveal all its siblings. On success the caller (handler
+// layer) also mints a short-lived sudo token so follow-up sensitive actions
+// (regenerating) don't re-prompt within the sudo window.
+func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code string) ([]string, error) {
+	if err := s.guardBruteForce(ctx, userID); err != nil {
+		return nil, err
+	}
+	d, err := s.repo.FindByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil || !d.Enabled {
+		s.recordFailure(ctx, userID, "view codes: device not enabled")
+		return nil, ErrInvalidOTP
+	}
+	if len(code) != 6 || !totpValid(code, d.Secret) {
+		s.recordFailure(ctx, userID, "view codes: bad totp code")
+		return nil, ErrInvalidOTP
+	}
+	if !s.replayGuard(ctx, userID, code) {
+		s.recordFailure(ctx, userID, "view codes: totp replay")
+		return nil, ErrInvalidOTP
+	}
+	rows, err := s.repo.ActiveRecoveryCodes(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		if rows[i].CodeEncrypted == "" {
+			// Row predates encrypted storage — it can be used at login but
+			// not re-displayed; regenerating replaces the whole set.
+			continue
+		}
+		plain, err := crypto.Decrypt(s.encKey, rows[i].CodeEncrypted)
+		if err != nil {
+			// Key rotated or row corrupted — same remedy as above.
+			continue
+		}
+		out = append(out, plain)
+	}
+	s.recordSuccess(ctx, userID, models.AuditEventRecoveryCodesViewed, "recovery codes viewed")
+	return out, nil
+}
+
+// RegenerateRecoveryCodes invalidates the user's ENTIRE current set (used and
+// unused rows are deleted) and issues a brand-new batch of one-time codes.
+// The fresh plaintext codes are returned once. This method performs NO TOTP
+// check itself: the HTTP layer gates it behind sudo mode, which requires a
+// verified TOTP-derived token bound to the same user.
+func (s *TOTPService) RegenerateRecoveryCodes(ctx context.Context, userID uint) ([]string, error) {
+	d, err := s.repo.FindByUserID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil || !d.Enabled {
+		s.recordFailure(ctx, userID, "regenerate codes: device not enabled")
+		return nil, ErrInvalidOTP
+	}
+	codes, err := s.newRecoveryCodes(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("regenerate recovery codes: %w", err)
+	}
+	s.recordSuccess(ctx, userID, models.AuditEventRecoveryCodesRegenerated, "recovery codes regenerated")
+	return codes, nil
+}
+
+// newRecoveryCodes generates a batch of high-entropy recovery codes, atomically
+// replaces any existing set for the user, and returns the plaintext codes to
+// the caller. Each row persists the SHA-256 hash (login verification) and an
+// AES-256-GCM sealed copy (TOTP-gated re-viewing).
 func (s *TOTPService) newRecoveryCodes(ctx context.Context, userID uint) ([]string, error) {
 	n := s.cfg.RecoveryCodeCount
 	plain := make([]string, n)
@@ -209,12 +288,30 @@ func (s *TOTPService) newRecoveryCodes(ctx context.Context, userID uint) ([]stri
 			return nil, err
 		}
 		plain[i] = hex.EncodeToString(b)
+		sealed, err := crypto.Encrypt(s.encKey, plain[i])
+		if err != nil {
+			return nil, fmt.Errorf("seal recovery code: %w", err)
+		}
 		rows[i] = &models.RecoveryCode{
-			UserID:   userID,
-			CodeHash: hash.HashRecoveryCode(plain[i]),
+			UserID:        userID,
+			CodeHash:      hash.HashRecoveryCode(plain[i]),
+			CodeEncrypted: sealed,
 		}
 	}
-	return plain, s.repo.CreateRecoveryCodes(ctx, rows)
+	return plain, s.repo.ReplaceRecoveryCodes(ctx, userID, rows)
+}
+
+// replayGuard enforces that a 6-digit TOTP code is consumed at most once per
+// validity window: it SetNXs the code's hash in the shared store and reports
+// false when the key already existed (a replay). A nil store (single-instance
+// dev / legacy tests) disables the check.
+func (s *TOTPService) replayGuard(ctx context.Context, userID uint, code string) bool {
+	if s.store == nil {
+		return true
+	}
+	sum := sha256.Sum256([]byte(code))
+	key := "totp:replay:" + fmt.Sprint(userID) + ":" + hex.EncodeToString(sum[:])
+	return s.store.SetNX(key, "1", totpReplayTTL)
 }
 
 // guardBruteForce enforces the per-user failed-attempt cap. It increments a

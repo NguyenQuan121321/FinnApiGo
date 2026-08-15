@@ -23,7 +23,7 @@ func TestRegisterSmokeAndLogRedaction(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(previous)
 	router := Register(Deps{
-		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil),
+		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil, nil, nil, 0),
 		JWT: jwt.NewJWTManager("test-secret", "test"), RateLimit: middleware.NewRateLimiter(100, 100, time.Minute),
 	})
 	for _, tc := range []struct {
@@ -58,9 +58,9 @@ func TestSessionRoutes(t *testing.T) {
 	uid := uint(7)
 	svc := &stubSessionService{}
 	router := Register(Deps{
-		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil),
-		Sessions: handlers.NewSessionHandler(svc),
-		JWT:      jwt.NewJWTManager("test-secret", "test"),
+		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil, nil, nil, 0),
+		Sessions:  handlers.NewSessionHandler(svc),
+		JWT:       jwt.NewJWTManager("test-secret", "test"),
 		RateLimit: middleware.NewRateLimiter(100, 100, time.Minute),
 	})
 
@@ -109,9 +109,9 @@ func TestSessionRoutes(t *testing.T) {
 func TestSessionRoutes_TrustedProxyIP(t *testing.T) {
 	svc := &stubSessionService{}
 	router := Register(Deps{
-		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil),
-		Sessions: handlers.NewSessionHandler(svc),
-		JWT:      jwt.NewJWTManager("test-secret", "test"),
+		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil, nil, nil, 0),
+		Sessions:  handlers.NewSessionHandler(svc),
+		JWT:       jwt.NewJWTManager("test-secret", "test"),
 		RateLimit: middleware.NewRateLimiter(100, 100, time.Minute),
 		// TrustedProxies intentionally empty → trust no proxy headers.
 	})
