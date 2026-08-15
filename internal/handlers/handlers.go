@@ -40,9 +40,17 @@ func statusForError(err error) (int, string) {
 	case errors.Is(err, services.ErrInvalidInput), errors.Is(err, services.ErrPasswordTooWeak),
 		errors.Is(err, services.ErrCaptchaRequired):
 		return http.StatusBadRequest, err.Error()
-	case errors.Is(err, services.ErrDisposableEmail):
-		return http.StatusUnprocessableEntity, err.Error()
-	case errors.Is(err, services.ErrRateLimited):
+		case errors.Is(err, services.ErrDisposableEmail):
+			return http.StatusUnprocessableEntity, err.Error()
+		case errors.Is(err, services.ErrOAuthNotConfigured):
+			return http.StatusNotImplemented, err.Error()
+		case errors.Is(err, services.ErrOAuthStateInvalid):
+			return http.StatusUnauthorized, err.Error()
+		case errors.Is(err, services.ErrOAuthEmailNotVerified):
+			return http.StatusForbidden, err.Error()
+		case errors.Is(err, services.ErrOAuthCodeExchangeFailed), errors.Is(err, services.ErrOAuthTokenVerificationFailed):
+			return http.StatusBadGateway, err.Error()
+		case errors.Is(err, services.ErrRateLimited):
 		return http.StatusTooManyRequests, err.Error()
 	}
 	return http.StatusInternalServerError, "internal server error"

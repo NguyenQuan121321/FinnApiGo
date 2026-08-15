@@ -42,4 +42,11 @@ var (
 
 	// OTP flow control
 	ErrOTPIssue              = errors.New("could not issue one-time code")
+
+	// OAuth / Google sign-in
+	ErrOAuthStateInvalid          = errors.New("invalid or expired oauth state")
+	ErrOAuthEmailNotVerified      = errors.New("google email is not verified")
+	ErrOAuthCodeExchangeFailed    = errors.New("failed to exchange authorization code")
+	ErrOAuthTokenVerificationFailed = errors.New("failed to verify google id token")
+	ErrOAuthNotConfigured         = errors.New("google sign-in is not configured")
 )

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/models"
@@ -562,6 +563,124 @@ func (m *mockTOTPValidator) Validate(ctx context.Context, userID uint, code stri
 	defer m.mu.Unlock()
 	m.calls++
 	return m.err
+}
+
+// ---- mock OAuth identity repo ----
+
+type mockOAuthIdentityRepo struct {
+	mu     sync.Mutex
+	rows   []*models.OAuthIdentity
+	nextID uint
+}
+
+func newMockOAuthIdentityRepo() *mockOAuthIdentityRepo { return &mockOAuthIdentityRepo{} }
+
+func (m *mockOAuthIdentityRepo) Create(ctx context.Context, identity *models.OAuthIdentity) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextID++
+	identity.ID = m.nextID
+	identity.CreatedAt = time.Now()
+	clone := *identity
+	m.rows = append(m.rows, &clone)
+	return nil
+}
+
+func (m *mockOAuthIdentityRepo) FindByProviderAndProviderUserID(ctx context.Context, provider, providerUserID string) (*models.OAuthIdentity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.Provider == provider && r.ProviderUserID == providerUserID {
+			c := *r
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockOAuthIdentityRepo) FindByUserIDAndProvider(ctx context.Context, userID uint, provider string) (*models.OAuthIdentity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.UserID == userID && r.Provider == provider {
+			c := *r
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockOAuthIdentityRepo) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.rows)
+}
+
+// ---- mock Google ID token verifier (no real network/JWKS calls) ----
+
+type mockGoogleIDTokenVerifier struct {
+	mu     sync.Mutex
+	claims *GoogleIDTokenClaims
+	err    error
+	tokens []string
+}
+
+func (m *mockGoogleIDTokenVerifier) Verify(ctx context.Context, rawIDToken string) (*GoogleIDTokenClaims, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokens = append(m.tokens, rawIDToken)
+	if m.err != nil {
+		return nil, m.err
+	}
+	c := *m.claims
+	return &c, nil
+}
+
+// ---- mock Google OAuth client (skips consent URL + code exchange) ----
+
+type mockGoogleOAuthClient struct {
+	mu      sync.Mutex
+	authURL string
+	token   *oauth2.Token
+	err     error
+	codes   []string
+}
+
+func (m *mockGoogleOAuthClient) AuthCodeURL(state string) string {
+	return m.authURL + "?state=" + state
+}
+
+func (m *mockGoogleOAuthClient) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.codes = append(m.codes, code)
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.token, nil
+}
+
+// ---- mock token issuer (stands in for AuthService in flow tests) ----
+
+type mockTokenIssuer struct {
+	mu      sync.Mutex
+	pair    TokenPair
+	profile UserProfile
+	pending *MFAPendingResult
+	err     error
+	users   []*models.User
+	details []string
+}
+
+func (m *mockTokenIssuer) CheckMFAOrIssueTokens(ctx context.Context, user *models.User, ip, ua, detail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.users = append(m.users, user)
+	m.details = append(m.details, detail)
+	if m.err != nil {
+		return TokenPair{}, UserProfile{}, nil, m.err
+	}
+	return m.pair, m.profile, m.pending, nil
 }
 
 var errNotFound = errNotFoundErr{}

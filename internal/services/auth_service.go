@@ -247,39 +247,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		return TokenPair{}, UserProfile{}, nil, err
 	}
 
-	// ---- MFA enforcement: check if TOTP is active for this user ----
-	// When totpRepo is nil (e.g. legacy tests), skip the check entirely so
-	// the login flow is unchanged for users without TOTP wired.
-	if s.totpRepo != nil {
-		device, err := s.totpRepo.FindByUserID(ctx, user.ID)
-		if err != nil {
-			return TokenPair{}, UserProfile{}, nil, fmt.Errorf("login: check totp: %w", err)
-		}
-		if device != nil && device.Enabled {
-			// TOTP is active — issue a short-lived mfa_pending token carrying
-			// only uid + type (no role/permissions). The user must complete
-			// MFA via /mfa/login-verify to receive real tokens.
-			mfaToken, err := s.jwt.Issue(user.ID, "", "",
-				jwt.TokenTypeMFAPending, s.jwtCfg.MFAPendingTTL)
-			if err != nil {
-				return TokenPair{}, UserProfile{}, nil, err
-			}
-			return TokenPair{}, UserProfile{}, &MFAPendingResult{
-				MFARequired: true,
-				MFAToken:    mfaToken,
-			}, nil
-		}
-	}
-
-	pair, err := s.issueTokenPair(ctx, user, ip, ua)
-	if err != nil {
-		return TokenPair{}, UserProfile{}, nil, err
-	}
-	s.audits.Record(ctx, &models.AuditLog{
-		UserID: &user.ID, Email: email, Event: models.AuditEventLogin,
-		IPAddress: ip, Success: true,
-	})
-	return pair, FromUser(user), nil, nil
+	return s.CheckMFAOrIssueTokens(ctx, user, ip, ua, "")
 }
 
 // ----- 2b. Complete MFA Login -----
@@ -315,6 +283,52 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 		IPAddress: in.IP, Success: true, Detail: "mfa-complete",
 	})
 	return pair, FromUser(user), nil
+}
+
+// ----- 2c. Shared MFA + token issuance helper ----
+
+// CheckMFAOrIssueTokens checks whether the user has TOTP enabled. If so it
+// issues a short-lived mfa_pending JWT; otherwise it issues a full access +
+// refresh token pair and records a login audit event. This is called from both
+// the password Login path and the Google OAuth callback path so the MFA
+// enforcement logic is never duplicated.
+//
+// auditDetail is an optional label for the audit row (e.g. "" for password,
+// "google-oauth" for Google sign-in).
+func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.User, ip, ua, auditDetail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+	// ---- MFA enforcement: check if TOTP is active for this user ----
+	// When totpRepo is nil (e.g. legacy tests), skip the check entirely so
+	// the login flow is unchanged for users without TOTP wired.
+	if s.totpRepo != nil {
+		device, err := s.totpRepo.FindByUserID(ctx, user.ID)
+		if err != nil {
+			return TokenPair{}, UserProfile{}, nil, fmt.Errorf("login: check totp: %w", err)
+		}
+		if device != nil && device.Enabled {
+			// TOTP is active — issue a short-lived mfa_pending token carrying
+			// only uid + type (no role/permissions). The user must complete
+			// MFA via /mfa/login-verify to receive real tokens.
+			mfaToken, err := s.jwt.Issue(user.ID, "", "",
+				jwt.TokenTypeMFAPending, s.jwtCfg.MFAPendingTTL)
+			if err != nil {
+				return TokenPair{}, UserProfile{}, nil, err
+			}
+			return TokenPair{}, UserProfile{}, &MFAPendingResult{
+				MFARequired: true,
+				MFAToken:    mfaToken,
+			}, nil
+		}
+	}
+
+	pair, err := s.issueTokenPair(ctx, user, ip, ua)
+	if err != nil {
+		return TokenPair{}, UserProfile{}, nil, err
+	}
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &user.ID, Email: user.Email, Event: models.AuditEventLogin,
+		IPAddress: ip, Success: true, Detail: auditDetail,
+	})
+	return pair, FromUser(user), nil, nil
 }
 
 // ----- 3. Logout -----

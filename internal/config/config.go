@@ -13,16 +13,17 @@ import (
 
 // Config holds every runtime knob for the application.
 type Config struct {
-	Server    ServerConfig
-	DB        DBConfig
-	JWT       JWTConfig
-	Auth      AuthConfig
-	RateLimit RateLimitConfig
-	SMTP      SMTPConfig
-	Redis     RedisConfig
-	Security  SecurityConfig
-	Captcha   CaptchaConfig
-	Audit     AuditConfig
+	Server     ServerConfig
+	DB         DBConfig
+	JWT        JWTConfig
+	Auth       AuthConfig
+	RateLimit  RateLimitConfig
+	SMTP       SMTPConfig
+	Redis      RedisConfig
+	Security   SecurityConfig
+	Captcha    CaptchaConfig
+	GoogleOAuth GoogleOAuthConfig
+	Audit      AuditConfig
 }
 
 type ServerConfig struct {
@@ -159,6 +160,15 @@ type CaptchaConfig struct {
 	SiteKey  string
 }
 
+// GoogleOAuthConfig holds the credentials and redirect URL for Google
+// OAuth 2.0 / OpenID Connect sign-in. When ClientID is empty the feature
+// is disabled and the /auth/google/* endpoints return 501.
+type GoogleOAuthConfig struct {
+	ClientID     string // GOOGLE_CLIENT_ID
+	ClientSecret string // GOOGLE_CLIENT_SECRET
+	RedirectURL  string // GOOGLE_REDIRECT_URL
+}
+
 // AuditConfig drives async audit logging (§7).
 type AuditConfig struct {
 	// BufferSize is the channel capacity; on overflow entries are dropped
@@ -244,12 +254,17 @@ func Load() (*Config, error) {
 			RateLimiterEntryTTL: envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
 			TOTPMaxConcurrent:   envInt("TOTP_MAX_CONCURRENT", 64),
 		},
-		Captcha: CaptchaConfig{
-			Provider: env("CAPTCHA_PROVIDER", ""),
-			Secret:   env("CAPTCHA_SECRET", ""),
-			SiteKey:  env("CAPTCHA_SITE_KEY", ""),
-		},
-		Audit: AuditConfig{
+			Captcha: CaptchaConfig{
+				Provider: env("CAPTCHA_PROVIDER", ""),
+				Secret:   env("CAPTCHA_SECRET", ""),
+				SiteKey:  env("CAPTCHA_SITE_KEY", ""),
+			},
+			GoogleOAuth: GoogleOAuthConfig{
+				ClientID:     env("GOOGLE_CLIENT_ID", ""),
+				ClientSecret: env("GOOGLE_CLIENT_SECRET", ""),
+				RedirectURL:  env("GOOGLE_REDIRECT_URL", ""),
+			},
+			Audit: AuditConfig{
 			BufferSize: envInt("AUDIT_BUFFER_SIZE", 1024),
 			FlushBatch: envInt("AUDIT_FLUSH_BATCH", 64),
 		},

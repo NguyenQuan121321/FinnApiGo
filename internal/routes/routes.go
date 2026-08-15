@@ -19,6 +19,7 @@ import (
 // Deps bundles everything the router needs. Constructed in main.go.
 type Deps struct {
 	Auth                *handlers.AuthHandler
+	OAuth               *handlers.OAuthHandler
 	MFA                 *handlers.MFAHandler
 	Sessions            *handlers.SessionHandler
 	JWT                 *jwt.JWTManager
@@ -93,6 +94,12 @@ func Register(deps Deps) *gin.Engine {
 	auth.POST("/reset-password", deps.Auth.ResetPassword)
 	auth.POST("/verify-email", deps.Auth.VerifyEmail)
 	auth.POST("/resend-verification", deps.RateLimit.Handler(), deps.Auth.ResendVerifyEmail)
+
+	// ---- Google OAuth 2.0 / OpenID Connect ----
+	if deps.OAuth != nil {
+		auth.GET("/google/login", deps.OAuth.GoogleLogin)
+		auth.GET("/google/callback", deps.RateLimit.Handler(), deps.OAuth.GoogleCallback)
+	}
 
 	// ---- Authenticated core-auth endpoints ----
 	authed := auth.Group("")

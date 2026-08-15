@@ -21,7 +21,7 @@ func testDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.OtpCode{}, &models.AuditLog{}, &models.UsedToken{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.OtpCode{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -34,6 +34,41 @@ func testUser(t *testing.T, db *gorm.DB) *models.User {
 		t.Fatal(err)
 	}
 	return u
+}
+
+func TestOAuthIdentityRepository(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	repo := NewOAuthIdentityRepository(db)
+
+	ident := &models.OAuthIdentity{UserID: u.ID, Provider: "google", ProviderUserID: "sub-123"}
+	if err := repo.Create(ctx, ident); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := repo.FindByProviderAndProviderUserID(ctx, "google", "sub-123")
+	if err != nil || got == nil || got.UserID != u.ID {
+		t.Fatalf("FindByProviderAndProviderUserID=%+v err=%v", got, err)
+	}
+	if got, err := repo.FindByProviderAndProviderUserID(ctx, "google", "nope"); err != nil || got != nil {
+		t.Fatalf("missing identity: got=%+v err=%v", got, err)
+	}
+	if got, err := repo.FindByUserIDAndProvider(ctx, u.ID, "google"); err != nil || got == nil || got.ProviderUserID != "sub-123" {
+		t.Fatalf("FindByUserIDAndProvider=%+v err=%v", got, err)
+	}
+
+	// (provider, provider_user_id) uniqueness: linking the same Google account
+	// to a second user must be rejected by the composite unique index.
+	dup := &models.OAuthIdentity{UserID: u.ID + 1, Provider: "google", ProviderUserID: "sub-123"}
+	if err := repo.Create(ctx, dup); err == nil {
+		t.Fatal("expected duplicate (provider, provider_user_id) to be rejected")
+	}
+	// A second Google account for the same user is fine (multi-account edge).
+	second := &models.OAuthIdentity{UserID: u.ID, Provider: "google", ProviderUserID: "sub-456"}
+	if err := repo.Create(ctx, second); err != nil {
+		t.Fatalf("second identity for same user: %v", err)
+	}
 }
 
 func TestUserRepository(t *testing.T) {

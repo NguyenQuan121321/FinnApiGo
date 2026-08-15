@@ -49,10 +49,11 @@ func run() error {
 	log.Printf("database connected: %s:%s/%s", cfg.DB.Host, cfg.DB.Port, cfg.DB.Name)
 
 	// --- Migrations (explicit; safe to run on every boot) ---
-	if err := db.AutoMigrate(
-		&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
-		&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
-	); err != nil {
+		if err := db.AutoMigrate(
+			&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
+			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
+			&models.OAuthIdentity{},
+		); err != nil {
 		return errors.Join(errors.New("auto-migrate failed"), err)
 	}
 
@@ -65,6 +66,7 @@ func run() error {
 	defer auditRepo.Close()
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
 	totpRepo := repositories.NewTOTPRepository(db)
+	oauthIdentityRepo := repositories.NewOAuthIdentityRepository(db)
 
 	// --- Store (in-memory default; Redis when REDIS_URL set) ---
 	// §1.3/§7 — rate-limit counters, velocity windows, and jti tracking are
@@ -121,6 +123,17 @@ func run() error {
 	)
 	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
 
+	// --- Google OAuth (endpoints only registered when fully configured) ---
+	var oauthHandler *handlers.OAuthHandler
+	if gClient := services.NewGoogleOAuthClient(cfg.GoogleOAuth.ClientID, cfg.GoogleOAuth.ClientSecret, cfg.GoogleOAuth.RedirectURL); gClient != nil {
+		gVerifier := services.NewProductionGoogleVerifier(cfg.GoogleOAuth.ClientID)
+		oauthSvc := services.NewOAuthService(userRepo, oauthIdentityRepo, kvStore, authSvc, gVerifier, gClient)
+		oauthHandler = handlers.NewOAuthHandler(oauthSvc)
+		log.Println("oauth: Google sign-in enabled")
+	} else {
+		log.Println("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
+	}
+
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
 	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc)
@@ -136,6 +149,7 @@ func run() error {
 	// --- Router ---
 	router := routes.Register(routes.Deps{
 		Auth:                authHandler,
+		OAuth:               oauthHandler,
 		MFA:                 mfaHandler,
 		Sessions:            sessionHandler,
 		JWT:                 jwtMgr,

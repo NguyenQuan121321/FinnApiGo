@@ -10,10 +10,10 @@ http:
     type: json
     data: |-
       {
-        "username": "botuser",
-        "email": "botuser@example.com",
+        "username": "finn",
+        "email": "noclone0001@gmail.com",
         "password": "Password123",
-        "fullName": "Bot User",
+        "fullName": "admin"
       }
 
 settings:

@@ -79,6 +79,19 @@ type AuditRepo interface {
 	Record(ctx context.Context, entry *models.AuditLog)
 }
 
+// OAuthIdentityRepo abstracts persistence for third-party OAuth identity
+// links (e.g. Google, GitHub). Each row maps a (provider, provider_user_id)
+// pair to a local user, enabling account linking without duplicating users.
+type OAuthIdentityRepo interface {
+	Create(ctx context.Context, identity *models.OAuthIdentity) error
+	// FindByProviderAndProviderUserID looks up an identity by the provider's
+	// stable user ID (e.g. Google's "sub" claim). Returns nil,nil when not
+	// found.
+	FindByProviderAndProviderUserID(ctx context.Context, provider, providerUserID string) (*models.OAuthIdentity, error)
+	// FindByUserIDAndProvider returns the identity link for a local user + provider.
+	FindByUserIDAndProvider(ctx context.Context, userID uint, provider string) (*models.OAuthIdentity, error)
+}
+
 // UsedTokenRepo abstracts single-use token (jti) tracking (§1.8).
 type UsedTokenRepo interface {
 	MarkUsed(ctx context.Context, jti, tokenType string, userID uint, exp time.Time) (bool, error)
