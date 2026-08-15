@@ -1,0 +1,34 @@
+info:
+  name: login-wrongpass-repeat
+  type: http
+  seq: 8
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/login
+  body:
+    type: json
+    data: |-
+      {
+        "email": "alice@example.com",
+        "password": "wrong-on-purpose"
+      }
+
+runtime:
+  scripts:
+    - type: after-response
+      code: |-
+        const data = res.body.data;
+        if (data && data.refreshToken) {
+          bru.setVar("refreshToken", data.refreshToken);
+          console.log("refreshToken saved:", data.refreshToken);
+        }
+        if (data && data.accessToken) {
+          bru.setVar("accessToken", data.accessToken);
+        }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

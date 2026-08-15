@@ -1,0 +1,23 @@
+info:
+  name: totp-validate
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/mfa/totp/validate
+  body:
+    type: json
+    data: |-
+      {
+        "code": ""
+      }
+  auth:
+    type: bearer
+    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjEsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJhbGljZUBleGFtcGxlLmNvbSIsInR5cGUiOiJhY2Nlc3MiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIxIiwiZXhwIjoxNzg2MTg1OTk2LCJuYmYiOjE3ODYxODUwOTYsImlhdCI6MTc4NjE4NTA5Nn0._0Fg2ww5RvRlc2MZixD5pETidD23b6yjlqgddii5I18
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

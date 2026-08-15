@@ -3,6 +3,7 @@ package hash
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -44,6 +45,16 @@ func HashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// HashRecoveryCode returns the SHA-256 hex digest of a high-entropy recovery
+// code. Random codes are not subject to dictionary attacks, so they need NOT
+// be run through bcrypt's expensive key derivation; SHA-256 is sufficient and,
+// crucially, O(1) — preventing a CPU DoS where an attacker spams invalid
+// recovery codes to peg 100% CPU on bcrypt. Verification must use
+// hash.ConstantTimeCompare (timing-safe).
+func HashRecoveryCode(code string) string {
+	return HashToken(code)
+}
+
 // GenerateRandomBytes returns n cryptographically secure random bytes.
 func GenerateRandomBytes(n int) ([]byte, error) {
 	b := make([]byte, n)
@@ -79,4 +90,12 @@ func GenerateOpaqueToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ConstantTimeCompare reports whether two strings are equal in constant time.
+// It is a thin wrapper over crypto/subtle so callers don't import it directly.
+// The inputs need not be the same length; mismatched lengths return false
+// without short-circuiting beyond a single length comparison.
+func ConstantTimeCompare(a, b string) bool {
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }

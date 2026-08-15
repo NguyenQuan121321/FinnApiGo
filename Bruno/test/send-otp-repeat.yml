@@ -1,0 +1,23 @@
+info:
+  name: send-otp-repeat
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/mfa/send-otp
+  body:
+    type: json
+    data: |-
+      {
+        "purpose": "login"
+      }
+  auth:
+    type: bearer
+    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjEsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJhbGljZUBleGFtcGxlLmNvbSIsInR5cGUiOiJhY2Nlc3MiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIxIiwiZXhwIjoxNzg1NzkzMzUyLCJuYmYiOjE3ODU3OTI0NTIsImlhdCI6MTc4NTc5MjQ1Mn0.5xdMT-f9AQwt__InkTZabRHkbwJWjBHzbvR6Cztqk9I
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

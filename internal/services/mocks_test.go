@@ -5,6 +5,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
+	"gorm.io/gorm"
+
 	"github.com/finnapigo/finnapigo/internal/models"
 )
 
@@ -190,6 +193,57 @@ func (m *mockTokenRepo) RevokeAllForUser(ctx context.Context, userID uint) error
 	return nil
 }
 
+// FindActiveByUser returns the caller's non-expired, non-revoked sessions,
+// newest activity first — mirrors the GORM repository ordering for parity.
+func (m *mockTokenRepo) FindActiveByUser(ctx context.Context, userID uint) ([]models.RefreshToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	var out []models.RefreshToken
+	for _, rt := range m.rows {
+		if rt.UserID == userID && !rt.Revoked && rt.ExpiresAt.After(now) {
+			out = append(out, *rt)
+		}
+	}
+	// Sort by LastActiveAt desc, then ID desc (stable enough for assertions).
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0; j-- {
+			a, b := out[j-1], out[j]
+			if a.LastActiveAt.Before(b.LastActiveAt) ||
+				(a.LastActiveAt.Equal(b.LastActiveAt) && a.ID < b.ID) {
+				out[j-1], out[j] = out[j], out[j-1]
+			} else {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// RevokeByID mimics the GORM repo: scope to userID, return gorm.ErrRecordNotFound
+// when no row matched (the service maps that sentinel to ErrSessionNotFound).
+func (m *mockTokenRepo) RevokeByID(ctx context.Context, id, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, rt := range m.rows {
+		if rt.ID == id && rt.UserID == userID {
+			rt.Revoked = true
+			return nil
+		}
+	}
+	return gorm.ErrRecordNotFound
+}
+
+// TouchLastActive bumps last_active_at for the given row id (best-effort).
+func (m *mockTokenRepo) TouchLastActive(ctx context.Context, id uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if rt, ok := m.rows[id]; ok {
+		rt.LastActiveAt = time.Now()
+	}
+	return nil
+}
+
 func (m *mockTokenRepo) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
 	return 0, nil
 }
@@ -263,9 +317,9 @@ func (m *mockOtpRepo) PurgeExpired(ctx context.Context, before time.Time) (int64
 // ---- mock used-token repo (§1.8) ----
 
 type mockUsedTokenRepo struct {
-	mu      sync.Mutex
-	used    map[string]bool
-	markOK  bool // what MarkUsed should return (true = first use wins)
+	mu     sync.Mutex
+	used   map[string]bool
+	markOK bool // what MarkUsed should return (true = first use wins)
 }
 
 func newMockUsedTokenRepo() *mockUsedTokenRepo {
@@ -322,12 +376,12 @@ func (m *mockAuditRepo) count() int {
 // ---- mock notifier (captures last sent values) ----
 
 type mockNotifier struct {
-	mu                sync.Mutex
-	lastOTPCode       string
-	lastOTPPurpose    string
-	lastReset         string
-	lastVerify        string
-	verifySendErr     error
+	mu             sync.Mutex
+	lastOTPCode    string
+	lastOTPPurpose string
+	lastReset      string
+	lastVerify     string
+	verifySendErr  error
 }
 
 func (n *mockNotifier) SendOTP(to, code, purpose string) error {
@@ -358,8 +412,8 @@ func (n *mockNotifier) SendEmailVerification(to, verifyToken string) error {
 // ---- mock store (for §1.8 jti tracking in tests) ----
 
 type mockStore struct {
-	mu       sync.Mutex
-	data     map[string]any
+	mu         sync.Mutex
+	data       map[string]any
 	setNXCalls int
 }
 
@@ -405,7 +459,7 @@ func (m *mockStore) Delete(key string) {
 // mockCaptchaVerifier lets tests control whether CAPTCHA verification passes.
 // err != nil => Verify returns that error (simulating a rejected/missing token).
 type mockCaptchaVerifier struct {
-	err  error
+	err   error
 	calls int
 	token string
 }
@@ -414,6 +468,224 @@ func (m *mockCaptchaVerifier) Verify(ctx context.Context, token string) error {
 	m.calls++
 	m.token = token
 	return m.err
+}
+
+// ---- mock TOTP repo ----
+
+type mockTOTPRepo struct {
+	mu         sync.Mutex
+	devices    map[uint]*models.TOTPDevice
+	codes      map[uint][]models.RecoveryCode
+	nextID     uint
+	upsertErr  error
+	replaceErr error
+}
+
+func newMockTOTPRepo() *mockTOTPRepo {
+	return &mockTOTPRepo{
+		devices: map[uint]*models.TOTPDevice{},
+		codes:   map[uint][]models.RecoveryCode{},
+	}
+}
+
+func (m *mockTOTPRepo) Upsert(ctx context.Context, d *models.TOTPDevice) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.upsertErr != nil {
+		return m.upsertErr
+	}
+	if d.ID == 0 {
+		m.nextID++
+		d.ID = m.nextID
+	}
+	clone := *d
+	m.devices[d.UserID] = &clone
+	return nil
+}
+
+func (m *mockTOTPRepo) FindByUserID(ctx context.Context, userID uint) (*models.TOTPDevice, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.devices[userID]
+	if !ok {
+		return nil, nil
+	}
+	c := *d
+	return &c, nil
+}
+
+func (m *mockTOTPRepo) ReplaceRecoveryCodes(ctx context.Context, userID uint, codes []*models.RecoveryCode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.replaceErr != nil {
+		return m.replaceErr
+	}
+	delete(m.codes, userID)
+	for _, c := range codes {
+		c.ID = m.nextID
+		m.nextID++
+		m.codes[c.UserID] = append(m.codes[c.UserID], *c)
+	}
+	return nil
+}
+
+func (m *mockTOTPRepo) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]models.RecoveryCode, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.RecoveryCode
+	for _, c := range m.codes[userID] {
+		if c.UsedAt == nil {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (m *mockTOTPRepo) MarkRecoveryCodeUsed(ctx context.Context, c *models.RecoveryCode) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	c.UsedAt = &now
+	for i := range m.codes[c.UserID] {
+		if m.codes[c.UserID][i].ID == c.ID {
+			m.codes[c.UserID][i].UsedAt = &now
+			break
+		}
+	}
+	return nil
+}
+
+// ---- mock TOTP validator (for MFA login tests) ----
+
+type mockTOTPValidator struct {
+	mu    sync.Mutex
+	err   error // what Validate should return
+	calls int
+}
+
+func (m *mockTOTPValidator) Validate(ctx context.Context, userID uint, code string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	return m.err
+}
+
+// ---- mock OAuth identity repo ----
+
+type mockOAuthIdentityRepo struct {
+	mu     sync.Mutex
+	rows   []*models.OAuthIdentity
+	nextID uint
+}
+
+func newMockOAuthIdentityRepo() *mockOAuthIdentityRepo { return &mockOAuthIdentityRepo{} }
+
+func (m *mockOAuthIdentityRepo) Create(ctx context.Context, identity *models.OAuthIdentity) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nextID++
+	identity.ID = m.nextID
+	identity.CreatedAt = time.Now()
+	clone := *identity
+	m.rows = append(m.rows, &clone)
+	return nil
+}
+
+func (m *mockOAuthIdentityRepo) FindByProviderAndProviderUserID(ctx context.Context, provider, providerUserID string) (*models.OAuthIdentity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.Provider == provider && r.ProviderUserID == providerUserID {
+			c := *r
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockOAuthIdentityRepo) FindByUserIDAndProvider(ctx context.Context, userID uint, provider string) (*models.OAuthIdentity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.UserID == userID && r.Provider == provider {
+			c := *r
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockOAuthIdentityRepo) count() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.rows)
+}
+
+// ---- mock Google ID token verifier (no real network/JWKS calls) ----
+
+type mockGoogleIDTokenVerifier struct {
+	mu     sync.Mutex
+	claims *GoogleIDTokenClaims
+	err    error
+	tokens []string
+}
+
+func (m *mockGoogleIDTokenVerifier) Verify(ctx context.Context, rawIDToken string) (*GoogleIDTokenClaims, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokens = append(m.tokens, rawIDToken)
+	if m.err != nil {
+		return nil, m.err
+	}
+	c := *m.claims
+	return &c, nil
+}
+
+// ---- mock Google OAuth client (skips consent URL + code exchange) ----
+
+type mockGoogleOAuthClient struct {
+	mu      sync.Mutex
+	authURL string
+	token   *oauth2.Token
+	err     error
+	codes   []string
+}
+
+func (m *mockGoogleOAuthClient) AuthCodeURL(state string) string {
+	return m.authURL + "?state=" + state
+}
+
+func (m *mockGoogleOAuthClient) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.codes = append(m.codes, code)
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.token, nil
+}
+
+// ---- mock token issuer (stands in for AuthService in flow tests) ----
+
+type mockTokenIssuer struct {
+	mu      sync.Mutex
+	pair    TokenPair
+	profile UserProfile
+	pending *MFAPendingResult
+	err     error
+	users   []*models.User
+	details []string
+}
+
+func (m *mockTokenIssuer) CheckMFAOrIssueTokens(ctx context.Context, user *models.User, ip, ua, detail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.users = append(m.users, user)
+	m.details = append(m.details, detail)
+	if m.err != nil {
+		return TokenPair{}, UserProfile{}, nil, m.err
+	}
+	return m.pair, m.profile, m.pending, nil
 }
 
 var errNotFound = errNotFoundErr{}

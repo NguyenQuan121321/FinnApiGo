@@ -4,16 +4,23 @@ import "time"
 
 // Audit event constants.
 const (
-	AuditEventLogin               = "login"
-	AuditEventLoginFailed         = "login_failed"
-	AuditEventLogout              = "logout"
-	AuditEventPasswordChanged     = "password_changed"
-	AuditEventPasswordReset       = "password_reset"
-	AuditEventOTPSent             = "otp_sent"
-	AuditEventOTPVerified         = "otp_verified"
-	AuditEventRefreshToken        = "refresh_token"
-	AuditEventTokenReuse          = "token_reuse"
-	AuditEventVerifyResendBlocked = "verify_resend_blocked" // §7.6.3 — anti-automation event
+	AuditEventLogin                    = "login"
+	AuditEventLoginFailed              = "login_failed"
+	AuditEventLogout                   = "logout"
+	AuditEventPasswordChanged          = "password_changed"
+	AuditEventPasswordReset            = "password_reset"
+	AuditEventOTPSent                  = "otp_sent"
+	AuditEventOTPVerified              = "otp_verified"
+	AuditEventRefreshToken             = "refresh_token"
+	AuditEventTokenReuse               = "token_reuse"
+	AuditEventVerifyResendBlocked      = "verify_resend_blocked" // §7.6.3 — anti-automation event
+	AuditEventTOTPEnabled              = "totp_enabled"
+	AuditEventTOTPValidated            = "totp_validated"
+	AuditEventTOTPFailed               = "totp_failed"
+	AuditEventRecoveryCodeUsed         = "recovery_code_used"
+	AuditEventRecoveryCodesViewed      = "recovery_codes_viewed"      // user re-viewed saved codes (grants sudo)
+	AuditEventRecoveryCodesRegenerated = "recovery_codes_regenerated" // old set invalidated, new set issued
+	AuditEventSessionRevoked           = "session_revoked"            // user revoked a single device/session
 )
 
 // AuditLog records security-relevant actions for compliance / forensics.

@@ -13,21 +13,28 @@ import (
 
 // Config holds every runtime knob for the application.
 type Config struct {
-	Server    ServerConfig
-	DB        DBConfig
-	JWT       JWTConfig
-	Auth      AuthConfig
-	RateLimit RateLimitConfig
-	SMTP      SMTPConfig
-	Redis     RedisConfig
-	Security  SecurityConfig
-	Captcha   CaptchaConfig
-	Audit     AuditConfig
+	Server      ServerConfig
+	DB          DBConfig
+	JWT         JWTConfig
+	Auth        AuthConfig
+	RateLimit   RateLimitConfig
+	SMTP        SMTPConfig
+	Redis       RedisConfig
+	Security    SecurityConfig
+	Captcha     CaptchaConfig
+	GoogleOAuth GoogleOAuthConfig
+	Audit       AuditConfig
 }
 
 type ServerConfig struct {
 	Port    string
 	GinMode string
+	// TrustedProxies is the comma-separated list (TRUSTED_PROXIES) of CIDR/IPs
+	// that may set X-Forwarded-For / X-Real-IP. Empty (default) trusts NO proxy,
+	// so c.ClientIP() returns the direct RemoteAddr — the spoof-proof default.
+	// Set this to your load balancer / Cloudflare / Nginx egress CIDRs in
+	// production so the app resolves the real client IP for session metadata.
+	TrustedProxies []string
 }
 
 type DBConfig struct {
@@ -48,12 +55,18 @@ func (d DBConfig) DSN() string {
 }
 
 type JWTConfig struct {
-	Secret     string
-	Issuer     string
-	AccessTTL  time.Duration
-	RefreshTTL time.Duration
-	ResetTTL   time.Duration
-	VerifyTTL  time.Duration
+	Secret        string
+	Issuer        string
+	AccessTTL     time.Duration
+	RefreshTTL    time.Duration
+	ResetTTL      time.Duration
+	VerifyTTL     time.Duration
+	MFAPendingTTL time.Duration
+	// SudoTTL is the lifetime of the short-lived "sudo" token minted after a
+	// successful TOTP verification on the recovery-codes view endpoint.
+	// Within this window the user may regenerate codes without re-entering
+	// a TOTP code (GitHub-style sudo mode).
+	SudoTTL time.Duration
 }
 
 type AuthConfig struct {
@@ -68,6 +81,23 @@ type AuthConfig struct {
 	// RequireEmailVerified gates sensitive actions behind is_email_verified
 	// (§2). When true, login is still allowed (UX) but document it as a policy.
 	RequireEmailVerified bool
+	// ---- TOTP brute-force protection ----
+	// TOTPMaxAttempts is the maximum failed validate/verify attempts allowed
+	// per user within TOTPAttemptWindow before the account is locked out of
+	// MFA (returns 429). Backstops the per-IP rate limiter: even if an attacker
+	// rotates IPs, repeated wrong codes against one account are throttled.
+	TOTPMaxAttempts int
+	// TOTPAttemptWindow is the sliding window over which TOTPMaxAttempts counts.
+	TOTPAttemptWindow time.Duration
+	// RecoveryCodeCount is how many one-time recovery codes are issued.
+	RecoveryCodeCount int
+	// RecoveryCodeBytes is the entropy (in bytes) of each recovery code before
+	// hex encoding (16 => 128-bit codes, 32 hex chars).
+	RecoveryCodeBytes int
+	// RecoveryCodeKey is an optional hex-encoded 32-byte AES-256 key used to
+	// seal the re-viewable copy of each recovery code. When empty the key is
+	// derived from JWT_SECRET (see cmd/server wiring).
+	RecoveryCodeKey string
 }
 
 type RateLimitConfig struct {
@@ -124,6 +154,11 @@ type SecurityConfig struct {
 	MaxPasswordLength int
 	// RateLimiterEntryTTL bounds the per-IP rate-limiter map (§1.3).
 	RateLimiterEntryTTL time.Duration
+	// TOTPMaxConcurrent caps the number of concurrent CPU-bound TOTP
+	// validations (Enable/VerifyEnable/Validate). Excess requests are rejected
+	// with 429 immediately, so a flood of validations cannot starve worker
+	// threads. 0 disables the gate (keeps legacy behavior for tests).
+	TOTPMaxConcurrent int
 }
 
 // CaptchaConfig drives the optional CAPTCHA on /register and post-fail /login.
@@ -132,6 +167,15 @@ type CaptchaConfig struct {
 	Provider string // "turnstile" | "hcaptcha" | "" (= off)
 	Secret   string
 	SiteKey  string
+}
+
+// GoogleOAuthConfig holds the credentials and redirect URL for Google
+// OAuth 2.0 / OpenID Connect sign-in. When ClientID is empty the feature
+// is disabled and the /auth/google/* endpoints return 501.
+type GoogleOAuthConfig struct {
+	ClientID     string // GOOGLE_CLIENT_ID
+	ClientSecret string // GOOGLE_CLIENT_SECRET
+	RedirectURL  string // GOOGLE_REDIRECT_URL
 }
 
 // AuditConfig drives async audit logging (§7).
@@ -151,8 +195,9 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:    env("SERVER_PORT", "8080"),
-			GinMode: env("GIN_MODE", "debug"),
+			Port:           env("SERVER_PORT", "8080"),
+			GinMode:        env("GIN_MODE", "debug"),
+			TrustedProxies: envCSV("TRUSTED_PROXIES"),
 		},
 		DB: DBConfig{
 			Host:         env("DB_HOST", "127.0.0.1"),
@@ -164,12 +209,14 @@ func Load() (*Config, error) {
 			MaxOpenConns: envInt("DB_MAX_OPEN_CONNS", 100),
 		},
 		JWT: JWTConfig{
-			Secret:     env("JWT_SECRET", ""),
-			Issuer:     env("JWT_ISSUER", "finnapigo"),
-			AccessTTL:  envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
-			RefreshTTL: envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
-			ResetTTL:   envDuration("RESET_TOKEN_TTL", 15*time.Minute),
-			VerifyTTL:  envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
+			Secret:        env("JWT_SECRET", ""),
+			Issuer:        env("JWT_ISSUER", "finnapigo"),
+			AccessTTL:     envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
+			RefreshTTL:    envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
+			ResetTTL:      envDuration("RESET_TOKEN_TTL", 15*time.Minute),
+			VerifyTTL:     envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
+			MFAPendingTTL: envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
+			SudoTTL:       envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
 		},
 		Auth: AuthConfig{
 			MaxLoginAttempts:     envInt("MAX_LOGIN_ATTEMPTS", 5),
@@ -179,6 +226,11 @@ func Load() (*Config, error) {
 			OTPLength:            envInt("OTP_LENGTH", 6),
 			OTPMaxAttempts:       envInt("OTP_MAX_ATTEMPTS", 5),
 			RequireEmailVerified: envBool("REQUIRE_EMAIL_VERIFIED", false),
+			TOTPMaxAttempts:      envInt("TOTP_MAX_ATTEMPTS", 5),
+			TOTPAttemptWindow:    envDuration("TOTP_ATTEMPT_WINDOW", 5*time.Minute),
+			RecoveryCodeCount:    envInt("RECOVERY_CODE_COUNT", 10),
+			RecoveryCodeBytes:    envInt("RECOVERY_CODE_BYTES", 16),
+			RecoveryCodeKey:      env("RECOVERY_CODE_KEY", ""),
 		},
 		RateLimit: RateLimitConfig{
 			RPS:                      envFloat("RATE_LIMIT_RPS", 5),
@@ -211,11 +263,17 @@ func Load() (*Config, error) {
 			MaxRequestBodyBytes: envInt64("MAX_REQUEST_BODY_BYTES", 1<<20), // 1 MiB
 			MaxPasswordLength:   envInt("MAX_PASSWORD_LENGTH", 72),
 			RateLimiterEntryTTL: envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
+			TOTPMaxConcurrent:   envInt("TOTP_MAX_CONCURRENT", 64),
 		},
 		Captcha: CaptchaConfig{
 			Provider: env("CAPTCHA_PROVIDER", ""),
 			Secret:   env("CAPTCHA_SECRET", ""),
 			SiteKey:  env("CAPTCHA_SITE_KEY", ""),
+		},
+		GoogleOAuth: GoogleOAuthConfig{
+			ClientID:     env("GOOGLE_CLIENT_ID", ""),
+			ClientSecret: env("GOOGLE_CLIENT_SECRET", ""),
+			RedirectURL:  env("GOOGLE_REDIRECT_URL", ""),
 		},
 		Audit: AuditConfig{
 			BufferSize: envInt("AUDIT_BUFFER_SIZE", 1024),
@@ -285,3 +343,20 @@ func envDuration(key string, fallback time.Duration) time.Duration {
 
 // TrimSpace centralises whitespace cleanup for request fields.
 func TrimSpace(s string) string { return strings.TrimSpace(s) }
+
+// envCSV reads a comma-separated env var into a trimmed slice. Returns nil
+// (len 0) when unset/empty — which callers treat as "trust nothing".
+func envCSV(key string) []string {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if t := strings.TrimSpace(p); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
+}

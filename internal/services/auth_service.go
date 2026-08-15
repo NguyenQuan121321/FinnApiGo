@@ -11,10 +11,13 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/device"
+	"github.com/finnapigo/finnapigo/internal/geo"
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/go-sql-driver/mysql"
+	"gorm.io/gorm"
 )
 
 // dummyHash is a pre-computed bcrypt hash of a static string. It is compared
@@ -33,17 +36,20 @@ func init() {
 // AuthService holds all core-auth business logic. It depends only on repo
 // interfaces + stateless helpers (jwt, hashing), so it is trivially unit-testable.
 type AuthService struct {
-	users      UserRepo
-	tokens     RefreshTokenRepo
-	usedTokens UsedTokenRepo
-	audits     AuditRepo
-	store      StoreProvider
-	jwt        *jwt.JWTManager
-	cfg        config.AuthConfig
-	rlCfg      config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
-	jwtCfg     config.JWTConfig
-	notify     Notifier
-	captcha    CaptchaVerifier // §3 — nil-safe (NoOp when off)
+	users         UserRepo
+	tokens        RefreshTokenRepo
+	usedTokens    UsedTokenRepo
+	audits        AuditRepo
+	store         StoreProvider
+	jwt           *jwt.JWTManager
+	cfg           config.AuthConfig
+	rlCfg         config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
+	jwtCfg        config.JWTConfig
+	notify        Notifier
+	captcha       CaptchaVerifier // §3 — nil-safe (NoOp when off)
+	geo           geo.Resolver    // IP -> location label; nil-safe (Unknown)
+	totpRepo      TOTPRepo        // nil-safe — MFA check skipped when nil
+	totpValidator TOTPValidator   // nil-safe — MFA completion unavailable when nil
 }
 
 // StoreProvider abstracts the key-value store for per-account/per-IP counters
@@ -58,6 +64,7 @@ type StoreProvider interface {
 // NewAuthService constructs the service. Repos are interfaces so mocks can be
 // passed in tests. store may be nil (some features will be no-ops). rlCfg drives
 // the §2/§3 velocity limiters and adaptive CAPTCHA; captcha may be nil.
+// geoResolver may be nil (defaults to NoOp — all locations "Unknown").
 func NewAuthService(
 	users UserRepo,
 	tokens RefreshTokenRepo,
@@ -70,14 +77,21 @@ func NewAuthService(
 	jwtCfg config.JWTConfig,
 	notify Notifier,
 	captcha CaptchaVerifier,
+	geoResolver geo.Resolver,
+	totpRepo TOTPRepo,
+	totpValidator TOTPValidator,
 ) *AuthService {
 	if captcha == nil {
 		captcha = NoOpCaptchaVerifier{}
 	}
+	if geoResolver == nil {
+		geoResolver = geo.NewNoOpResolver()
+	}
 	return &AuthService{
 		users: users, tokens: tokens, usedTokens: usedTokens, audits: audits,
 		store: store, jwt: jwt, cfg: authCfg, rlCfg: rlCfg, jwtCfg: jwtCfg,
-		notify: notify, captcha: captcha,
+		notify: notify, captcha: captcha, geo: geoResolver,
+		totpRepo: totpRepo, totpValidator: totpValidator,
 	}
 }
 
@@ -161,9 +175,10 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 // ----- 2. Login -----
 
 // Login authenticates credentials, applies lockout logic, and returns a fresh
-// access + refresh token pair. It does NOT enforce email verification by
-// default — callers may opt into that at the handler level.
-func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (TokenPair, UserProfile, error) {
+// access + refresh token pair — unless the user has TOTP enabled, in which case
+// it returns a short-lived mfa_pending token and a nil TokenPair so the handler
+// can prompt for a second factor before issuing real tokens.
+func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (TokenPair, UserProfile, *MFAPendingResult, error) {
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 
 	// §3 — per-account login velocity limit: throttle repeated attempts against
@@ -173,7 +188,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		key := "login:acct:" + email
 		count := s.store.IncrBy(key, 1, s.rlCfg.LoginWindow)
 		if count > int64(s.rlCfg.LoginPerAccountMax) {
-			return TokenPair{}, UserProfile{}, ErrRateLimited
+			return TokenPair{}, UserProfile{}, nil, ErrRateLimited
 		}
 	}
 
@@ -185,7 +200,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		if v, ok := s.store.Get(failKey); ok {
 			if n, _ := v.(int64); n >= int64(s.rlCfg.LoginCaptchaAfterFails) {
 				if err := s.captcha.Verify(ctx, in.CaptchaToken); err != nil {
-					return TokenPair{}, UserProfile{}, ErrCaptchaRequired
+					return TokenPair{}, UserProfile{}, nil, ErrCaptchaRequired
 				}
 			}
 		}
@@ -193,7 +208,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 
 	user, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
-		return TokenPair{}, UserProfile{}, fmt.Errorf("login: find user: %w", err)
+		return TokenPair{}, UserProfile{}, nil, fmt.Errorf("login: find user: %w", err)
 	}
 	// §1.6 — Timing side-channel mitigation: when user == nil, still run a
 	// bcrypt comparison against a dummy hash so both code paths take ~equal
@@ -202,45 +217,118 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		hash.CheckPassword(dummyHash, in.Password)
 		s.recordLoginFailIP(ctx, ip)
 		s.audits.Record(ctx, loginFailedEvent(nil, email, ip, "unknown user"))
-		return TokenPair{}, UserProfile{}, ErrInvalidCredentials
+		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
 
 	// §2 — optional email-verification gate. When RequireEmailVerified is
 	// true, unverified accounts cannot log in. Default false to avoid breaking
 	// existing UX; the CHANGELOG and README document this as a policy decision.
 	if s.cfg.RequireEmailVerified && !user.IsEmailVerified {
-		return TokenPair{}, UserProfile{}, ErrEmailNotVerified
+		return TokenPair{}, UserProfile{}, nil, ErrEmailNotVerified
 	}
 
 	if !user.IsActive {
 		s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "disabled"))
-		return TokenPair{}, UserProfile{}, ErrAccountDisabled
+		return TokenPair{}, UserProfile{}, nil, ErrAccountDisabled
 	}
 
 	if locked := s.isLocked(user); locked {
 		s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "locked"))
-		return TokenPair{}, UserProfile{}, ErrAccountLocked
+		return TokenPair{}, UserProfile{}, nil, ErrAccountLocked
 	}
 
 	if !hash.CheckPassword(user.Password, in.Password) {
 		s.recordFailedLogin(ctx, user, email, ip)
-		return TokenPair{}, UserProfile{}, ErrInvalidCredentials
+		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
 
 	// success: reset counter
 	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
+		return TokenPair{}, UserProfile{}, nil, err
+	}
+
+	return s.CheckMFAOrIssueTokens(ctx, user, ip, ua, "")
+}
+
+// ----- 2b. Complete MFA Login -----
+
+// CompleteMFALogin validates the TOTP code for a user who has already passed
+// password authentication (proven by a valid mfa_pending JWT). On success it
+// issues the real access+refresh token pair and creates the session/device DB
+// record. The TOTP validation is delegated to the injected TOTPValidator,
+// reusing the exact same logic as the existing /totp/validate endpoint.
+func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginInput) (TokenPair, UserProfile, error) {
+	if s.totpValidator == nil {
+		return TokenPair{}, UserProfile{}, ErrInvalidToken
+	}
+
+	if err := s.totpValidator.Validate(ctx, in.UserID, in.Code); err != nil {
 		return TokenPair{}, UserProfile{}, err
 	}
 
-	pair, err := s.issueTokenPair(ctx, user)
+	user, err := s.users.FindByID(ctx, in.UserID)
+	if err != nil {
+		return TokenPair{}, UserProfile{}, err
+	}
+	if user == nil || !user.IsActive {
+		return TokenPair{}, UserProfile{}, ErrInvalidToken
+	}
+
+	pair, err := s.issueTokenPair(ctx, user, in.IP, in.UA)
 	if err != nil {
 		return TokenPair{}, UserProfile{}, err
 	}
 	s.audits.Record(ctx, &models.AuditLog{
-		UserID: &user.ID, Email: email, Event: models.AuditEventLogin,
-		IPAddress: ip, Success: true,
+		UserID: &user.ID, Email: user.Email, Event: models.AuditEventLogin,
+		IPAddress: in.IP, Success: true, Detail: "mfa-complete",
 	})
 	return pair, FromUser(user), nil
+}
+
+// ----- 2c. Shared MFA + token issuance helper ----
+
+// CheckMFAOrIssueTokens checks whether the user has TOTP enabled. If so it
+// issues a short-lived mfa_pending JWT; otherwise it issues a full access +
+// refresh token pair and records a login audit event. This is called from both
+// the password Login path and the Google OAuth callback path so the MFA
+// enforcement logic is never duplicated.
+//
+// auditDetail is an optional label for the audit row (e.g. "" for password,
+// "google-oauth" for Google sign-in).
+func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.User, ip, ua, auditDetail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+	// ---- MFA enforcement: check if TOTP is active for this user ----
+	// When totpRepo is nil (e.g. legacy tests), skip the check entirely so
+	// the login flow is unchanged for users without TOTP wired.
+	if s.totpRepo != nil {
+		device, err := s.totpRepo.FindByUserID(ctx, user.ID)
+		if err != nil {
+			return TokenPair{}, UserProfile{}, nil, fmt.Errorf("login: check totp: %w", err)
+		}
+		if device != nil && device.Enabled {
+			// TOTP is active — issue a short-lived mfa_pending token carrying
+			// only uid + type (no role/permissions). The user must complete
+			// MFA via /mfa/login-verify to receive real tokens.
+			mfaToken, err := s.jwt.Issue(user.ID, "", "",
+				jwt.TokenTypeMFAPending, s.jwtCfg.MFAPendingTTL)
+			if err != nil {
+				return TokenPair{}, UserProfile{}, nil, err
+			}
+			return TokenPair{}, UserProfile{}, &MFAPendingResult{
+				MFARequired: true,
+				MFAToken:    mfaToken,
+			}, nil
+		}
+	}
+
+	pair, err := s.issueTokenPair(ctx, user, ip, ua)
+	if err != nil {
+		return TokenPair{}, UserProfile{}, nil, err
+	}
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &user.ID, Email: user.Email, Event: models.AuditEventLogin,
+		IPAddress: ip, Success: true, Detail: auditDetail,
+	})
+	return pair, FromUser(user), nil, nil
 }
 
 // ----- 3. Logout -----
@@ -286,7 +374,8 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uint, ip string) err
 
 // Refresh validates the presented refresh token, revokes it, and issues a NEW
 // access + refresh pair (rotation). Reuse of the old token is therefore detected.
-func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip string) (TokenPair, error) {
+// The caller's ip/ua are stamped onto the new session and used for audit events.
+func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) (TokenPair, error) {
 	hash := hash.HashToken(refreshToken)
 	rt, err := s.tokens.FindByHash(ctx, hash)
 	if err != nil {
@@ -297,10 +386,9 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip string) (Tok
 		return TokenPair{}, ErrInvalidToken
 	}
 
-	// §4 — Refresh-token reuse detection: if a *revoked* (not just expired)
-	// token is presented, it is a strong theft signal. Revoke ALL tokens for
-	// the user and log a high-severity event. Expired-but-not-revoked keeps
-	// the simple rejection (no blowback).
+	// §Session — a revoked session can NEVER rotate. Block instantly and treat
+	// it as a reuse/theft signal: revoke ALL of the user's sessions (per the
+	// existing security spec) and record a high-severity audit event.
 	if rt.Revoked {
 		_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
 		s.audits.Record(ctx, &models.AuditLog{
@@ -323,11 +411,12 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip string) (Tok
 		return TokenPair{}, ErrInvalidToken
 	}
 
-	// Rotate: revoke the old, issue a new pair.
+	// Rotate: revoke the old, issue a new pair (carrying the caller's device
+	// metadata so the "sessions" list reflects the rotating device).
 	if err := s.tokens.Revoke(ctx, rt); err != nil {
 		return TokenPair{}, err
 	}
-	pair, err := s.issueTokenPair(ctx, user)
+	pair, err := s.issueTokenPair(ctx, user, ip, ua)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -587,7 +676,9 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 // ----- internal helpers -----
 
 // issueTokenPair mints an access JWT + opaque refresh token (hash stored).
-func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User) (TokenPair, error) {
+// The caller's ip/ua are stamped onto the new refresh-token row so it doubles
+// as a session/device record (location is resolved via the geo resolver).
+func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, error) {
 	access, err := s.jwt.Issue(user.ID, user.Role, user.Email,
 		jwt.TokenTypeAccess, s.jwtCfg.AccessTTL)
 	if err != nil {
@@ -597,10 +688,16 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User) (To
 	if err != nil {
 		return TokenPair{}, err
 	}
+	now := time.Now()
 	rt := &models.RefreshToken{
-		UserID:    user.ID,
-		TokenHash: hash.HashToken(refreshPlain),
-		ExpiresAt: time.Now().Add(s.jwtCfg.RefreshTTL),
+		UserID:           user.ID,
+		TokenHash:        hash.HashToken(refreshPlain),
+		ExpiresAt:        now.Add(s.jwtCfg.RefreshTTL),
+		IPAddress:        ip,
+		UserAgent:        ua,
+		DeviceName:       device.Parse(ua),
+		LocationEstimate: s.resolveLocation(ip),
+		LastActiveAt:     now,
 	}
 	if err := s.tokens.Create(ctx, rt); err != nil {
 		return TokenPair{}, err
@@ -608,8 +705,66 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User) (To
 	return TokenPair{
 		AccessToken:  access,
 		RefreshToken: refreshPlain,
-		ExpiresAt:    time.Now().Add(s.jwtCfg.AccessTTL),
+		ExpiresAt:    now.Add(s.jwtCfg.AccessTTL),
 	}, nil
+}
+
+// resolveLocation maps an IP to a location label, defaulting to "Unknown" when
+// no resolver is wired or the lookup fails. Never blocks: the geo resolver is
+// expected to honor the request context; a nil resolver is treated as NoOp.
+func (s *AuthService) resolveLocation(ip string) string {
+	if s.geo == nil || ip == "" {
+		return geo.UnknownLocation
+	}
+	if loc := s.geo.Resolve(context.Background(), ip); loc != "" {
+		return loc
+	}
+	return geo.UnknownLocation
+}
+
+// ----- 10. Session & Device Management -----
+
+// ListSessions returns all active (non-expired, non-revoked) sessions for the
+// authenticated user, as sanitized SessionInfo projections (token hash omitted).
+// Ordered most-recently-active first by the repository.
+func (s *AuthService) ListSessions(ctx context.Context, userID uint) ([]SessionInfo, error) {
+	rows, err := s.tokens.FindActiveByUser(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	out := make([]SessionInfo, 0, len(rows))
+	for i := range rows {
+		rt := &rows[i]
+		out = append(out, SessionInfo{
+			ID:               rt.ID,
+			IPAddress:        rt.IPAddress,
+			UserAgent:        rt.UserAgent,
+			DeviceName:       rt.DeviceName,
+			LocationEstimate: rt.LocationEstimate,
+			CreatedAt:        rt.CreatedAt,
+			LastActiveAt:     rt.LastActiveAt,
+			ExpiresAt:        rt.ExpiresAt,
+		})
+	}
+	return out, nil
+}
+
+// RevokeSession revokes a single session (device) by id, scoped to the caller's
+// userID so one user cannot revoke another user's session (IDOR defense).
+// The device is then instantly blocked from rotating its refresh token.
+func (s *AuthService) RevokeSession(ctx context.Context, id, userID uint, ip string) error {
+	if err := s.tokens.RevokeByID(ctx, id, userID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrSessionNotFound
+		}
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	uid := userID
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &uid, Event: models.AuditEventSessionRevoked,
+		IPAddress: ip, Success: true,
+	})
+	return nil
 }
 
 // isLocked reports whether the account is currently in a temporary lockout.

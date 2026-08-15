@@ -1,0 +1,17 @@
+info:
+  name: refresh-token
+  type: http
+  seq: 8
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/refresh-token
+  body:
+    type: json
+    data: '{"refreshToken": "1b58a855e9a0cfe40a60c3651b569dedd617b4550b3b33c4d86c21094648fcea"}'
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

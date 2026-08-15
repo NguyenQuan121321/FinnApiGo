@@ -33,7 +33,7 @@ func statusForError(err error) (int, string) {
 		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrEmailNotVerified):
 		return http.StatusForbidden, err.Error()
-	case errors.Is(err, services.ErrUserNotFound):
+	case errors.Is(err, services.ErrUserNotFound), errors.Is(err, services.ErrSessionNotFound):
 		return http.StatusNotFound, err.Error()
 	case errors.Is(err, services.ErrEmailExists), errors.Is(err, services.ErrUsernameExists):
 		return http.StatusConflict, err.Error()
@@ -42,6 +42,14 @@ func statusForError(err error) (int, string) {
 		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, services.ErrDisposableEmail):
 		return http.StatusUnprocessableEntity, err.Error()
+	case errors.Is(err, services.ErrOAuthNotConfigured):
+		return http.StatusNotImplemented, err.Error()
+	case errors.Is(err, services.ErrOAuthStateInvalid):
+		return http.StatusUnauthorized, err.Error()
+	case errors.Is(err, services.ErrOAuthEmailNotVerified):
+		return http.StatusForbidden, err.Error()
+	case errors.Is(err, services.ErrOAuthCodeExchangeFailed), errors.Is(err, services.ErrOAuthTokenVerificationFailed):
+		return http.StatusBadGateway, err.Error()
 	case errors.Is(err, services.ErrRateLimited):
 		return http.StatusTooManyRequests, err.Error()
 	}

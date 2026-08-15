@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
@@ -17,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
@@ -51,7 +54,8 @@ func run() error {
 	// --- Migrations (explicit; safe to run on every boot) ---
 	if err := db.AutoMigrate(
 		&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
-		&models.AuditLog{}, &models.UsedToken{},
+		&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
+		&models.OAuthIdentity{},
 	); err != nil {
 		return errors.Join(errors.New("auto-migrate failed"), err)
 	}
@@ -64,6 +68,8 @@ func run() error {
 	auditRepo := services.NewAsyncAuditWriter(baseAuditRepo, baseAuditRepo, cfg.Audit)
 	defer auditRepo.Close()
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
+	totpRepo := repositories.NewTOTPRepository(db)
+	oauthIdentityRepo := repositories.NewOAuthIdentityRepository(db)
 
 	// --- Store (in-memory default; Redis when REDIS_URL set) ---
 	// §1.3/§7 — rate-limit counters, velocity windows, and jti tracking are
@@ -112,27 +118,58 @@ func run() error {
 	}
 
 	// --- Services ---
+	// recoveryEncKey seals the re-viewable copy of each MFA recovery code
+	// (AES-256-GCM). RECOVERY_CODE_KEY (hex, 32 bytes) wins when set; otherwise
+	// the key is domain-separated-derived from JWT_SECRET so deployments
+	// without the extra variable still work. Rotating JWT_SECRET (or the key)
+	// orphans previously sealed codes — users regenerate a fresh set.
+	recoveryEncKey, err := recoveryEncryptionKey(cfg)
+	if err != nil {
+		return err
+	}
+	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEncKey)
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
-		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier,
+		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
+		totpRepo, totpSvc,
 	)
 	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
 
+	// --- Google OAuth (endpoints only registered when fully configured) ---
+	var oauthHandler *handlers.OAuthHandler
+	if gClient := services.NewGoogleOAuthClient(cfg.GoogleOAuth.ClientID, cfg.GoogleOAuth.ClientSecret, cfg.GoogleOAuth.RedirectURL); gClient != nil {
+		gVerifier := services.NewProductionGoogleVerifier(cfg.GoogleOAuth.ClientID)
+		oauthSvc := services.NewOAuthService(userRepo, oauthIdentityRepo, kvStore, authSvc, gVerifier, gClient)
+		oauthHandler = handlers.NewOAuthHandler(oauthSvc)
+		log.Println("oauth: Google sign-in enabled")
+	} else {
+		log.Println("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
+	}
+
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
-	mfaHandler := handlers.NewMFAHandler(mfaSvc)
+	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc, jwtMgr, cfg.JWT.SudoTTL)
+	sessionHandler := handlers.NewSessionHandler(authSvc)
 
 	// --- Rate limiter ---
-	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL)
+	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
+	defer rateLimiter.Close()
+
+	// --- TOTP concurrency limiter (caps CPU-bound validations) ---
+	totpCluster := middleware.NewConcurrencyLimiter(cfg.Security.TOTPMaxConcurrent)
 
 	// --- Router ---
 	router := routes.Register(routes.Deps{
 		Auth:                authHandler,
+		OAuth:               oauthHandler,
 		MFA:                 mfaHandler,
+		Sessions:            sessionHandler,
 		JWT:                 jwtMgr,
 		RateLimit:           rateLimiter,
+		TOTPCluster:         totpCluster,
 		DB:                  db,
 		MaxRequestBodyBytes: cfg.Security.MaxRequestBodyBytes,
+		TrustedProxies:      cfg.Server.TrustedProxies,
 	})
 
 	// --- HTTP server with graceful shutdown ---
@@ -173,6 +210,28 @@ func run() error {
 	}
 	log.Println("server stopped cleanly")
 	return nil
+}
+
+// recoveryEncryptionKey resolves the AES-256 key that seals the re-viewable
+// copy of MFA recovery codes: RECOVERY_CODE_KEY (64-char hex) when provided,
+// otherwise a domain-separated SHA-256 derivation of JWT_SECRET. The fallback
+// keeps deployments without the extra variable working; a dedicated key is
+// still preferred so the two secrets rotate independently. Rotating either
+// orphans previously sealed codes — affected users regenerate a fresh set.
+func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
+	if cfg.Auth.RecoveryCodeKey != "" {
+		key, err := hex.DecodeString(cfg.Auth.RecoveryCodeKey)
+		if err != nil || len(key) != crypto.KeyLen {
+			return nil, errors.New("RECOVERY_CODE_KEY must be 64 hex chars (32 bytes)")
+		}
+		return key, nil
+	}
+	if cfg.JWT.Secret == "" {
+		return nil, errors.New("cannot derive recovery-code key: JWT_SECRET is empty")
+	}
+	log.Println("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
+	sum := sha256.Sum256([]byte(cfg.JWT.Secret + ":finnapigo:recovery-codes:v1"))
+	return sum[:], nil
 }
 
 // startCleanup periodically purges expired refresh tokens, OTP codes, and

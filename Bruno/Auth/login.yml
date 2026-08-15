@@ -1,0 +1,26 @@
+info:
+  name: login
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: http://localhost:8081/api/v1/auth/login
+  headers:
+    - name: Content-Type
+      value: application/json
+    - name: User-Agent
+      value: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/128.0.0.0
+  body:
+    type: json
+    data: |-
+      {
+        "email": "nguyenhoanganhquan13@gmail.com",
+        "password": "Password123"
+      }
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

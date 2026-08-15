@@ -66,6 +66,20 @@ type OTPVerifyRequest struct {
 	Purpose string `json:"purpose" binding:"required"`
 }
 
+// TOTPCodeRequest covers both the 6-digit TOTP code and the longer hex recovery
+// code. min=6 rejects truncated/garbage input at the binding layer (before any
+// DB or CPU work); max=128 bounds it well under the body-size cap.
+type TOTPCodeRequest struct {
+	Code string `json:"code" binding:"required,min=6,max=128"`
+}
+
+// MFALoginVerifyRequest is the body of POST /api/v1/auth/mfa/login-verify.
+// Uses the same constraints as TOTPCodeRequest so both 6-digit TOTP codes and
+// longer recovery codes are accepted at the binding layer.
+type MFALoginVerifyRequest struct {
+	Code string `json:"code" binding:"required,min=6,max=128"`
+}
+
 // ---- response payloads ----
 
 // §1.1 — RegisterResponse no longer carries the verification token.

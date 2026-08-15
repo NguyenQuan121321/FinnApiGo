@@ -19,11 +19,18 @@ import (
 // Deps bundles everything the router needs. Constructed in main.go.
 type Deps struct {
 	Auth                *handlers.AuthHandler
+	OAuth               *handlers.OAuthHandler
 	MFA                 *handlers.MFAHandler
+	Sessions            *handlers.SessionHandler
 	JWT                 *jwt.JWTManager
 	RateLimit           *middleware.RateLimiter
-	DB                  *gorm.DB // optional, for /readyz
-	MaxRequestBodyBytes int64    // §5 — global body-size cap applied BEFORE routes
+	TOTPCluster         *middleware.ConcurrencyLimiter // caps concurrent CPU-bound TOTP validations
+	DB                  *gorm.DB                       // optional, for /readyz
+	MaxRequestBodyBytes int64                          // §5 — global body-size cap applied BEFORE routes
+	// TrustedProxies configures which direct peers may set X-Forwarded-For /
+	// X-Real-IP, so c.ClientIP() resolves the real client IP securely behind a
+	// reverse proxy (Cloudflare/Nginx). Empty trusts no one (RemoteAddr only).
+	TrustedProxies []string
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -31,6 +38,14 @@ type Deps struct {
 // under /api/v1/auth/mfa — exactly per the prompt's structure.
 func Register(deps Deps) *gin.Engine {
 	r := gin.New()
+	// §Session — securely honor X-Forwarded-For / X-Real-IP ONLY from the
+	// configured reverse-proxy CIDRs. When TrustedProxies is empty we trust no
+	// peer, so c.ClientIP() returns the direct RemoteAddr (un-spoofable). This
+	// drives the client_ip recorded on each session.
+	//
+	// SetTrustedProxies(nil) means "trust no proxies"; passing the operator's
+	// list restricts header trust to exactly those peers.
+	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 	// §5 — global body-size limit. Applied here (before any route group) so it
@@ -80,6 +95,12 @@ func Register(deps Deps) *gin.Engine {
 	auth.POST("/verify-email", deps.Auth.VerifyEmail)
 	auth.POST("/resend-verification", deps.RateLimit.Handler(), deps.Auth.ResendVerifyEmail)
 
+	// ---- Google OAuth 2.0 / OpenID Connect ----
+	if deps.OAuth != nil {
+		auth.GET("/google/login", deps.OAuth.GoogleLogin)
+		auth.GET("/google/callback", deps.RateLimit.Handler(), deps.OAuth.GoogleCallback)
+	}
+
 	// ---- Authenticated core-auth endpoints ----
 	authed := auth.Group("")
 	authed.Use(middleware.AuthMiddleware(deps.JWT))
@@ -88,10 +109,54 @@ func Register(deps Deps) *gin.Engine {
 	authed.POST("/change-password", deps.Auth.ChangePassword)
 	authed.GET("/me", deps.Auth.Me)
 
+	// ---- Session & device management (authenticated) ----
+	// GET    /api/v1/auth/sessions      — list the caller's active devices
+	// DELETE /api/v1/auth/sessions/:id  — revoke one device's session
+	if deps.Sessions != nil {
+		authed.GET("/sessions", deps.Sessions.List)
+		authed.DELETE("/sessions/:id", deps.Sessions.Revoke)
+	}
+
+	// ---- MFA login-verify (mfa_pending token ONLY) ----
+	// POST /api/v1/auth/mfa/login-verify — complete login via TOTP code.
+	// Uses MFAPendingMiddleware which accepts ONLY mfa_pending JWTs,
+	// rejecting access tokens so a fully-logged-in session cannot call this
+	// endpoint to bypass a pending login for a different session.
+	mfaPending := auth.Group("/mfa")
+	mfaPending.Use(middleware.MFAPendingMiddleware(deps.JWT))
+	if deps.TOTPCluster != nil && deps.TOTPCluster.Capacity() > 0 {
+		mfaPending.POST("/login-verify", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.Auth.CompleteMFALogin)
+	} else {
+		mfaPending.POST("/login-verify", deps.RateLimit.Handler(), deps.Auth.CompleteMFALogin)
+	}
+
 	// ---- MFA sub-group (authenticated) ----
 	mfa := authed.Group("/mfa")
 	mfa.POST("/send-otp", deps.RateLimit.Handler(), deps.MFA.SendOTP)
 	mfa.POST("/verify-otp", deps.MFA.VerifyOTP)
+
+	// ---- TOTP endpoints (rate-limited + concurrency-gated) ----
+	// The concurrency limiter (deps.TOTPCluster) is installed BEFORE the
+	// handler so excess CPU-bound validation requests are rejected with 429
+	// before they can starve worker threads or saturate the DB pool.
+	if deps.TOTPCluster != nil && deps.TOTPCluster.Capacity() > 0 {
+		mfa.POST("/totp/enable", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.EnableTOTP)
+		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.VerifyTOTP)
+		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.ValidateTOTP)
+		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.ViewRecoveryCodes)
+	} else {
+		mfa.POST("/totp/enable", deps.RateLimit.Handler(), deps.MFA.EnableTOTP)
+		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.MFA.VerifyTOTP)
+		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.MFA.ValidateTOTP)
+		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.MFA.ViewRecoveryCodes)
+	}
+
+	// ---- Recovery-code regeneration (GitHub-style sudo mode) ----
+	// POST /api/v1/auth/mfa/totp/recovery-codes/regenerate — requires the
+	// X-Sudo-Token minted by the view endpoint above (which itself demands a
+	// current TOTP code), so a stolen access token alone cannot mint fresh
+	// recovery codes. No TOTP validation happens here, hence no TOTPCluster.
+	mfa.POST("/totp/recovery-codes/regenerate", deps.RateLimit.Handler(), middleware.SudoMiddleware(deps.JWT), deps.MFA.RegenerateRecoveryCodes)
 
 	return r
 }

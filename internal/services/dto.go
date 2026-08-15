@@ -48,14 +48,14 @@ type EmailVerifyInput struct {
 
 // OTPSendInput is the input to MFAService.SendOTP.
 type OTPSendInput struct {
-	UserID uint
+	UserID  uint
 	Purpose string
 }
 
 // OTPVerifyInput is the input to MFAService.VerifyOTP.
 type OTPVerifyInput struct {
-	UserID uint
-	Code   string
+	UserID  uint
+	Code    string
 	Purpose string
 }
 
@@ -64,6 +64,21 @@ type TokenPair struct {
 	AccessToken  string    `json:"accessToken"`
 	RefreshToken string    `json:"refreshToken"`
 	ExpiresAt    time.Time `json:"expiresAt"` // access-token expiry
+}
+
+// MFAPendingResult is returned by Login when the user has TOTP active. It
+// signals the handler to return an mfa_pending token instead of full tokens.
+type MFAPendingResult struct {
+	MFARequired bool   `json:"mfaRequired"`
+	MFAToken    string `json:"mfaToken"`
+}
+
+// CompleteMFALoginInput is the input to AuthService.CompleteMFALogin.
+type CompleteMFALoginInput struct {
+	UserID uint
+	Code   string
+	IP     string
+	UA     string
 }
 
 // UserProfile is the sanitized user payload for /me and /login responses.
@@ -85,4 +100,17 @@ func FromUser(u *models.User) UserProfile {
 		Role: u.Role, IsActive: u.IsActive, IsEmailVerified: u.IsEmailVerified,
 		CreatedAt: u.CreatedAt,
 	}
+}
+
+// SessionInfo is the sanitized projection of one active refresh-token row for
+// the "your devices / sessions" list. It deliberately omits the token hash.
+type SessionInfo struct {
+	ID               uint      `json:"id"`
+	IPAddress        string    `json:"ipAddress"`
+	UserAgent        string    `json:"userAgent"`
+	DeviceName       string    `json:"deviceName"`
+	LocationEstimate string    `json:"locationEstimate"`
+	CreatedAt        time.Time `json:"createdAt"`
+	LastActiveAt     time.Time `json:"lastActiveAt"`
+	ExpiresAt        time.Time `json:"expiresAt"`
 }

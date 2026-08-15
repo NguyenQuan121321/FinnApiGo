@@ -10,6 +10,10 @@ import (
 	"github.com/finnapigo/finnapigo/internal/response"
 )
 
+type CounterStore interface {
+	IncrBy(key string, delta int64, ttl time.Duration) int64
+}
+
 // visitor pairs a token-bucket limiter with the last time it was seen.
 type visitor struct {
 	limiter  *rate.Limiter
@@ -25,19 +29,32 @@ type RateLimiter struct {
 	rps      rate.Limit
 	burst    int
 	entryTTL time.Duration
+	shared   CounterStore
+	window   time.Duration
 	stopCh   chan struct{}
 	stopped  bool
 }
 
 // NewRateLimiter builds a limiter with the given requests/sec, burst, and
 // per-entry TTL. A background sweeper purges stale entries every sweepInterval.
-func NewRateLimiter(rps float64, burst int, entryTTL time.Duration) *RateLimiter {
+func NewRateLimiter(rps float64, burst int, entryTTL time.Duration, shared ...CounterStore) *RateLimiter {
+	window := time.Second
+	if rps > 0 && burst > 0 {
+		window = time.Duration(float64(time.Second) * float64(burst) / rps)
+		if window < time.Second {
+			window = time.Second
+		}
+	}
 	rl := &RateLimiter{
 		visitors: make(map[string]*visitor),
 		rps:      rate.Limit(rps),
 		burst:    burst,
 		entryTTL: entryTTL,
+		window:   window,
 		stopCh:   make(chan struct{}),
+	}
+	if len(shared) > 0 {
+		rl.shared = shared[0]
 	}
 	if entryTTL > 0 {
 		go rl.sweepLoop()
@@ -62,6 +79,19 @@ func (rl *RateLimiter) get(ip string) *rate.Limiter {
 func (rl *RateLimiter) Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
+		if rl.shared != nil {
+			// Redis INCRBY is atomic across instances. A zero result signals a
+			// store failure, so retain local availability during a Redis outage.
+			if n := rl.shared.IncrBy("rate:ip:"+ip, 1, rl.window); n > 0 {
+				if n > int64(rl.burst) {
+					response.Respond(c, 429, "too many requests, please slow down", nil)
+					c.Abort()
+					return
+				}
+				c.Next()
+				return
+			}
+		}
 		if !rl.get(ip).Allow() {
 			response.Respond(c, 429, "too many requests, please slow down", nil)
 			c.Abort()
