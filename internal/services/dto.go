@@ -66,6 +66,21 @@ type TokenPair struct {
 	ExpiresAt    time.Time `json:"expiresAt"` // access-token expiry
 }
 
+// MFAPendingResult is returned by Login when the user has TOTP active. It
+// signals the handler to return an mfa_pending token instead of full tokens.
+type MFAPendingResult struct {
+	MFARequired bool   `json:"mfaRequired"`
+	MFAToken    string `json:"mfaToken"`
+}
+
+// CompleteMFALoginInput is the input to AuthService.CompleteMFALogin.
+type CompleteMFALoginInput struct {
+	UserID uint
+	Code   string
+	IP     string
+	UA     string
+}
+
 // UserProfile is the sanitized user payload for /me and /login responses.
 type UserProfile struct {
 	ID              uint      `json:"id"`

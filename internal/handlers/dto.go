@@ -73,6 +73,13 @@ type TOTPCodeRequest struct {
 	Code string `json:"code" binding:"required,min=6,max=128"`
 }
 
+// MFALoginVerifyRequest is the body of POST /api/v1/auth/mfa/login-verify.
+// Uses the same constraints as TOTPCodeRequest so both 6-digit TOTP codes and
+// longer recovery codes are accepted at the binding layer.
+type MFALoginVerifyRequest struct {
+	Code string `json:"code" binding:"required,min=6,max=128"`
+}
+
 // ---- response payloads ----
 
 // §1.1 — RegisterResponse no longer carries the verification token.

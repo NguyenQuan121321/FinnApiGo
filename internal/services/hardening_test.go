@@ -33,7 +33,7 @@ func buildAuthService(t *testing.T, cfg config.AuthConfig, rlCfg config.RateLimi
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
-	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rlCfg, jwtCfg, notify, captcha, nil)
+	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rlCfg, jwtCfg, notify, captcha, nil, nil, nil)
 	return svc, users, tokens, audit, notify, store
 }
 
@@ -93,12 +93,12 @@ func TestLogin_PerAccountVelocityLimit(t *testing.T) {
 
 	// 3 wrong-password attempts against the SAME account (different IPs) are OK.
 	for i := 0; i < 3; i++ {
-		_, _, _ = svc.Login(context.Background(), LoginInput{
+		_, _, _, _ = svc.Login(context.Background(), LoginInput{
 			Email: "alice@example.com", Password: "wrong",
 		}, "10.0.0."+itoa(i), "ua")
 	}
 	// 4th attempt against the same account is throttled regardless of IP.
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "99.99.99.99", "ua")
 	if !errors.Is(err, ErrRateLimited) {
@@ -125,11 +125,11 @@ func TestLogin_AdaptiveCaptchaAfterFails(t *testing.T) {
 	})
 
 	// Two failures from the same IP cross the threshold.
-	_, _, _ = svc.Login(context.Background(), LoginInput{Email: "alice@example.com", Password: "x"}, "5.5.5.5", "ua")
-	_, _, _ = svc.Login(context.Background(), LoginInput{Email: "alice@example.com", Password: "x"}, "5.5.5.5", "ua")
+	_, _, _, _ = svc.Login(context.Background(), LoginInput{Email: "alice@example.com", Password: "x"}, "5.5.5.5", "ua")
+	_, _, _, _ = svc.Login(context.Background(), LoginInput{Email: "alice@example.com", Password: "x"}, "5.5.5.5", "ua")
 	// Now the 3rd attempt from that IP must supply a valid CAPTCHA. Since our
 	// mock rejects, we expect ErrCaptchaRequired (not ErrInvalidCredentials).
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1", CaptchaToken: "bad",
 	}, "5.5.5.5", "ua")
 	if !errors.Is(err, ErrCaptchaRequired) {
@@ -154,9 +154,9 @@ func TestLogin_AdaptiveCaptchaPassesWithValidToken(t *testing.T) {
 	})
 
 	// One failure crosses the (low) threshold.
-	_, _, _ = svc.Login(context.Background(), LoginInput{Email: "alice@example.com", Password: "x"}, "7.7.7.7", "ua")
+	_, _, _, _ = svc.Login(context.Background(), LoginInput{Email: "alice@example.com", Password: "x"}, "7.7.7.7", "ua")
 	// Now a valid captcha lets the correct password through.
-	pair, _, err := svc.Login(context.Background(), LoginInput{
+	pair, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1", CaptchaToken: "good",
 	}, "7.7.7.7", "ua")
 	if err != nil {
@@ -227,7 +227,7 @@ func TestLogin_RequireEmailVerified(t *testing.T) {
 		Password: mustHash("Password1"), IsActive: true, IsEmailVerified: false,
 	})
 
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "ip", "ua")
 	if !errors.Is(err, ErrEmailNotVerified) {
@@ -237,7 +237,7 @@ func TestLogin_RequireEmailVerified(t *testing.T) {
 	// Verify the email and retry — should now succeed.
 	u, _ := users.FindByID(context.Background(), 1)
 	_ = users.SetEmailVerified(context.Background(), u, true)
-	_, _, err = svc.Login(context.Background(), LoginInput{
+	_, _, _, err = svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "ip", "ua")
 	if err != nil {
@@ -350,7 +350,7 @@ func itoa(i int) string {
 
 func failTwice(svc *AuthService, email string) {
 	for i := 0; i < 2; i++ {
-		_, _, _ = svc.Login(context.Background(), LoginInput{Email: email, Password: "wrong"}, "ip", "ua")
+		_, _, _, _ = svc.Login(context.Background(), LoginInput{Email: email, Password: "wrong"}, "ip", "ua")
 	}
 }
 

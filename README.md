@@ -1,29 +1,36 @@
 # FinnApiGo
 
-Authentication & MFA backend written in **Go**, built as a reusable module (`handler → service → repository`) meant to plug into larger applications. Implements core auth (register, login, refresh-token rotation, password reset, email verification) plus OTP-based two-factor verification, with the security hardening a production system needs: rate limiting, lockout, single-use tokens, audit logging, and an optional Redis backend for multi-instance deployments.
+Authentication & MFA backend written in **Go**, built as a reusable module (`handler → service → repository`) meant to plug into larger applications. Implements core auth (register, login, refresh-token rotation, password reset, email verification) plus OTP and TOTP-based two-factor verification, with the security hardening a production system needs: rate limiting, lockout, single-use tokens, audit logging, session & device management, and an optional Redis backend for multi-instance deployments.
 
-> **Naming note:** "MFA" here means OTP-based two-step verification. It is unrelated to OAuth 2.0 — nothing in this codebase is an OAuth/third-party login flow.
+> **Naming note:** "MFA" here means OTP/TOTP-based two-step verification. It is unrelated to OAuth 2.0 — nothing in this codebase is an OAuth/third-party login flow.
 
 ---
 
 ## Features
 
-- **Core auth** — register, login, logout, logout-all, refresh-token (with rotation + reuse detection), forgot/reset password, change password, email verification, profile (`/me`)
-- **MFA** — 6-digit OTP send/verify, single-use, capped verification attempts
+- **Core auth** — register, login, logout, logout-all, refresh-token (with rotation + reuse detection), forgot/reset password, change password, email verification, resend verification, profile (`/me`)
+- **MFA — OTP** — 6-digit OTP send/verify, single-use, capped verification attempts
+- **MFA — TOTP** — RFC 6238 time-based one-time passwords with QR provisioning, single-use recovery codes, brute-force protection, and concurrency-gated CPU-bound verification
+- **Session & device management** — list all active devices (IP, user-agent, device name, location estimate, last active), revoke individual sessions, IDOR-protected revocation, metadata populated on every login and refresh
 - **Security hardening**
   - Passwords hashed with bcrypt, never stored or logged in plaintext
   - Access tokens are short-lived JWTs; refresh tokens are opaque, stored as SHA-256 hashes, and **rotated** on every use — presenting an already-used refresh token revokes every session for that user (theft response)
   - Reset/verify-email tokens are single-use (tracked by JWT ID)
-  - Timing-safe comparisons for OTP verification; login response time is equalized for unknown vs. wrong-password accounts to resist enumeration
+  - Timing-safe comparisons for OTP/TOTP verification; login response time is equalized for unknown vs. wrong-password accounts to resist enumeration
   - Account lockout after repeated failed logins, with optional exponential backoff for repeat offenders
   - Per-IP **and** per-account rate limiting on login; per-IP registration velocity limiting; per-user OTP send limiting
   - Verification-email resend protection with per-email, shared per-IP, and shared global circuit-breaker limits; blocked abuse is audited
   - Optional CAPTCHA (Cloudflare Turnstile) on registration and adaptively after repeated login failures
   - Disposable-email domain blocking and a honeypot field on registration
   - Global request body-size cap
-  - Structured audit log (login, failed login, logout, password change/reset, token reuse) with IP + request-ID correlation
+  - Structured audit log (login, failed login, logout, password change/reset, token reuse, session revocation) with IP + request-ID correlation
+  - Reverse-proxy-aware IP resolution via configurable trusted proxies (`TRUSTED_PROXIES`); defaults to trust-no-one
+  - Concurrency limiter middleware (semaphore) caps parallel CPU-bound TOTP verifications to prevent resource exhaustion
+- **Performance**
+  - Sonic JSON parser (`bytedance/sonic`) with `sync.Pool` buffer recycling for zero-alloc request body parsing on hot paths
 - **Pluggable storage backend** — in-memory by default (single instance); set `REDIS_URL` to share rate-limit counters and single-use-token state across multiple instances, no code changes required
 - **Pluggable email delivery** — logs to console by default; set `SMTP_*` to send real email
+- **Pluggable geo-resolver** — `NoOpResolver` returns `"Unknown"` by default; inject a GeoIP resolver for IP-to-location mapping on sessions
 - **Graceful shutdown**, `/healthz` (liveness) and `/readyz` (DB connectivity) endpoints for orchestration
 - Every response follows one JSON envelope: `{ "code": ..., "message": ..., "data": ... }`
 
@@ -38,9 +45,12 @@ Authentication & MFA backend written in **Go**, built as a reusable module (`han
 | ORM / DB | [GORM](https://gorm.io) + MySQL 8 |
 | Auth tokens | [golang-jwt/jwt](https://github.com/golang-jwt/jwt) v5 |
 | Password hashing | `golang.org/x/crypto/bcrypt` |
+| TOTP | RFC 6238 via `github.com/pquerna/otp` |
+| JSON parsing | [sonic](https://github.com/bytedance/sonic) (AST-based, `sync.Pool` recycled buffers) |
 | Rate limiting | `golang.org/x/time/rate` (per-instance) + a `store.Store` abstraction for shared counters |
 | Optional shared store | Redis via `github.com/redis/go-redis/v9` |
 | Config | Environment variables / `.env` via `godotenv` |
+| Load testing | [k6](https://k6.io) scripts in `tests/load/` |
 
 ---
 
@@ -52,9 +62,12 @@ Handler  ->  Service  ->  Repository  ->  DB
 ```
 
 - **Handlers** (`internal/handlers`) parse the request and format the response. They never touch GORM directly.
-- **Services** (`internal/services`) hold all business logic. They never import Gin, so every rule (lockout, rotation, single-use tokens, rate windows) is unit-tested with in-memory fakes — no database or HTTP server needed.
+- **Services** (`internal/services`) hold all business logic. They never import Gin, so every rule (lockout, rotation, single-use tokens, rate windows, TOTP) is unit-tested with in-memory fakes — no database or HTTP server needed.
 - **Repositories** (`internal/repositories`) are thin, context-aware GORM wrappers with no business logic.
 - **`store.Store`** is a small key-value interface (`Get`/`Set`/`SetNX`/`IncrBy`/`Delete`, all TTL-aware) used for rate-limit counters and single-use-token tracking. `InMemoryStore` is the default; `RedisStore` implements the same interface for multi-instance deployments — nothing above this layer knows or cares which one is active.
+- **`device`** (`internal/device`) — zero-dependency User-Agent parser producing human-readable labels (e.g. "Chrome on Windows").
+- **`geo`** (`internal/geo`) — mockable IP-to-location resolver interface; `NoOpResolver` returns `"Unknown"`, production can inject a GeoIP implementation.
+- **`middleware.ConcurrencyLimiter`** (`internal/middleware/semaphore.go`) — semaphore-based middleware that caps concurrent requests through CPU-bound endpoints (TOTP verification).
 
 ### Project structure
 
@@ -64,16 +77,19 @@ FinnApiGo/
 ├── internal/
 │   ├── config/                 # env loading, typed config structs
 │   ├── database/               # GORM/MySQL connection
-│   ├── models/                 # User, RefreshToken, OtpCode, AuditLog, UsedToken
+│   ├── models/                 # User, RefreshToken, OtpCode, TOTPDevice, RecoveryCode, AuditLog, UsedToken
 │   ├── repositories/           # GORM-backed repos (context-aware queries only)
-│   ├── services/               # business logic - auth, MFA, notifier, CAPTCHA, async audit
-│   ├── handlers/               # HTTP layer: parse -> call service -> respond
-│   ├── middleware/             # AuthMiddleware, rate limiter
-│   ├── routes/                 # route registration + request logging
+│   ├── services/               # business logic - auth, MFA (OTP+TOTP), notifier, CAPTCHA, async audit
+│   ├── handlers/               # HTTP layer: parse -> call service -> respond (sonic JSON, sync.Pool)
+│   ├── middleware/             # AuthMiddleware, rate limiter, concurrency limiter (semaphore)
+│   ├── routes/                 # route registration + request logging + trusted proxies
 │   ├── store/                  # Store interface, in-memory + Redis implementations
 │   ├── hash/                   # bcrypt password and SHA-256 token primitives
 │   ├── jwt/                    # JWT issuance and verification
+│   ├── device/                 # User-Agent -> human-readable device label parser
+│   ├── geo/                    # IP-to-location resolver interface (NoOp default)
 │   └── response/               # HTTP response envelope
+├── tests/load/                 # k6 load test scripts (registration, TOTP)
 ├── .github/workflows/ci.yml   # CI pipeline (vet, lint, test, build, govulncheck)
 ├── .golangci.yml               # linter config (govet, staticcheck, errcheck, gosec, depguard)
 ├── ARCHITECTURE.md             # extension patterns & module guide
@@ -113,7 +129,7 @@ go mod tidy
 go run ./cmd/server
 ```
 
-The schema (`users`, `refresh_tokens`, `otp_codes`, `audit_logs`, `used_tokens`) is created automatically on boot. The server listens on `:8080` by default (`SERVER_PORT`).
+The schema (`users`, `refresh_tokens`, `otp_codes`, `totp_devices`, `recovery_codes`, `audit_logs`, `used_tokens`) is created automatically on boot. The server listens on `:8080` by default (`SERVER_PORT`).
 
 ### 4. Run the tests
 
@@ -131,11 +147,12 @@ Everything is read from environment variables (`.env` supported). See `.env.exam
 
 | Group | Variables | Notes |
 |---|---|---|
-| Server | `SERVER_PORT`, `GIN_MODE` | |
+| Server | `SERVER_PORT`, `GIN_MODE`, `TRUSTED_PROXIES` | `TRUSTED_PROXIES` is a comma-separated CIDR list; empty = trust no one |
 | Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS` | |
 | JWT | `JWT_SECRET` (required, no default), `JWT_ISSUER`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `RESET_TOKEN_TTL`, `EMAIL_VERIFY_TOKEN_TTL` | |
 | Account security | `MAX_LOGIN_ATTEMPTS`, `LOGIN_LOCKOUT_DURATION`, `MAX_LOCKOUT_MULTIPLIER`, `REQUIRE_EMAIL_VERIFIED` | `MAX_LOCKOUT_MULTIPLIER` scales lockout duration for repeat offenders |
 | MFA / OTP | `OTP_TTL`, `OTP_LENGTH`, `OTP_MAX_ATTEMPTS`, `OTP_SEND_PER_USER_MAX`, `OTP_SEND_WINDOW` | |
+| MFA / TOTP | `TOTP_MAX_ATTEMPTS`, `TOTP_ATTEMPT_WINDOW`, `TOTP_MAX_CONCURRENT` | Brute-force lockout + concurrency gate on CPU-bound verification |
 | Rate limiting | `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `LOGIN_PER_ACCOUNT_MAX`, `LOGIN_WINDOW`, `REGISTER_PER_IP_MAX`, `REGISTER_WINDOW`, `VERIFY_RESEND_PER_EMAIL_MAX`, `VERIFY_RESEND_PER_IP_MAX`, `VERIFY_RESEND_GLOBAL_MAX`, `LOGIN_CAPTCHA_AFTER_FAILS` | Resend limits are shared when `REDIS_URL` is configured. |
 | Email | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Empty `SMTP_HOST` -> tokens/OTPs are logged to console instead of emailed |
 | CAPTCHA | `CAPTCHA_PROVIDER` (`turnstile` \| empty), `CAPTCHA_SECRET`, `CAPTCHA_SITE_KEY` | Off unless a provider + secret are set |

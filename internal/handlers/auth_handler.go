@@ -14,7 +14,7 @@ import (
 // AuthHandler exposes the core-auth endpoints under /api/v1/auth.
 type AuthService interface {
 	Register(context.Context, services.RegisterInput) (services.UserProfile, error)
-	Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, error)
+	Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, *services.MFAPendingResult, error)
 	Logout(context.Context, string, string) error
 	LogoutAll(context.Context, uint, string) error
 	Refresh(context.Context, string, string, string) (services.TokenPair, error)
@@ -24,6 +24,7 @@ type AuthService interface {
 	Me(context.Context, uint) (services.UserProfile, error)
 	VerifyEmail(context.Context, services.EmailVerifyInput) error
 	ResendVerifyEmail(context.Context, string, string) error
+	CompleteMFALogin(context.Context, services.CompleteMFALoginInput) (services.TokenPair, services.UserProfile, error)
 }
 
 type AuthHandler struct {
@@ -82,9 +83,33 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	pair, profile, err := h.svc.Login(c.Request.Context(), services.LoginInput{
+	pair, profile, mfaPending, err := h.svc.Login(c.Request.Context(), services.LoginInput{
 		Email: req.Email, Password: req.Password, CaptchaToken: req.CaptchaToken,
 	}, clientIP(c), c.Request.UserAgent())
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if mfaPending != nil {
+		response.Respond(c, http.StatusOK, "mfa required", mfaPending)
+		return
+	}
+	response.Respond(c, http.StatusOK, "login successful", LoginResponse{Profile: profile, TokenPair: pair})
+}
+
+func (h *AuthHandler) CompleteMFALogin(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req MFALoginVerifyRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	pair, profile, err := h.svc.CompleteMFALogin(c.Request.Context(), services.CompleteMFALoginInput{
+		UserID: uid, Code: req.Code, IP: clientIP(c), UA: c.Request.UserAgent(),
+	})
 	if err != nil {
 		respondError(c, err)
 		return

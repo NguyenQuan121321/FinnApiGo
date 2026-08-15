@@ -16,6 +16,7 @@ const (
 	TokenTypeAccess      = "access"
 	TokenTypeReset       = "reset"
 	TokenTypeEmailVerify = "verify-email"
+	TokenTypeMFAPending  = "mfa_pending"
 )
 
 // Claims is the custom JWT claims payload shared by every token type.

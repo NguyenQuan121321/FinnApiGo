@@ -549,6 +549,21 @@ func (m *mockTOTPRepo) MarkRecoveryCodeUsed(ctx context.Context, c *models.Recov
 	return nil
 }
 
+// ---- mock TOTP validator (for MFA login tests) ----
+
+type mockTOTPValidator struct {
+	mu    sync.Mutex
+	err   error // what Validate should return
+	calls int
+}
+
+func (m *mockTOTPValidator) Validate(ctx context.Context, userID uint, code string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	return m.err
+}
+
 var errNotFound = errNotFoundErr{}
 
 type errNotFoundErr struct{}

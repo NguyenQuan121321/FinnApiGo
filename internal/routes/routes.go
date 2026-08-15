@@ -110,6 +110,19 @@ func Register(deps Deps) *gin.Engine {
 		authed.DELETE("/sessions/:id", deps.Sessions.Revoke)
 	}
 
+	// ---- MFA login-verify (mfa_pending token ONLY) ----
+	// POST /api/v1/auth/mfa/login-verify — complete login via TOTP code.
+	// Uses MFAPendingMiddleware which accepts ONLY mfa_pending JWTs,
+	// rejecting access tokens so a fully-logged-in session cannot call this
+	// endpoint to bypass a pending login for a different session.
+	mfaPending := auth.Group("/mfa")
+	mfaPending.Use(middleware.MFAPendingMiddleware(deps.JWT))
+	if deps.TOTPCluster != nil && deps.TOTPCluster.Capacity() > 0 {
+		mfaPending.POST("/login-verify", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.Auth.CompleteMFALogin)
+	} else {
+		mfaPending.POST("/login-verify", deps.RateLimit.Handler(), deps.Auth.CompleteMFALogin)
+	}
+
 	// ---- MFA sub-group (authenticated) ----
 	mfa := authed.Group("/mfa")
 	mfa.POST("/send-otp", deps.RateLimit.Handler(), deps.MFA.SendOTP)

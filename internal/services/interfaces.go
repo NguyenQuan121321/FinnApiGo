@@ -66,6 +66,14 @@ type TOTPRepo interface {
 	MarkRecoveryCodeUsed(context.Context, *models.RecoveryCode) error
 }
 
+// TOTPValidator validates a TOTP code for an already-enabled device. The
+// AuthService uses this interface (rather than importing the concrete
+// TOTPService) so the validation logic is reused without coupling and the
+// service remains trivially unit-testable via a mock.
+type TOTPValidator interface {
+	Validate(ctx context.Context, userID uint, code string) error
+}
+
 // AuditRepo abstracts audit logging.
 type AuditRepo interface {
 	Record(ctx context.Context, entry *models.AuditLog)

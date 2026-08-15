@@ -21,8 +21,8 @@ type fakeAuthService struct {
 func (f fakeAuthService) Register(context.Context, services.RegisterInput) (services.UserProfile, error) {
 	return f.registerProfile, f.registerErr
 }
-func (fakeAuthService) Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, error) {
-	return services.TokenPair{}, services.UserProfile{}, nil
+func (fakeAuthService) Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, *services.MFAPendingResult, error) {
+	return services.TokenPair{}, services.UserProfile{}, nil, nil
 }
 func (fakeAuthService) Logout(context.Context, string, string) error  { return nil }
 func (fakeAuthService) LogoutAll(context.Context, uint, string) error { return nil }
@@ -41,6 +41,9 @@ func (f fakeAuthService) Me(context.Context, uint) (services.UserProfile, error)
 }
 func (fakeAuthService) VerifyEmail(context.Context, services.EmailVerifyInput) error { return nil }
 func (fakeAuthService) ResendVerifyEmail(context.Context, string, string) error      { return nil }
+func (fakeAuthService) CompleteMFALogin(context.Context, services.CompleteMFALoginInput) (services.TokenPair, services.UserProfile, error) {
+	return services.TokenPair{}, services.UserProfile{}, nil
+}
 
 type fakeMFAService struct{ err error }
 

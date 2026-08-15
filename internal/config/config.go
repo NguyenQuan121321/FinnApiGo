@@ -54,12 +54,13 @@ func (d DBConfig) DSN() string {
 }
 
 type JWTConfig struct {
-	Secret     string
-	Issuer     string
-	AccessTTL  time.Duration
-	RefreshTTL time.Duration
-	ResetTTL   time.Duration
-	VerifyTTL  time.Duration
+	Secret        string
+	Issuer        string
+	AccessTTL     time.Duration
+	RefreshTTL    time.Duration
+	ResetTTL      time.Duration
+	VerifyTTL     time.Duration
+	MFAPendingTTL time.Duration
 }
 
 type AuthConfig struct {
@@ -189,12 +190,13 @@ func Load() (*Config, error) {
 			MaxOpenConns: envInt("DB_MAX_OPEN_CONNS", 100),
 		},
 		JWT: JWTConfig{
-			Secret:     env("JWT_SECRET", ""),
-			Issuer:     env("JWT_ISSUER", "finnapigo"),
-			AccessTTL:  envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
-			RefreshTTL: envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
-			ResetTTL:   envDuration("RESET_TOKEN_TTL", 15*time.Minute),
-			VerifyTTL:  envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
+			Secret:        env("JWT_SECRET", ""),
+			Issuer:        env("JWT_ISSUER", "finnapigo"),
+			AccessTTL:     envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
+			RefreshTTL:    envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
+			ResetTTL:      envDuration("RESET_TOKEN_TTL", 15*time.Minute),
+			VerifyTTL:     envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
+			MFAPendingTTL: envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
 		},
 		Auth: AuthConfig{
 			MaxLoginAttempts:     envInt("MAX_LOGIN_ATTEMPTS", 5),

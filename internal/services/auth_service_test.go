@@ -53,7 +53,7 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
 
-	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil)
+	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil)
 	return svc, users, tokens, audit, notify
 }
 
@@ -149,7 +149,7 @@ func TestLogin_Success(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	pair, profile, err := svc.Login(context.Background(), LoginInput{
+	pair, profile, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.2.3.4", "test-agent")
 	if err != nil {
@@ -170,7 +170,7 @@ func TestLogin_WrongPassword_NoLockoutYet(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "wrong",
 	}, "1.2.3.4", "test-agent")
 	if !errors.Is(err, ErrInvalidCredentials) {
@@ -193,7 +193,7 @@ func TestLogin_LocksAfterMaxAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 5; i++ {
-		_, _, _ = svc.Login(context.Background(), LoginInput{
+		_, _, _, _ = svc.Login(context.Background(), LoginInput{
 			Email: "alice@example.com", Password: "wrong",
 		}, "1.2.3.4", "test-agent")
 	}
@@ -202,7 +202,7 @@ func TestLogin_LocksAfterMaxAttempts(t *testing.T) {
 		t.Fatal("account should be locked after 5 failed attempts")
 	}
 	// Now even the correct password is rejected because of the lock.
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.2.3.4", "test-agent")
 	if !errors.Is(err, ErrAccountLocked) {
@@ -212,7 +212,7 @@ func TestLogin_LocksAfterMaxAttempts(t *testing.T) {
 
 func TestLogin_UnknownUserDoesNotDistinguish(t *testing.T) {
 	svc, _, _, _, _ := newTestAuthService()
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "ghost@example.com", Password: "Password1",
 	}, "1.2.3.4", "test-agent")
 	// Must return the SAME error as a wrong password, to prevent enumeration.
@@ -223,7 +223,7 @@ func TestLogin_UnknownUserDoesNotDistinguish(t *testing.T) {
 
 func TestLogin_AuditFailedRecordsEmail(t *testing.T) {
 	svc, _, _, audit, _ := newTestAuthService()
-	_, _, _ = svc.Login(context.Background(), LoginInput{
+	_, _, _, _ = svc.Login(context.Background(), LoginInput{
 		Email: "ghost@example.com", Password: "bad",
 	}, "10.0.0.1", "test-agent")
 	events := audit.byEvent("login_failed")
@@ -247,7 +247,7 @@ func TestRefresh_RotatesAndInvalidatesOldToken(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	first, _, err := svc.Login(context.Background(), LoginInput{
+	first, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "ip", "test-agent")
 	if err != nil {
@@ -274,7 +274,7 @@ func TestRefresh_ReuseDetection_RevokesAll(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	pair, _, _ := svc.Login(context.Background(), LoginInput{
+	pair, _, _, _ := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "ip", "test-agent")
 	// First refresh rotates to a new token.
@@ -516,7 +516,7 @@ func TestResendVerifyEmail_RateLimited(t *testing.T) {
 		VerifyResendWindow:      time.Minute,
 	}
 	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr,
-		config.AuthConfig{OTPLength: 6}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil)
+		config.AuthConfig{OTPLength: 6}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil)
 
 	if _, err := svc.Register(context.Background(), RegisterInput{
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
@@ -564,7 +564,7 @@ func newResendTestService(rlCfg config.RateLimitConfig, users *mockUserRepo, aud
 		users, newMockTokenRepo(), newMockUsedTokenRepo(), audit, newMockStore(),
 		jwt.NewJWTManager("test-secret", "test-issuer"),
 		config.AuthConfig{OTPLength: 6}, rlCfg,
-		config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil,
+		config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil,
 	)
 }
 
@@ -739,13 +739,13 @@ func TestListSessions_AfterLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Login twice to create two sessions.
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.2.3.4", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0")
 	if err != nil {
 		t.Fatalf("login1: %v", err)
 	}
-	_, _, err = svc.Login(context.Background(), LoginInput{
+	_, _, _, err = svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "5.6.7.8", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) Safari/605.1")
 	if err != nil {
@@ -775,7 +775,7 @@ func TestListSessions_SkipsRevokedAndExpired(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Login creates session id=1.
-	_, _, _ = svc.Login(context.Background(), LoginInput{
+	_, _, _, _ = svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.1.1.1", "agent")
 	// Manually revoke session 1 and add an expired row.
@@ -810,7 +810,7 @@ func TestRevokeSession_Success(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, _, _ = svc.Login(context.Background(), LoginInput{
+	_, _, _, _ = svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.2.3.4", "agent")
 	// Revoke session id=1.
@@ -854,7 +854,7 @@ func TestRevokeSession_IDOR_WrongUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Login alice (session belongs to user 1).
-	_, _, _ = svc.Login(context.Background(), LoginInput{
+	_, _, _, _ = svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.1.1.1", "agent")
 	// Bob tries to revoke alice's session → should get ErrSessionNotFound (scoped to bob's id=2).
@@ -871,7 +871,7 @@ func TestRefresh_MetadataPopulated(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	pair, _, err := svc.Login(context.Background(), LoginInput{
+	pair, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "10.0.0.1", "Mozilla/5.0 (Windows NT 10.0) Chrome/120.0")
 	if err != nil {
@@ -940,14 +940,14 @@ func TestListSessions_WithCustomGeoResolver(t *testing.T) {
 		config.AuthConfig{MaxLoginAttempts: 5},
 		config.RateLimitConfig{},
 		config.JWTConfig{AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour},
-		notify, nil, geoResolver,
+		notify, nil, geoResolver, nil, nil,
 	)
 	if _, err := svc.Register(context.Background(), RegisterInput{
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := svc.Login(context.Background(), LoginInput{
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.2.3.4", "Chrome/120.0")
 	if err != nil {
@@ -962,6 +962,183 @@ func TestListSessions_WithCustomGeoResolver(t *testing.T) {
 	}
 	if sessions[0].LocationEstimate != "Berlin, DE" {
 		t.Errorf("location = %q, want %q", sessions[0].LocationEstimate, "Berlin, DE")
+	}
+}
+
+// ----- MFA enforcement at login -----
+
+func newMFATestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockTOTPRepo, *mockTOTPValidator) {
+	users := newMockUserRepo()
+	tokens := newMockTokenRepo()
+	usedTokens := newMockUsedTokenRepo()
+	store := newMockStore()
+	audit := &mockAuditRepo{}
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	notify := &mockNotifier{}
+	totpRepo := newMockTOTPRepo()
+	totpVal := &mockTOTPValidator{}
+
+	cfg := config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute}
+	rlCfg := config.RateLimitConfig{
+		LoginPerAccountMax: 10000, LoginWindow: time.Minute,
+		LoginCaptchaAfterFails: 10000,
+	}
+	jwtCfg := config.JWTConfig{
+		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
+		MFAPendingTTL: 5 * time.Minute,
+	}
+	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rlCfg, jwtCfg, notify, nil, nil, totpRepo, totpVal)
+	return svc, users, tokens, totpRepo, totpVal
+}
+
+func TestLogin_TOTPInactive_FullTokens(t *testing.T) {
+	svc, _, tokens, _, _ := newMFATestAuthService()
+	_, _ = svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	})
+	pair, profile, mfaPending, err := svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "1.2.3.4", "test-agent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mfaPending != nil {
+		t.Fatal("mfaPending should be nil for user without TOTP")
+	}
+	if pair.AccessToken == "" || pair.RefreshToken == "" {
+		t.Error("expected both tokens to be issued")
+	}
+	if profile.Email != "alice@example.com" {
+		t.Errorf("profile email = %q", profile.Email)
+	}
+	// Verify a RefreshToken DB record was created.
+	tokens.mu.Lock()
+	count := len(tokens.rows)
+	tokens.mu.Unlock()
+	if count != 1 {
+		t.Fatalf("expected 1 refresh token row, got %d", count)
+	}
+}
+
+func TestLogin_TOTPActive_ReturnsMFAPending(t *testing.T) {
+	svc, _, tokens, totpRepo, _ := newMFATestAuthService()
+	_, _ = svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	})
+	// Simulate TOTP enabled for this user.
+	totpRepo.mu.Lock()
+	totpRepo.devices[1] = &models.TOTPDevice{ID: 1, UserID: 1, Secret: "JBSWY3DPEHPK3PXP", Enabled: true}
+	totpRepo.mu.Unlock()
+
+	pair, _, mfaPending, err := svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "1.2.3.4", "test-agent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mfaPending == nil {
+		t.Fatal("mfaPending should not be nil for TOTP-active user")
+	}
+	if !mfaPending.MFARequired {
+		t.Error("MFARequired should be true")
+	}
+	if mfaPending.MFAToken == "" {
+		t.Error("MFAToken should not be empty")
+	}
+	// Verify the mfa_pending token is valid and carries the right type.
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	claims, err := jwtMgr.Verify(mfaPending.MFAToken)
+	if err != nil {
+		t.Fatalf("mfa token verification failed: %v", err)
+	}
+	if claims.Type != jwt.TokenTypeMFAPending {
+		t.Errorf("token type = %q, want %q", claims.Type, jwt.TokenTypeMFAPending)
+	}
+	if claims.UserID != 1 {
+		t.Errorf("token uid = %d, want 1", claims.UserID)
+	}
+	// No role or email should be in the mfa_pending token.
+	if claims.Role != "" {
+		t.Errorf("mfa_pending token should not carry role, got %q", claims.Role)
+	}
+	if claims.Email != "" {
+		t.Errorf("mfa_pending token should not carry email, got %q", claims.Email)
+	}
+	// No real tokens should have been issued.
+	if pair.AccessToken != "" || pair.RefreshToken != "" {
+		t.Error("real tokens should not be issued when MFA is pending")
+	}
+	// No RefreshToken DB record should have been created.
+	tokens.mu.Lock()
+	count := len(tokens.rows)
+	tokens.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("expected 0 refresh token rows, got %d", count)
+	}
+}
+
+func TestCompleteMFALogin_CorrectCode(t *testing.T) {
+	svc, _, tokens, totpRepo, totpVal := newMFATestAuthService()
+	_, _ = svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	})
+	totpRepo.mu.Lock()
+	totpRepo.devices[1] = &models.TOTPDevice{ID: 1, UserID: 1, Secret: "JBSWY3DPEHPK3PXP", Enabled: true}
+	totpRepo.mu.Unlock()
+
+	pair, profile, err := svc.CompleteMFALogin(context.Background(), CompleteMFALoginInput{
+		UserID: 1, Code: "123456", IP: "1.2.3.4", UA: "Mozilla/5.0 (Windows NT 10.0) Chrome/120.0",
+	})
+	if err != nil {
+		t.Fatalf("CompleteMFALogin failed: %v", err)
+	}
+	if pair.AccessToken == "" || pair.RefreshToken == "" {
+		t.Error("expected both tokens")
+	}
+	if profile.Email != "alice@example.com" {
+		t.Errorf("profile email = %q", profile.Email)
+	}
+	// Verify RefreshToken DB record was created with device metadata.
+	tokens.mu.Lock()
+	var rt *models.RefreshToken
+	for _, row := range tokens.rows {
+		if row.UserID == 1 && !row.Revoked {
+			rt = row
+		}
+	}
+	tokens.mu.Unlock()
+	if rt == nil {
+		t.Fatal("no refresh token record created")
+	}
+	if rt.IPAddress != "1.2.3.4" {
+		t.Errorf("rt IP = %q, want %q", rt.IPAddress, "1.2.3.4")
+	}
+	if rt.DeviceName == "" {
+		t.Error("device name should be populated from user-agent")
+	}
+	// Verify the mock validator was actually called.
+	if totpVal.calls != 1 {
+		t.Errorf("expected 1 Validate call, got %d", totpVal.calls)
+	}
+}
+
+func TestCompleteMFALogin_WrongCode(t *testing.T) {
+	svc, _, _, totpRepo, totpVal := newMFATestAuthService()
+	_, _ = svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	})
+	totpRepo.mu.Lock()
+	totpRepo.devices[1] = &models.TOTPDevice{ID: 1, UserID: 1, Secret: "JBSWY3DPEHPK3PXP", Enabled: true}
+	totpRepo.mu.Unlock()
+
+	// Set up mock to reject the code.
+	totpVal.err = ErrInvalidOTP
+
+	_, _, err := svc.CompleteMFALogin(context.Background(), CompleteMFALoginInput{
+		UserID: 1, Code: "000000", IP: "1.2.3.4", UA: "agent",
+	})
+	if !errors.Is(err, ErrInvalidOTP) {
+		t.Errorf("expected ErrInvalidOTP, got %v", err)
 	}
 }
 

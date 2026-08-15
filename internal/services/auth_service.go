@@ -36,18 +36,20 @@ func init() {
 // AuthService holds all core-auth business logic. It depends only on repo
 // interfaces + stateless helpers (jwt, hashing), so it is trivially unit-testable.
 type AuthService struct {
-	users      UserRepo
-	tokens     RefreshTokenRepo
-	usedTokens UsedTokenRepo
-	audits     AuditRepo
-	store      StoreProvider
-	jwt        *jwt.JWTManager
-	cfg        config.AuthConfig
-	rlCfg      config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
-	jwtCfg     config.JWTConfig
-	notify     Notifier
-	captcha    CaptchaVerifier   // §3 — nil-safe (NoOp when off)
-	geo        geo.Resolver      // IP -> location label; nil-safe (Unknown)
+	users         UserRepo
+	tokens        RefreshTokenRepo
+	usedTokens    UsedTokenRepo
+	audits        AuditRepo
+	store         StoreProvider
+	jwt           *jwt.JWTManager
+	cfg           config.AuthConfig
+	rlCfg         config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
+	jwtCfg        config.JWTConfig
+	notify        Notifier
+	captcha       CaptchaVerifier // §3 — nil-safe (NoOp when off)
+	geo           geo.Resolver    // IP -> location label; nil-safe (Unknown)
+	totpRepo      TOTPRepo        // nil-safe — MFA check skipped when nil
+	totpValidator TOTPValidator   // nil-safe — MFA completion unavailable when nil
 }
 
 // StoreProvider abstracts the key-value store for per-account/per-IP counters
@@ -76,6 +78,8 @@ func NewAuthService(
 	notify Notifier,
 	captcha CaptchaVerifier,
 	geoResolver geo.Resolver,
+	totpRepo TOTPRepo,
+	totpValidator TOTPValidator,
 ) *AuthService {
 	if captcha == nil {
 		captcha = NoOpCaptchaVerifier{}
@@ -87,6 +91,7 @@ func NewAuthService(
 		users: users, tokens: tokens, usedTokens: usedTokens, audits: audits,
 		store: store, jwt: jwt, cfg: authCfg, rlCfg: rlCfg, jwtCfg: jwtCfg,
 		notify: notify, captcha: captcha, geo: geoResolver,
+		totpRepo: totpRepo, totpValidator: totpValidator,
 	}
 }
 
@@ -170,9 +175,10 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 // ----- 2. Login -----
 
 // Login authenticates credentials, applies lockout logic, and returns a fresh
-// access + refresh token pair. It does NOT enforce email verification by
-// default — callers may opt into that at the handler level.
-func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (TokenPair, UserProfile, error) {
+// access + refresh token pair — unless the user has TOTP enabled, in which case
+// it returns a short-lived mfa_pending token and a nil TokenPair so the handler
+// can prompt for a second factor before issuing real tokens.
+func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (TokenPair, UserProfile, *MFAPendingResult, error) {
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 
 	// §3 — per-account login velocity limit: throttle repeated attempts against
@@ -182,7 +188,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		key := "login:acct:" + email
 		count := s.store.IncrBy(key, 1, s.rlCfg.LoginWindow)
 		if count > int64(s.rlCfg.LoginPerAccountMax) {
-			return TokenPair{}, UserProfile{}, ErrRateLimited
+			return TokenPair{}, UserProfile{}, nil, ErrRateLimited
 		}
 	}
 
@@ -194,7 +200,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		if v, ok := s.store.Get(failKey); ok {
 			if n, _ := v.(int64); n >= int64(s.rlCfg.LoginCaptchaAfterFails) {
 				if err := s.captcha.Verify(ctx, in.CaptchaToken); err != nil {
-					return TokenPair{}, UserProfile{}, ErrCaptchaRequired
+					return TokenPair{}, UserProfile{}, nil, ErrCaptchaRequired
 				}
 			}
 		}
@@ -202,7 +208,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 
 	user, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
-		return TokenPair{}, UserProfile{}, fmt.Errorf("login: find user: %w", err)
+		return TokenPair{}, UserProfile{}, nil, fmt.Errorf("login: find user: %w", err)
 	}
 	// §1.6 — Timing side-channel mitigation: when user == nil, still run a
 	// bcrypt comparison against a dummy hash so both code paths take ~equal
@@ -211,43 +217,102 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		hash.CheckPassword(dummyHash, in.Password)
 		s.recordLoginFailIP(ctx, ip)
 		s.audits.Record(ctx, loginFailedEvent(nil, email, ip, "unknown user"))
-		return TokenPair{}, UserProfile{}, ErrInvalidCredentials
+		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
 
 	// §2 — optional email-verification gate. When RequireEmailVerified is
 	// true, unverified accounts cannot log in. Default false to avoid breaking
 	// existing UX; the CHANGELOG and README document this as a policy decision.
 	if s.cfg.RequireEmailVerified && !user.IsEmailVerified {
-		return TokenPair{}, UserProfile{}, ErrEmailNotVerified
+		return TokenPair{}, UserProfile{}, nil, ErrEmailNotVerified
 	}
 
 	if !user.IsActive {
 		s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "disabled"))
-		return TokenPair{}, UserProfile{}, ErrAccountDisabled
+		return TokenPair{}, UserProfile{}, nil, ErrAccountDisabled
 	}
 
 	if locked := s.isLocked(user); locked {
 		s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "locked"))
-		return TokenPair{}, UserProfile{}, ErrAccountLocked
+		return TokenPair{}, UserProfile{}, nil, ErrAccountLocked
 	}
 
 	if !hash.CheckPassword(user.Password, in.Password) {
 		s.recordFailedLogin(ctx, user, email, ip)
-		return TokenPair{}, UserProfile{}, ErrInvalidCredentials
+		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
 
 	// success: reset counter
 	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
-		return TokenPair{}, UserProfile{}, err
+		return TokenPair{}, UserProfile{}, nil, err
+	}
+
+	// ---- MFA enforcement: check if TOTP is active for this user ----
+	// When totpRepo is nil (e.g. legacy tests), skip the check entirely so
+	// the login flow is unchanged for users without TOTP wired.
+	if s.totpRepo != nil {
+		device, err := s.totpRepo.FindByUserID(ctx, user.ID)
+		if err != nil {
+			return TokenPair{}, UserProfile{}, nil, fmt.Errorf("login: check totp: %w", err)
+		}
+		if device != nil && device.Enabled {
+			// TOTP is active — issue a short-lived mfa_pending token carrying
+			// only uid + type (no role/permissions). The user must complete
+			// MFA via /mfa/login-verify to receive real tokens.
+			mfaToken, err := s.jwt.Issue(user.ID, "", "",
+				jwt.TokenTypeMFAPending, s.jwtCfg.MFAPendingTTL)
+			if err != nil {
+				return TokenPair{}, UserProfile{}, nil, err
+			}
+			return TokenPair{}, UserProfile{}, &MFAPendingResult{
+				MFARequired: true,
+				MFAToken:    mfaToken,
+			}, nil
+		}
 	}
 
 	pair, err := s.issueTokenPair(ctx, user, ip, ua)
 	if err != nil {
-		return TokenPair{}, UserProfile{}, err
+		return TokenPair{}, UserProfile{}, nil, err
 	}
 	s.audits.Record(ctx, &models.AuditLog{
 		UserID: &user.ID, Email: email, Event: models.AuditEventLogin,
 		IPAddress: ip, Success: true,
+	})
+	return pair, FromUser(user), nil, nil
+}
+
+// ----- 2b. Complete MFA Login -----
+
+// CompleteMFALogin validates the TOTP code for a user who has already passed
+// password authentication (proven by a valid mfa_pending JWT). On success it
+// issues the real access+refresh token pair and creates the session/device DB
+// record. The TOTP validation is delegated to the injected TOTPValidator,
+// reusing the exact same logic as the existing /totp/validate endpoint.
+func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginInput) (TokenPair, UserProfile, error) {
+	if s.totpValidator == nil {
+		return TokenPair{}, UserProfile{}, ErrInvalidToken
+	}
+
+	if err := s.totpValidator.Validate(ctx, in.UserID, in.Code); err != nil {
+		return TokenPair{}, UserProfile{}, err
+	}
+
+	user, err := s.users.FindByID(ctx, in.UserID)
+	if err != nil {
+		return TokenPair{}, UserProfile{}, err
+	}
+	if user == nil || !user.IsActive {
+		return TokenPair{}, UserProfile{}, ErrInvalidToken
+	}
+
+	pair, err := s.issueTokenPair(ctx, user, in.IP, in.UA)
+	if err != nil {
+		return TokenPair{}, UserProfile{}, err
+	}
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &user.ID, Email: user.Email, Event: models.AuditEventLogin,
+		IPAddress: in.IP, Success: true, Detail: "mfa-complete",
 	})
 	return pair, FromUser(user), nil
 }

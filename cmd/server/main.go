@@ -113,12 +113,13 @@ func run() error {
 	}
 
 	// --- Services ---
+	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth)
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
+		totpRepo, totpSvc,
 	)
 	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
-	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth)
 
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
