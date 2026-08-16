@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	golangjwt "github.com/golang-jwt/jwt/v5"
 
 	"github.com/finnapigo/finnapigo/internal/jwt"
 )
@@ -119,6 +120,34 @@ func TestSudoMiddleware_RejectsExpiredSudoToken(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
+	if w.Code != 403 {
+		t.Errorf("status = %d, want 403", w.Code)
+	}
+}
+
+// TestSudoMiddleware_RejectsTokenWithoutExpiry_C5 — C5 regression: a sudo
+// token missing exp must be rejected outright rather than silently treated as
+// an indefinitely-valid proof (the old code only skipped setting SudoUntil).
+func TestSudoMiddleware_RejectsTokenWithoutExpiry_C5(t *testing.T) {
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	access, _ := jwtMgr.Issue(42, "user", "", jwt.TokenTypeAccess, 15*time.Minute)
+	claims := jwt.Claims{UserID: 42, Type: jwt.TokenTypeSudo,
+		RegisteredClaims: golangjwt.RegisteredClaims{Issuer: "test-issuer"}}
+	sudo, err := golangjwt.NewWithClaims(golangjwt.SigningMethodHS256, claims).SignedString([]byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r := gin.New()
+	r.POST("/sensitive", AuthMiddleware(jwtMgr), SudoMiddleware(jwtMgr), func(c *gin.Context) {
+		t.Error("handler must not be reached for a sudo token without expiry")
+		c.JSON(200, nil)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/sensitive", nil)
+	req.Header.Set("Authorization", "Bearer "+access)
+	req.Header.Set(SudoHeader, sudo)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
 	if w.Code != 403 {
 		t.Errorf("status = %d, want 403", w.Code)
 	}

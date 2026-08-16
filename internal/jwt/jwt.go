@@ -68,9 +68,11 @@ func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.
 	return tok.SignedString(m.secret)
 }
 
-// Verify validates the signature, expiry, and issuer. On success it returns the
-// typed claims. Callers must additionally check claims.Type matches the
-// expected purpose (Verify does not assume a single type).
+// Verify validates the signature, expiry, and issuer. exp is REQUIRED (a
+// token without one never verifies) and the only accepted algorithm is
+// HS256 — the keyfunc additionally rejects the non-HMAC families. On success
+// it returns the typed claims. Callers must additionally check claims.Type
+// matches the expected purpose (Verify does not assume a single type).
 func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
 	claims := &Claims{}
 	tok, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
@@ -78,7 +80,11 @@ func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
 			return nil, ErrUnexpectedSigningMethod
 		}
 		return m.secret, nil
-	})
+	},
+		jwt.WithIssuer(m.issuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{"HS256"}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
 	}
