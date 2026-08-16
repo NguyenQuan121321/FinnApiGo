@@ -630,6 +630,57 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 	return nil
 }
 
+// ----- 7b. Set password (first password for OAuth-only accounts) -----
+//
+// INVESTIGATION NOTES (pre-implementation findings):
+//   - Exact "no password set" condition: models.User.Password is a NOT NULL
+//     string column holding a bcrypt hash for password-registered users, and
+//     OAuthService.createGoogleUser creates Google-only accounts with
+//     Password == "" (empty string — never NULL, never a dummy hash). So
+//     user.Password == "" is the precise marker of an account that has never
+//     had a usable password.
+//   - Reused helpers (no duplication): the package-private validatePassword
+//     in this file for strength rules, and hash.HashPassword (bcrypt,
+//     DefaultCost) for hashing, persisted via UserRepo.UpdatePassword — the
+//     identical code path used by Register / ResetPassword / ChangePassword.
+//
+// SetPassword establishes a FIRST password for an account created via Google
+// OAuth. It is deliberately distinct from ChangePassword: there is no
+// oldPassword to verify because the account has never had one. The core
+// security boundary is the guard below — an account that already has a
+// usable password is hard-rejected so this endpoint can never become a
+// change-password bypass. The guard lives in the SERVICE layer (not only in
+// the handler) so any future caller of this method inherits the protection.
+func (s *AuthService) SetPassword(ctx context.Context, userID uint, newPassword, ip string) error {
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return ErrUserNotFound
+	}
+	// Only accounts WITHOUT a usable password may proceed. Everything else
+	// must use ChangePassword, which verifies the old password first.
+	if user.Password != "" {
+		return ErrPasswordAlreadySet
+	}
+	hashed, err := hash.HashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	if err := s.users.UpdatePassword(ctx, user, hashed); err != nil {
+		return err
+	}
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &user.ID, Email: user.Email, Event: models.AuditEventPasswordSet,
+		IPAddress: ip, Success: true, Detail: "first password set (oauth-only account)",
+	})
+	return nil
+}
+
 // ----- 8. Me -----
 
 // Me returns the sanitized profile for the authenticated user.

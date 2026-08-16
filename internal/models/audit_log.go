@@ -9,6 +9,7 @@ const (
 	AuditEventLogout                   = "logout"
 	AuditEventPasswordChanged          = "password_changed"
 	AuditEventPasswordReset            = "password_reset"
+	AuditEventPasswordSet              = "password_set" // first password established (OAuth-only account)
 	AuditEventOTPSent                  = "otp_sent"
 	AuditEventOTPVerified              = "otp_verified"
 	AuditEventRefreshToken             = "refresh_token"

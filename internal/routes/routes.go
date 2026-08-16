@@ -107,6 +107,10 @@ func Register(deps Deps) *gin.Engine {
 	authed.POST("/logout", deps.Auth.Logout)
 	authed.POST("/logout-all", deps.Auth.LogoutAll)
 	authed.POST("/change-password", deps.Auth.ChangePassword)
+	// First password for Google-OAuth-only accounts; the service hard-rejects
+	// (409) accounts that already have a password, so it is not a bypass for
+	// change-password above.
+	authed.POST("/set-password", deps.Auth.SetPassword)
 	authed.GET("/me", deps.Auth.Me)
 
 	// ---- Session & device management (authenticated) ----

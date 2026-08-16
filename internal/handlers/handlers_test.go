@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/services"
 	"github.com/gin-gonic/gin"
 )
@@ -19,6 +20,7 @@ type fakeAuthService struct {
 	registerErr     error
 	registerProfile services.UserProfile
 	meErr           error
+	setPasswordErr  error
 }
 
 func (f fakeAuthService) Register(context.Context, services.RegisterInput) (services.UserProfile, error) {
@@ -38,6 +40,9 @@ func (fakeAuthService) ResetPassword(context.Context, services.ResetPasswordInpu
 }
 func (fakeAuthService) ChangePassword(context.Context, services.ChangePasswordInput, string) error {
 	return nil
+}
+func (f fakeAuthService) SetPassword(context.Context, uint, string, string) error {
+	return f.setPasswordErr
 }
 func (f fakeAuthService) Me(context.Context, uint) (services.UserProfile, error) {
 	return services.UserProfile{}, f.meErr
@@ -97,6 +102,7 @@ func TestStatusForError(t *testing.T) {
 		{services.ErrEmailExists, 409},
 		{services.ErrUsernameExists, 409}, {services.ErrInvalidInput, 400}, {services.ErrPasswordTooWeak, 400},
 		{services.ErrCaptchaRequired, 400}, {services.ErrDisposableEmail, 422}, {services.ErrRateLimited, 429}, {errors.New("unexpected"), 500},
+		{services.ErrPasswordAlreadySet, 409},
 	} {
 		t.Run(tc.err.Error(), func(t *testing.T) {
 			got, _ := statusForError(tc.err)
@@ -134,11 +140,81 @@ func TestAuthHandlerBoundaryCases(t *testing.T) {
 func TestProtectedHandlersRejectMissingIdentity(t *testing.T) {
 	auth := NewAuthHandler(fakeAuthService{}, nil)
 	mfa := NewMFAHandler(fakeMFAService{}, nil, nil, 0)
-	for _, h := range []gin.HandlerFunc{auth.Me, auth.ChangePassword, auth.LogoutAll, mfa.SendOTP, mfa.VerifyOTP} {
+	for _, h := range []gin.HandlerFunc{auth.Me, auth.ChangePassword, auth.SetPassword, auth.LogoutAll, mfa.SendOTP, mfa.VerifyOTP} {
 		w := serve(t, h, `{}`, nil)
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 		}
+	}
+}
+
+func TestSetPasswordHandler_BoundaryCases(t *testing.T) {
+	uid := uint(1)
+	for _, tc := range []struct {
+		name, body string
+		svc        fakeAuthService
+		want       int
+	}{
+		{"malformed JSON", `{`, fakeAuthService{}, 400},
+		{"weak password (binding)", `{"password":"short1"}`, fakeAuthService{}, 400},
+		{"weak password (service)", `{"password":"Password123"}`, fakeAuthService{setPasswordErr: services.ErrPasswordTooWeak}, 400},
+		{"already set (conflict)", `{"password":"Password123"}`, fakeAuthService{setPasswordErr: services.ErrPasswordAlreadySet}, 409},
+		{"success", `{"password":"Password123"}`, fakeAuthService{}, 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := serve(t, NewAuthHandler(tc.svc, nil).SetPassword, tc.body, &uid)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), `"code"`) {
+				t.Fatalf("not response envelope: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// TestSetPassword_RequiresAccessToken proves the route is gated by the
+// standard AuthMiddleware exactly like every other authenticated endpoint:
+// a missing, invalid, or non-access token is rejected with 401 before the
+// handler runs.
+func TestSetPassword_RequiresAccessToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	h := NewAuthHandler(fakeAuthService{}, nil)
+	r := gin.New()
+	r.POST("/set-password", middleware.AuthMiddleware(jwtMgr), h.SetPassword)
+
+	do := func(authHeader string) int {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/set-password",
+			strings.NewReader(`{"password":"Password123"}`))
+		if authHeader != "" {
+			req.Header.Set("Authorization", authHeader)
+		}
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	if got := do(""); got != http.StatusUnauthorized {
+		t.Fatalf("no token: status=%d", got)
+	}
+	if got := do("Bearer garbage"); got != http.StatusUnauthorized {
+		t.Fatalf("invalid token: status=%d", got)
+	}
+	access, err := jwtMgr.Issue(7, "user", "gina@example.com", jwt.TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := do("Bearer " + access); got != http.StatusOK {
+		t.Fatalf("valid access token: status=%d body", got)
+	}
+	// A valid non-access token (e.g. reset) must still be refused.
+	reset, err := jwtMgr.Issue(7, "user", "gina@example.com", jwt.TokenTypeReset, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := do("Bearer " + reset); got != http.StatusUnauthorized {
+		t.Fatalf("reset token: status=%d", got)
 	}
 }
 
