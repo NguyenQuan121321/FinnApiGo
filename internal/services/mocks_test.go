@@ -477,18 +477,24 @@ func (m *mockTOTPRepo) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]
 	return out, nil
 }
 
+// MarkRecoveryCodeUsed mirrors the GORM repository's compare-and-set on
+// used_at IS NULL: the second of two concurrent marks reports
+// repositories.ErrRecoveryCodeUsed.
 func (m *mockTOTPRepo) MarkRecoveryCodeUsed(ctx context.Context, c *models.RecoveryCode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
-	c.UsedAt = &now
 	for i := range m.codes[c.UserID] {
 		if m.codes[c.UserID][i].ID == c.ID {
+			if m.codes[c.UserID][i].UsedAt != nil {
+				return repositories.ErrRecoveryCodeUsed
+			}
 			m.codes[c.UserID][i].UsedAt = &now
-			break
+			c.UsedAt = &now
+			return nil
 		}
 	}
-	return nil
+	return repositories.ErrRecoveryCodeUsed
 }
 
 // ---- mock TOTP validator (for MFA login tests) ----

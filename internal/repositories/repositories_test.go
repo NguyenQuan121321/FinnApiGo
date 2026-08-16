@@ -285,3 +285,38 @@ func TestAuditRepository(t *testing.T) {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
 }
+
+// TestTOTPRepository_MarkRecoveryCodeUsedCAS_C2 — C2 regression: marking a
+// recovery code used must be a compare-and-set on used_at IS NULL so the
+// second of two concurrent submissions is rejected instead of silently
+// succeeding twice.
+func TestTOTPRepository_MarkRecoveryCodeUsedCAS_C2(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	if err := db.AutoMigrate(&models.TOTPDevice{}, &models.RecoveryCode{}); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewTOTPRepository(db)
+	if err := repo.Upsert(ctx, &models.TOTPDevice{UserID: u.ID, Secret: "S", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	code := &models.RecoveryCode{UserID: u.ID, CodeHash: "h1"}
+	if err := db.Create(code).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.MarkRecoveryCodeUsed(ctx, code); err != nil {
+		t.Fatalf("first MarkRecoveryCodeUsed err=%v", err)
+	}
+	if err := repo.MarkRecoveryCodeUsed(ctx, code); !errors.Is(err, ErrRecoveryCodeUsed) {
+		t.Fatalf("second MarkRecoveryCodeUsed must return ErrRecoveryCodeUsed, got %v", err)
+	}
+	var row models.RecoveryCode
+	if err := db.First(&row, code.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.UsedAt == nil {
+		t.Error("row must remain used after rejected second mark")
+	}
+}

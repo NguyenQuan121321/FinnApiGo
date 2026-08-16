@@ -43,8 +43,20 @@ func (r *TOTPRepository) ActiveRecoveryCodes(ctx context.Context, userID uint) (
 	err := r.db.WithContext(ctx).Where("user_id = ? AND used_at IS NULL", userID).Find(&c).Error
 	return c, err
 }
+// MarkRecoveryCodeUsed marks the code consumed via compare-and-set
+// (WHERE used_at IS NULL): concurrent submissions of one code yield exactly
+// one winner; the loser gets ErrRecoveryCodeUsed.
 func (r *TOTPRepository) MarkRecoveryCodeUsed(ctx context.Context, c *models.RecoveryCode) error {
 	now := time.Now()
+	res := r.db.WithContext(ctx).Model(c).
+		Where("used_at IS NULL").
+		Update("used_at", now)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrRecoveryCodeUsed
+	}
 	c.UsedAt = &now
-	return r.db.WithContext(ctx).Model(c).Update("used_at", now).Error
+	return nil
 }

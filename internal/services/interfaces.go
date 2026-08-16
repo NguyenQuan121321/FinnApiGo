@@ -59,6 +59,10 @@ type TOTPRepo interface {
 	// codes (used and unused) and inserts the new batch in one transaction.
 	ReplaceRecoveryCodes(context.Context, uint, []*models.RecoveryCode) error
 	ActiveRecoveryCodes(context.Context, uint) ([]models.RecoveryCode, error)
+	// MarkRecoveryCodeUsed marks the code consumed via compare-and-set on
+	// used_at IS NULL; it returns repositories.ErrRecoveryCodeUsed when a
+	// concurrent request already consumed the code — callers must treat that
+	// as a failed attempt, not propagate it.
 	MarkRecoveryCodeUsed(context.Context, *models.RecoveryCode) error
 }
 

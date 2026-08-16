@@ -12,6 +12,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -196,6 +197,12 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 	for i := range codes {
 		if hash.ConstantTimeCompare(codes[i].CodeHash, want) {
 			if err := s.repo.MarkRecoveryCodeUsed(ctx, &codes[i]); err != nil {
+				if errors.Is(err, repositories.ErrRecoveryCodeUsed) {
+					// A concurrent request consumed the code between our read
+					// and the mark — same outcome as any failed attempt.
+					s.recordFailure(ctx, userID, "recovery code replay")
+					return ErrInvalidCode
+				}
 				return err
 			}
 			s.recordSuccess(ctx, userID, models.AuditEventRecoveryCodeUsed, "recovery code used")

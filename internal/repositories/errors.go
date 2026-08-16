@@ -21,6 +21,12 @@ func isMySQLDuplicate(err error) bool {
 // reuse signal, not as a persistence failure.
 var ErrTokenAlreadyRevoked = errors.New("refresh token already revoked")
 
+// ErrRecoveryCodeUsed is returned by TOTPRepository.MarkRecoveryCodeUsed when
+// its compare-and-set (WHERE used_at IS NULL) matched no row because a
+// concurrent request already consumed the code. Callers treat it as a failed
+// authentication attempt, not a persistence failure.
+var ErrRecoveryCodeUsed = errors.New("recovery code already used")
+
 // isGormDuplicate reports whether err wraps gorm.ErrDuplicatedKey.
 // GORM wraps the driver error; checking both paths ensures we catch it
 // regardless of GORM version internals.

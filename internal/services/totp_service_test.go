@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -654,4 +655,63 @@ func totpCode(t *testing.T, secret string) string {
 		t.Fatalf("failed to generate test TOTP code: %v", err)
 	}
 	return code
+}
+
+// barrierTOTPRepo hands every concurrent ActiveRecoveryCodes call for one
+// user a pre-mark snapshot of the code rows, then releases them together —
+// reproducing the read→mark TOCTOU window deterministically (same technique
+// as barrierTokenRepo for C1).
+type barrierTOTPRepo struct {
+	*mockTOTPRepo
+	userID   uint
+	racers   int32
+	arrived  int32
+	released chan struct{}
+}
+
+func (b *barrierTOTPRepo) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]models.RecoveryCode, error) {
+	rows, err := b.mockTOTPRepo.ActiveRecoveryCodes(ctx, userID)
+	if userID == b.userID && atomic.AddInt32(&b.arrived, 1) <= b.racers {
+		if atomic.LoadInt32(&b.arrived) == b.racers {
+			close(b.released)
+		}
+		<-b.released
+	}
+	return rows, err
+}
+
+// TestTOTPService_Validate_ConcurrentSameRecoveryCode_C2 — C2 regression:
+// two concurrent logins presenting the SAME recovery code must yield exactly
+// one success. The barrier guarantees both racers hold a pre-mark copy, which
+// before the CAS fix let both mark-and-succeed.
+func TestTOTPService_Validate_ConcurrentSameRecoveryCode_C2(t *testing.T) {
+	inner := newMockTOTPRepo()
+	svcSetup := newTestTOTPService(t, inner, nil, nil)
+	_, codes := enableAndVerify(t, svcSetup, 1)
+	if len(codes) == 0 {
+		t.Fatal("no recovery codes issued")
+	}
+
+	repo := &barrierTOTPRepo{mockTOTPRepo: inner, userID: 1, racers: 2, released: make(chan struct{})}
+	svc := newTestTOTPService(t, repo, nil, nil)
+
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	start := make(chan struct{})
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := svc.Validate(context.Background(), 1, codes[0]); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("exactly one concurrent recovery-code use must succeed, got %d/2", got)
+	}
 }
