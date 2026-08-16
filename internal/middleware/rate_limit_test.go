@@ -85,3 +85,29 @@ func TestRateLimiterSharedCounter_WindowResets_C4(t *testing.T) {
 		t.Fatalf("after window: status=%d, want 204 (counter must reset)", got)
 	}
 }
+
+// brokenCounterStore simulates a store whose backend is DOWN: counters fail
+// open (IncrBy → 0, the A1 contract) and nothing is knowable.
+type brokenCounterStore struct{}
+
+func (brokenCounterStore) IncrBy(string, int64, time.Duration) int64 { return 0 }
+
+// TestRateLimiter_StoreOutage_StillServes_A1 — A1 end-to-end: when the shared
+// store is failing, rate-limited routes must still serve (fail open, falling
+// back to the process-local token bucket) instead of hard-denying traffic.
+func TestRateLimiter_StoreOutage_StillServes_A1(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rl := NewRateLimiter(100, 100, time.Minute, brokenCounterStore{})
+	defer rl.Close()
+	r := gin.New()
+	r.Use(rl.Handler())
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+
+	for i := 0; i < 10; i++ {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("request %d during store outage: status=%d, want 204", i, w.Code)
+		}
+	}
+}

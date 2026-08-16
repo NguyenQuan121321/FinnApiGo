@@ -1,7 +1,6 @@
 package store
 
 import (
-	"math"
 	"testing"
 	"time"
 
@@ -124,20 +123,27 @@ func TestRedisStore_GetMissingReturnsFalse(t *testing.T) {
 	}
 }
 
-// TestRedisStore_FailClosedOnOutage proves the store DENIES (not allows) when
-// Redis is unreachable: IncrBy returns MaxInt64 so every rate limiter reading
-// it rejects the request, and SetNX returns false so single-use guards block.
-func TestRedisStore_FailClosedOnOutage(t *testing.T) {
+// TestRedisStore_OutageSplitFailureSemantics_A1 — A1: with Redis unreachable,
+// rate COUNTERS fail OPEN (IncrBy returns 0 — a Redis outage must not become
+// an auth outage; the caller's local fallback takes over) while single-use
+// guards fail CLOSED (SetNX returns false — a consumed token must never
+// replay). Both directions count into StoreErrors. This supersedes the
+// earlier "IncrBy → MaxInt64 always" contract.
+func TestRedisStore_OutageSplitFailureSemantics_A1(t *testing.T) {
 	s, mr, cleanup := newMiniredisStore(t)
 	// Close only the redis side; cleanup still closes the client.
 	mr.Close()
 	defer cleanup()
 
-	if n := s.IncrBy("c", 1, time.Minute); n != math.MaxInt64 {
-		t.Errorf("IncrBy on dead redis = %d, want MaxInt64 (fail closed)", n)
+	before := StoreErrors.Load()
+	if n := s.IncrBy("counter", 1, time.Minute); n != 0 {
+		t.Errorf("IncrBy on dead redis = %d, want 0 (fail open for counters)", n)
 	}
-	if s.SetNX("k", "v", time.Minute) {
-		t.Error("SetNX on dead redis must return false (fail closed)")
+	if s.SetNX("guard", "v", time.Minute) {
+		t.Error("SetNX on dead redis must return false (fail closed for single-use guards)")
+	}
+	if dropped := StoreErrors.Load() - before; dropped < 2 {
+		t.Errorf("StoreErrors must count every failed op, delta=%d want >= 2", dropped)
 	}
 }
 

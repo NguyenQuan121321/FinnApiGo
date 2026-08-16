@@ -1446,3 +1446,44 @@ func TestRegister_NotifierFailureStillSucceeds_C11(t *testing.T) {
 		t.Fatalf("expected one verify_email_send_failed audit event, got %d", len(events))
 	}
 }
+
+// failingStore models a store whose backend is down, per the A1 contract:
+// counters fail open (IncrBy → 0, Get → absent) while single-use guards fail
+// closed (SetNX → false).
+type failingStore struct{}
+
+func (failingStore) Get(string) (any, bool)                    { return nil, false }
+func (failingStore) Set(string, any, time.Duration)            {}
+func (failingStore) SetNX(string, any, time.Duration) bool     { return false }
+func (failingStore) IncrBy(string, int64, time.Duration) int64 { return 0 }
+func (failingStore) Delete(string)                             {}
+
+// TestResetPassword_StoreOutage_SingleUseStillFailClosed_A1 — A1 counterpart:
+// even with the store failing, a single-use reset token must never be
+// consumable (SetNX fails closed → ErrInvalidToken).
+func TestResetPassword_StoreOutage_SingleUseStillFailClosed_A1(t *testing.T) {
+	users := newMockUserRepo()
+	tokens := newMockTokenRepo()
+	usedTokens := newMockUsedTokenRepo()
+	audit := &mockAuditRepo{}
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	notify := &mockNotifier{}
+	cfg := config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute}
+	rlCfg := config.RateLimitConfig{LoginPerAccountMax: 10000, LoginWindow: time.Minute}
+	jwtCfg := config.JWTConfig{AccessTTL: time.Minute, RefreshTTL: time.Hour, ResetTTL: time.Minute, VerifyTTL: time.Hour}
+	svc := NewAuthService(users, tokens, usedTokens, audit, failingStore{}, jwtMgr, cfg, rlCfg, jwtCfg, notify, nil, nil, nil, nil)
+
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "gina", Email: "gina@example.com", Password: "Password1", FullName: "G",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ForgotPassword(context.Background(), "gina@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "NewPassword1",
+	}, "ip"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("single-use guard must fail CLOSED during a store outage, got %v", err)
+	}
+}
