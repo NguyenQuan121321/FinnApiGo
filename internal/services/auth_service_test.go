@@ -1299,3 +1299,52 @@ func TestVerifyEmail_SingleUse_SurvivesStoreFlush_C8(t *testing.T) {
 		t.Fatalf("verify-email replay after store flush must be rejected, got %v", err)
 	}
 }
+
+// TestLogin_SuccessClearsPerAccountCounter_C9 — C9 regression: a successful
+// login must reset the per-account velocity counter so earlier typos don't
+// linger toward the cap (pre-fix the counter counted EVERY attempt and never
+// reset — fail/fail/success left the account one typo away from 429).
+func TestLogin_SuccessClearsPerAccountCounter_C9(t *testing.T) {
+	cfg := config.AuthConfig{MaxLoginAttempts: 50, LoginLockoutDuration: time.Minute}
+	rlCfg := config.RateLimitConfig{LoginPerAccountMax: 3, LoginWindow: time.Hour}
+	svc, _, _, _, _, _ := buildAuthService(t, cfg, rlCfg, nil)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "carol", Email: "carol@example.com", Password: "Password1", FullName: "C",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two failures below the cap...
+	for i := 0; i < 2; i++ {
+		_, _, _, err := svc.Login(context.Background(), LoginInput{
+			Email: "carol@example.com", Password: "WrongPass1",
+		}, "ip", "ua")
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("failed login %d: %v", i, err)
+		}
+	}
+	// ...then the correct password: the success must CLEAR the counter.
+	if _, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "carol@example.com", Password: "Password1",
+	}, "ip", "ua"); err != nil {
+		t.Fatalf("correct login after typos must succeed, got %v", err)
+	}
+
+	// The window restarted: three more wrong attempts are ordinary credential
+	// failures (pre-fix the lingering counter 429'd the first of them)...
+	for i := 0; i < 3; i++ {
+		_, _, _, err := svc.Login(context.Background(), LoginInput{
+			Email: "carol@example.com", Password: "WrongPass1",
+		}, "ip", "ua")
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("post-reset wrong login %d must be ErrInvalidCredentials, got %v", i, err)
+		}
+	}
+	// ...and only the attempt after the fresh batch trips the cap.
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "carol@example.com", Password: "WrongPass1",
+	}, "ip", "ua")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("attempt after cap must be ErrRateLimited, got %v", err)
+	}
+}

@@ -176,12 +176,12 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 
 	// §3 — per-account login velocity limit: throttle repeated attempts against
-	// one email even when spread across many IPs. Uses the store so the limit
-	// is shared across instances.
+	// one email even when spread across many IPs. C9: only FAILED attempts
+	// count — this check reads the counter without incrementing, failures grow
+	// it, and a successful login clears it (the owner typing the correct
+	// password must not be throttled by their own earlier typos).
 	if s.store != nil && email != "" && s.rlCfg.LoginPerAccountMax > 0 {
-		key := "login:acct:" + email
-		count := s.store.IncrBy(key, 1, s.rlCfg.LoginWindow)
-		if count > int64(s.rlCfg.LoginPerAccountMax) {
+		if storeCounterValue(s.store, "login:acct:"+email) >= int64(s.rlCfg.LoginPerAccountMax) {
 			return TokenPair{}, UserProfile{}, nil, ErrRateLimited
 		}
 	}
@@ -210,6 +210,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	if user == nil {
 		hash.CheckPassword(dummyHash, in.Password)
 		s.recordLoginFailIP(ctx, ip)
+		s.recordLoginFailAccount(email)
 		s.audits.Record(ctx, loginFailedEvent(nil, email, ip, "unknown user"))
 		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
@@ -239,6 +240,11 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	// success: reset counter
 	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
 		return TokenPair{}, UserProfile{}, nil, err
+	}
+	// C9 — clear the per-account velocity counter too: the owner proving the
+	// correct password must not stay throttled by their own earlier typos.
+	if s.store != nil {
+		s.store.Delete("login:acct:" + email)
 	}
 
 	return s.CheckMFAOrIssueTokens(ctx, user, ip, ua, "")
@@ -865,7 +871,16 @@ func (s *AuthService) recordFailedLogin(ctx context.Context, user *models.User, 
 			"user_id", user.ID, "err", err)
 	}
 	s.recordLoginFailIP(ctx, ip)
+	s.recordLoginFailAccount(email)
 	s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "bad password"))
+}
+
+// recordLoginFailAccount grows the per-account login velocity counter — its
+// only writer (C9: failures only; a successful login deletes the key instead).
+func (s *AuthService) recordLoginFailAccount(email string) {
+	if s.store != nil && email != "" {
+		s.store.IncrBy("login:acct:"+email, 1, s.rlCfg.LoginWindow)
+	}
 }
 
 // recordLoginFailIP increments the per-IP failure counter used by the adaptive

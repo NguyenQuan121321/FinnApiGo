@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
@@ -407,17 +408,17 @@ func (s *TOTPService) replayGuard(ctx context.Context, userID uint, code string)
 	return s.store.SetNX(key, "1", totpReplayTTL)
 }
 
-// guardBruteForce enforces the per-user failed-attempt cap. It increments a
-// counter in the shared store (so it holds across instances) and rejects with
-// ErrRateLimited once the cap is exceeded. The cap backstops the per-IP rate
-// limiter: an attacker rotating IPs to bypass it is still throttled per
-// account. A nil store disables the check (single-instance dev / legacy tests).
+// guardBruteForce enforces the per-user failed-attempt cap by READING the
+// current count — it never increments: successes must not feed the window
+// (C9); only recordFailure does. The cap backstops the per-IP rate limiter:
+// an attacker rotating IPs to bypass it is still throttled per account.
+// A nil store disables the check (single-instance dev / legacy tests).
 func (s *TOTPService) guardBruteForce(ctx context.Context, userID uint) error {
 	if s.store == nil {
 		return nil
 	}
 	key := fmt.Sprintf("totp:fail:%d", userID)
-	if n := s.store.IncrBy(key, 1, s.cfg.TOTPAttemptWindow); n > int64(s.cfg.TOTPMaxAttempts) {
+	if storeCounterValue(s.store, key) >= int64(s.cfg.TOTPMaxAttempts) {
 		s.recordFailure(ctx, userID, "brute-force lockout")
 		return ErrRateLimited
 	}
@@ -425,8 +426,13 @@ func (s *TOTPService) guardBruteForce(ctx context.Context, userID uint) error {
 }
 
 // recordSuccess fires-and-forgets a successful audit entry (best-effort,
-// never blocks — the underlying AuditRepo is the async writer).
+// never blocks — the underlying AuditRepo is the async writer). A success
+// also clears the per-user brute-force window (C9): having proven possession
+// of the factor, earlier failures should not linger toward the cap.
 func (s *TOTPService) recordSuccess(ctx context.Context, userID uint, event, detail string) {
+	if s.store != nil {
+		s.store.Delete(fmt.Sprintf("totp:fail:%d", userID))
+	}
 	if s.audits == nil {
 		return
 	}
@@ -437,9 +443,13 @@ func (s *TOTPService) recordSuccess(ctx context.Context, userID uint, event, det
 	})
 }
 
-// recordFailure fires-and-forgets a failed attempt. Wrapped in a defer/recover
-// because audit logging must NEVER break the auth flow.
+// recordFailure fires-and-forgets a failed attempt — and this is the ONLY
+// place the per-user brute-force counter grows (C9: failures only). Wrapped
+// in a defer/recover because audit logging must NEVER break the auth flow.
 func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail string) {
+	if s.store != nil {
+		s.store.IncrBy(fmt.Sprintf("totp:fail:%d", userID), 1, s.cfg.TOTPAttemptWindow)
+	}
 	if s.audits == nil {
 		return
 	}
@@ -449,6 +459,25 @@ func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail str
 		UserID: &uid, Event: models.AuditEventTOTPFailed, Success: false, Detail: detail,
 		CreatedAt: time.Now(),
 	})
+}
+
+// storeCounterValue reads a counter written by IncrBy WITHOUT incrementing
+// it. Redis hands counters back as strings; the in-memory store keeps int64.
+func storeCounterValue(s store.Store, key string) int64 {
+	v, ok := s.Get(key)
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case string:
+		c, _ := strconv.ParseInt(n, 10, 64)
+		return c
+	}
+	return 0
 }
 
 // IsTOTPError reports whether err is one of the TOTP-related sentinel errors,

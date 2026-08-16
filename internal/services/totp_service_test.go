@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -344,22 +345,16 @@ func TestTOTPService_BruteForce_RateLimits(t *testing.T) {
 
 	secret, _ := enableAndVerify(t, svc, 1)
 
-	// Burn the attempt budget: 3 attempts, 3rd should be ErrRateLimited.
+	// Burn the attempt budget with FAILURES: with the cap counting failures
+	// only (C9 — successes must not feed the window), the first 3 wrong codes
+	// are ordinary failures...
 	for i := 0; i < 3; i++ {
 		err := svc.Validate(context.Background(), 1, "000000")
-		if i < 2 {
-			if err == nil {
-				t.Fatalf("wrong code should fail (attempt %d)", i+1)
-			}
-			if errors.Is(err, ErrRateLimited) {
-				t.Fatalf("attempt %d should not be rate-limited yet", i+1)
-			}
-		}
-		if i == 2 && !errors.Is(err, ErrRateLimited) {
-			t.Fatalf("attempt %d should be rate-limited, got %v", i+1, err)
+		if err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("wrong code %d should be a plain failure, got %v", i+1, err)
 		}
 	}
-	// Even a valid code should be rejected (account is locked out).
+	// ...and the NEXT attempt is locked out, even with a valid code.
 	validCode := totpCode(t, secret)
 	if err := svc.Validate(context.Background(), 1, validCode); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("rate-limited user should still get 429 even with valid code, got %v", err)
@@ -910,5 +905,39 @@ func TestTOTPService_SecretEncryptedAtRest_C7(t *testing.T) {
 	}
 	if err := svc.Validate(context.Background(), 1, totpCode(t, newSecret)); err != nil {
 		t.Fatalf("validate after sealed rotation: %v", err)
+	}
+}
+
+// TestTOTPService_SuccessDoesNotFeedBruteForceWindow_C9 — C9 regression:
+// successful validations must not count toward the per-user brute-force cap
+// (pre-fix every ENTRY incremented it — 6 successful MFA logins in 5 minutes
+// tripped 429), successes clear the window, and failures alone fill it.
+func TestTOTPService_SuccessDoesNotFeedBruteForceWindow_C9(t *testing.T) {
+	repo := newMockTOTPRepo()
+	kv := store.NewInMemoryStore(0)
+	defer kv.Close()
+	cfg := config.AuthConfig{
+		TOTPMaxAttempts: 5, TOTPAttemptWindow: 5 * time.Minute,
+		RecoveryCodeCount: 10, RecoveryCodeBytes: 16,
+	}
+	svc := NewTOTPService(repo, kv, nil, "TestIssuer", cfg, testEncryptor(t), testJWTManager)
+	_, codes := enableAndVerify(t, svc, 1)
+
+	// 6 successful validations (distinct recovery codes, so TOTP replay
+	// protection is not a factor) — none may trip the cap.
+	for i := 0; i < 6; i++ {
+		if err := svc.Validate(context.Background(), 1, codes[i]); err != nil {
+			t.Fatalf("successful validation %d must not hit the brute-force cap: %v", i+1, err)
+		}
+	}
+
+	// Failures DO count: 5 wrong codes then a 6th trips the cap.
+	for i := 0; i < 5; i++ {
+		if err := svc.Validate(context.Background(), 1, fmt.Sprintf("wrong-code-%d", i)); err == nil {
+			t.Fatalf("wrong code %d must fail", i)
+		}
+	}
+	if err := svc.Validate(context.Background(), 1, "wrong-code-final"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("6th failure in the window must trip the cap, got %v", err)
 	}
 }
