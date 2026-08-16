@@ -1348,3 +1348,101 @@ func TestLogin_SuccessClearsPerAccountCounter_C9(t *testing.T) {
 		t.Fatalf("attempt after cap must be ErrRateLimited, got %v", err)
 	}
 }
+
+// TestResetPassword_ClearsLockoutState_C10 — C10 regression: resetting the
+// password must clear the attacker-sustained lockout, else the victim resets
+// and STILL cannot log in.
+func TestResetPassword_ClearsLockoutState_C10(t *testing.T) {
+	svc, users, _, notify, _ := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "dave", Email: "dave@example.com", Password: "Password1", FullName: "D",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Attacker-sustained lockout: attempts racked up, account locked for an hour.
+	u, _ := users.FindByEmail(context.Background(), "dave@example.com")
+	lock := time.Now().Add(time.Hour)
+	for i := 0; i < 5; i++ {
+		if err := users.IncrementFailedAttempts(context.Background(), u, &lock); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := svc.ForgotPassword(context.Background(), "dave@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "FreshPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := users.FindByEmail(context.Background(), "dave@example.com")
+	if got.FailedLoginAttempts != 0 || got.LockedUntil != nil {
+		t.Fatalf("lockout must be cleared by reset: attempts=%d locked_until=%v",
+			got.FailedLoginAttempts, got.LockedUntil)
+	}
+	// The victim can log in immediately with the new password.
+	if _, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "dave@example.com", Password: "FreshPassword1",
+	}, "ip", "ua"); err != nil {
+		t.Fatalf("login after reset must not be locked, got %v", err)
+	}
+}
+
+// TestChangePassword_ClearsLockoutState_C10 — same invariant for the
+// authenticated change-password flow.
+func TestChangePassword_ClearsLockoutState_C10(t *testing.T) {
+	svc, users, _, _, _ := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "erin", Email: "erin@example.com", Password: "Password1", FullName: "E",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := users.FindByEmail(context.Background(), "erin@example.com")
+	lock := time.Now().Add(time.Hour)
+	for i := 0; i < 5; i++ {
+		if err := users.IncrementFailedAttempts(context.Background(), u, &lock); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := svc.ChangePassword(context.Background(), ChangePasswordInput{
+		UserID: u.ID, OldPassword: "Password1", NewPassword: "FreshPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := users.FindByID(context.Background(), u.ID)
+	if got.FailedLoginAttempts != 0 || got.LockedUntil != nil {
+		t.Fatalf("lockout must be cleared by change: attempts=%d locked_until=%v",
+			got.FailedLoginAttempts, got.LockedUntil)
+	}
+}
+
+// TestRegister_NotifierFailureStillSucceeds_C11 — C11 regression: the user
+// row is already committed when the verification email send fails; returning
+// 500 made the client retry into ErrEmailExists. A delivery failure is now
+// a successful registration + error log + audit (the resend endpoint exists).
+func TestRegister_NotifierFailureStillSucceeds_C11(t *testing.T) {
+	svc, users, _, audit, notify := newTestAuthService()
+	notify.mu.Lock()
+	notify.verifySendErr = errors.New("smtp down")
+	notify.mu.Unlock()
+
+	profile, err := svc.Register(context.Background(), RegisterInput{
+		Username: "frank", Email: "frank@example.com", Password: "Password1", FullName: "F",
+	})
+	if err != nil {
+		t.Fatalf("register must succeed despite notifier failure, got %v", err)
+	}
+	if profile.Username != "frank" {
+		t.Errorf("profile = %+v", profile)
+	}
+	if u, _ := users.FindByEmail(context.Background(), "frank@example.com"); u == nil {
+		t.Fatal("user row must exist")
+	}
+	if events := audit.byEvent("verify_email_send_failed"); len(events) != 1 {
+		t.Fatalf("expected one verify_email_send_failed audit event, got %d", len(events))
+	}
+}

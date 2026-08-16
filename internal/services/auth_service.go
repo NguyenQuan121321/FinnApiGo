@@ -160,8 +160,19 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 	if err != nil {
 		return UserProfile{}, err
 	}
+	// C11 — the user row is already committed; a failed email delivery must
+	// not turn the registration into a 500 (a client retry then collides with
+	// ErrEmailExists). Degrade to success + error log + audit; the
+	// resend-verification endpoint is the recovery path.
 	if err := s.notify.SendEmailVerification(user.Email, verifyToken); err != nil {
-		return UserProfile{}, fmt.Errorf("register: send verification email: %w", err)
+		slog.Error("register: verification email delivery failed",
+			"user_id", user.ID, "email", user.Email, "err", err)
+		uid := user.ID
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID: &uid, Email: user.Email,
+			Event: models.AuditEventVerifyEmailSendFailed, Success: false,
+			Detail: err.Error(), IPAddress: in.IP,
+		})
 	}
 	return FromUser(user), nil
 }
@@ -598,6 +609,11 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 	if err := s.users.UpdatePassword(ctx, user, hashed); err != nil {
 		return err
 	}
+	// C10 — the reset proves account ownership: clear any attacker-sustained
+	// lockout so the victim is not still locked out with their new password.
+	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
+		return err
+	}
 	if err := s.tokens.RevokeAllForUser(ctx, user.ID); err != nil {
 		return err
 	}
@@ -631,6 +647,10 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 		return err
 	}
 	if err := s.users.UpdatePassword(ctx, user, hashed); err != nil {
+		return err
+	}
+	// C10 — knowing the old password proves ownership: clear lockout state.
+	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
 		return err
 	}
 	if err := s.tokens.RevokeAllForUser(ctx, user.ID); err != nil {
