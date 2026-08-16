@@ -102,10 +102,11 @@ type UsedTokenRepo interface {
 
 // Notifier delivers password-reset / email-verification messages.
 // The default implementation logs to console; swap for an SMTP-backed one
-// in production.
+// in production. Implementations must honor the context (A2) so request
+// cancellation and deadlines propagate into delivery.
 type Notifier interface {
-	SendPasswordReset(to, resetToken string) error
-	SendEmailVerification(to, verifyToken string) error
+	SendPasswordReset(ctx context.Context, to, resetToken string) error
+	SendEmailVerification(ctx context.Context, to, verifyToken string) error
 }
 
 // ---- CAPTCHA verifier (§2) ----

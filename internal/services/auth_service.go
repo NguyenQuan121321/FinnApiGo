@@ -164,7 +164,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 	// not turn the registration into a 500 (a client retry then collides with
 	// ErrEmailExists). Degrade to success + error log + audit; the
 	// resend-verification endpoint is the recovery path.
-	if err := s.notify.SendEmailVerification(user.Email, verifyToken); err != nil {
+	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
 		slog.Error("register: verification email delivery failed",
 			"user_id", user.ID, "email", user.Email, "err", err)
 		uid := user.ID
@@ -468,7 +468,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 	if err != nil {
 		return err
 	}
-	if err := s.notify.SendPasswordReset(email, resetToken); err != nil {
+	if err := s.notify.SendPasswordReset(ctx, email, resetToken); err != nil {
 		return fmt.Errorf("forgot-password: send: %w", err)
 	}
 	return nil
@@ -565,7 +565,7 @@ func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) e
 	if err != nil {
 		return err
 	}
-	if err := s.notify.SendEmailVerification(user.Email, verifyToken); err != nil {
+	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
 		return fmt.Errorf("resend-verify: send: %w", err)
 	}
 	return nil

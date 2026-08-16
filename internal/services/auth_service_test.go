@@ -1497,17 +1497,17 @@ func TestConsoleNotifier_RefusesInReleaseMode_A8(t *testing.T) {
 	t.Setenv("ALLOW_TOKEN_CONSOLE", "")
 
 	n := NewConsoleNotifier("no-reply@example.com")
-	if err := n.SendPasswordReset("a@b.com", "live-reset-token"); err == nil {
+	if err := n.SendPasswordReset(context.Background(), "a@b.com", "live-reset-token"); err == nil {
 		t.Error("reset delivery must fail in release mode")
 	}
-	if err := n.SendEmailVerification("a@b.com", "live-verify-token"); err == nil {
+	if err := n.SendEmailVerification(context.Background(), "a@b.com", "live-verify-token"); err == nil {
 		t.Error("verification delivery must fail in release mode")
 	}
 
 	// Explicit operator opt-in re-enables delivery.
 	t.Setenv("ALLOW_TOKEN_CONSOLE", "true")
 	n = NewConsoleNotifier("no-reply@example.com")
-	if err := n.SendPasswordReset("a@b.com", "tok"); err != nil {
+	if err := n.SendPasswordReset(context.Background(), "a@b.com", "tok"); err != nil {
 		t.Fatalf("explicit opt-in must allow delivery: %v", err)
 	}
 
@@ -1515,7 +1515,7 @@ func TestConsoleNotifier_RefusesInReleaseMode_A8(t *testing.T) {
 	t.Setenv("GIN_MODE", "debug")
 	t.Setenv("ALLOW_TOKEN_CONSOLE", "")
 	n = NewConsoleNotifier("no-reply@example.com")
-	if err := n.SendEmailVerification("a@b.com", "tok"); err != nil {
+	if err := n.SendEmailVerification(context.Background(), "a@b.com", "tok"); err != nil {
 		t.Fatalf("debug mode must allow delivery: %v", err)
 	}
 }

@@ -322,14 +322,14 @@ type mockNotifier struct {
 	verifySendErr error
 }
 
-func (n *mockNotifier) SendPasswordReset(to, resetToken string) error {
+func (n *mockNotifier) SendPasswordReset(ctx context.Context, to, resetToken string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.lastReset = resetToken
 	return nil
 }
 
-func (n *mockNotifier) SendEmailVerification(to, verifyToken string) error {
+func (n *mockNotifier) SendEmailVerification(ctx context.Context, to, verifyToken string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.verifySendErr != nil {

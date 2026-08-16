@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"os"
@@ -42,7 +43,7 @@ func NewConsoleNotifier(from string) *ConsoleNotifier {
 	return n
 }
 
-func (n *ConsoleNotifier) SendPasswordReset(to, resetToken string) error {
+func (n *ConsoleNotifier) SendPasswordReset(ctx context.Context, to, resetToken string) error {
 	if n.refuse {
 		return errConsoleTokensSuppressed
 	}
@@ -52,7 +53,7 @@ func (n *ConsoleNotifier) SendPasswordReset(to, resetToken string) error {
 
 // SendEmailVerification delivers the email-verification JWT so the user must
 // prove inbox control to self-verify (§1.1).
-func (n *ConsoleNotifier) SendEmailVerification(to, verifyToken string) error {
+func (n *ConsoleNotifier) SendEmailVerification(ctx context.Context, to, verifyToken string) error {
 	if n.refuse {
 		return errConsoleTokensSuppressed
 	}
