@@ -53,13 +53,6 @@ func (fakeAuthService) CompleteMFALogin(context.Context, services.CompleteMFALog
 	return services.TokenPair{}, services.UserProfile{}, nil
 }
 
-type fakeMFAService struct{ err error }
-
-func (f fakeMFAService) SendOTP(context.Context, services.OTPSendInput, string) error { return f.err }
-func (f fakeMFAService) VerifyOTP(context.Context, services.OTPVerifyInput, string) error {
-	return f.err
-}
-
 type fakeTOTPService struct{ err error }
 
 func (f fakeTOTPService) Enable(context.Context, uint, string) (string, string, error) {
@@ -96,8 +89,8 @@ func TestStatusForError(t *testing.T) {
 		err    error
 		status int
 	}{
-		{services.ErrInvalidCredentials, 401}, {services.ErrInvalidToken, 401}, {services.ErrInvalidOTP, 401},
-		{services.ErrOTPMaxAttempts, 429}, {services.ErrAccountLocked, 403}, {services.ErrAccountDisabled, 403},
+		{services.ErrInvalidCredentials, 401}, {services.ErrInvalidToken, 401}, {services.ErrInvalidCode, 401},
+		{services.ErrAccountLocked, 403}, {services.ErrAccountDisabled, 403},
 		{services.ErrEmailNotVerified, 403}, {services.ErrUserNotFound, 404}, {services.ErrSessionNotFound, 404},
 		{services.ErrEmailExists, 409},
 		{services.ErrUsernameExists, 409}, {services.ErrInvalidInput, 400}, {services.ErrPasswordTooWeak, 400},
@@ -139,8 +132,7 @@ func TestAuthHandlerBoundaryCases(t *testing.T) {
 
 func TestProtectedHandlersRejectMissingIdentity(t *testing.T) {
 	auth := NewAuthHandler(fakeAuthService{}, nil)
-	mfa := NewMFAHandler(fakeMFAService{}, nil, nil, 0)
-	for _, h := range []gin.HandlerFunc{auth.Me, auth.ChangePassword, auth.SetPassword, auth.LogoutAll, mfa.SendOTP, mfa.VerifyOTP} {
+	for _, h := range []gin.HandlerFunc{auth.Me, auth.ChangePassword, auth.SetPassword, auth.LogoutAll} {
 		w := serve(t, h, `{}`, nil)
 		if w.Code != http.StatusUnauthorized {
 			t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -218,25 +210,6 @@ func TestSetPassword_RequiresAccessToken(t *testing.T) {
 	}
 }
 
-func TestMFAHandlerBoundaryCases(t *testing.T) {
-	uid := uint(1)
-	for _, tc := range []struct {
-		name, body string
-		err        error
-		want       int
-	}{
-		{"malformed", `{`, nil, 400}, {"invalid purpose", `{"purpose":"bad"}`, nil, 400},
-		{"rate limited", `{"purpose":"login"}`, services.ErrRateLimited, 429}, {"success", `{"purpose":"login"}`, nil, 200},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := serve(t, NewMFAHandler(fakeMFAService{err: tc.err}, nil, nil, 0).SendOTP, tc.body, &uid)
-			if w.Code != tc.want {
-				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
-			}
-		})
-	}
-}
-
 func TestTOTPHandlers(t *testing.T) {
 	uid := uint(1)
 	for _, tc := range []struct {
@@ -247,16 +220,16 @@ func TestTOTPHandlers(t *testing.T) {
 	}{
 		{"enable", "", nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.EnableTOTP }},
 		{"verify malformed", "{", nil, 400, func(h *MFAHandler) gin.HandlerFunc { return h.VerifyTOTP }},
-		{"verify invalid", `{"code":"123456"}`, services.ErrInvalidOTP, 401, func(h *MFAHandler) gin.HandlerFunc { return h.VerifyTOTP }},
+		{"verify invalid", `{"code":"123456"}`, services.ErrInvalidCode, 401, func(h *MFAHandler) gin.HandlerFunc { return h.VerifyTOTP }},
 		{"validate", `{"code":"123456"}`, nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.ValidateTOTP }},
 		{"view malformed", "{", nil, 400, func(h *MFAHandler) gin.HandlerFunc { return h.ViewRecoveryCodes }},
-		{"view invalid", `{"code":"123456"}`, services.ErrInvalidOTP, 401, func(h *MFAHandler) gin.HandlerFunc { return h.ViewRecoveryCodes }},
+		{"view invalid", `{"code":"123456"}`, services.ErrInvalidCode, 401, func(h *MFAHandler) gin.HandlerFunc { return h.ViewRecoveryCodes }},
 		{"view", `{"code":"123456"}`, nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.ViewRecoveryCodes }},
 		{"regenerate", "", nil, 200, func(h *MFAHandler) gin.HandlerFunc { return h.RegenerateRecoveryCodes }},
-		{"regenerate invalid", "", services.ErrInvalidOTP, 401, func(h *MFAHandler) gin.HandlerFunc { return h.RegenerateRecoveryCodes }},
+		{"regenerate invalid", "", services.ErrInvalidCode, 401, func(h *MFAHandler) gin.HandlerFunc { return h.RegenerateRecoveryCodes }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: tc.err}, nil, 0)
+			h := NewMFAHandler(fakeTOTPService{err: tc.err}, nil, 0)
 			w := serve(t, tc.handler(h), tc.body, &uid)
 			if w.Code != tc.want {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -267,7 +240,7 @@ func TestTOTPHandlers(t *testing.T) {
 
 func TestTOTPHandlers_BodySizeGuard(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
 
 	// Body > 1 KiB should be rejected with 413.
 	bigBody := `{"code":"` + strings.Repeat("A", 2048) + `"}`
@@ -279,7 +252,7 @@ func TestTOTPHandlers_BodySizeGuard(t *testing.T) {
 
 func TestTOTPHandlers_EmptyBody(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
 
 	w := serve(t, h.ValidateTOTP, "", &uid)
 	if w.Code != http.StatusBadRequest {
@@ -288,7 +261,7 @@ func TestTOTPHandlers_EmptyBody(t *testing.T) {
 }
 
 func TestTOTPHandlers_MissingAuth(t *testing.T) {
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
 	for _, handler := range []gin.HandlerFunc{h.EnableTOTP, h.VerifyTOTP, h.ValidateTOTP, h.ViewRecoveryCodes, h.RegenerateRecoveryCodes} {
 		w := serve(t, handler, `{}`, nil)
 		if w.Code != http.StatusUnauthorized {
@@ -299,7 +272,7 @@ func TestTOTPHandlers_MissingAuth(t *testing.T) {
 
 func TestTOTPHandlers_RateLimited(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{err: services.ErrRateLimited}, nil, 0)
+	h := NewMFAHandler(fakeTOTPService{err: services.ErrRateLimited}, nil, 0)
 	w := serve(t, h.ValidateTOTP, `{"code":"123456"}`, &uid)
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("expected 429, got %d body=%s", w.Code, w.Body.String())
@@ -311,7 +284,7 @@ func TestTOTPHandlers_RateLimited(t *testing.T) {
 func TestViewRecoveryCodes_HandlerIssuesSudoToken(t *testing.T) {
 	uid := uint(1)
 	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, jwtMgr, 15*time.Minute)
+	h := NewMFAHandler(fakeTOTPService{}, jwtMgr, 15*time.Minute)
 
 	w := serve(t, h.ViewRecoveryCodes, `{"code":"123456"}`, &uid)
 	if w.Code != http.StatusOK {
@@ -347,7 +320,7 @@ func TestViewRecoveryCodes_HandlerIssuesSudoToken(t *testing.T) {
 
 func TestViewRecoveryCodes_NoJWTManager_OmitsSudoToken(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
 
 	w := serve(t, h.ViewRecoveryCodes, `{"code":"123456"}`, &uid)
 	if w.Code != http.StatusOK {
@@ -363,7 +336,7 @@ func TestViewRecoveryCodes_NoJWTManager_OmitsSudoToken(t *testing.T) {
 
 func TestRegenerateRecoveryCodes_HandlerReturnsFreshSet(t *testing.T) {
 	uid := uint(1)
-	h := NewMFAHandler(fakeMFAService{}, fakeTOTPService{}, nil, 0)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
 
 	w := serve(t, h.RegenerateRecoveryCodes, "", &uid)
 	if w.Code != http.StatusOK {

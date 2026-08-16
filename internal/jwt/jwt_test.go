@@ -84,20 +84,3 @@ func TestHashToken_DeterministicAndOpaque(t *testing.T) {
 		t.Error("hash must not equal input")
 	}
 }
-
-func TestGenerateNumericOTP_Length(t *testing.T) {
-	for _, n := range []int{4, 6, 8} {
-		code, err := hash.GenerateNumericOTP(n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(code) != n {
-			t.Errorf("length %d: got %d", n, len(code))
-		}
-		for _, c := range code {
-			if c < '0' || c > '9' {
-				t.Errorf("non-digit in OTP: %q", code)
-			}
-		}
-	}
-}

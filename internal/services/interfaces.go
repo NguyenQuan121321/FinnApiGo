@@ -48,16 +48,6 @@ type RefreshTokenRepo interface {
 	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
 }
 
-// OtpRepo abstracts persistence for OTP codes.
-type OtpRepo interface {
-	Create(ctx context.Context, o *models.OtpCode) error
-	FindLatestActive(ctx context.Context, userID uint, purpose string) (*models.OtpCode, error)
-	Update(ctx context.Context, o *models.OtpCode) error
-	MarkUsed(ctx context.Context, o *models.OtpCode) error
-	IncrementAttempts(ctx context.Context, o *models.OtpCode) (int, error)
-	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
-}
-
 type TOTPRepo interface {
 	Upsert(context.Context, *models.TOTPDevice) error
 	FindByUserID(context.Context, uint) (*models.TOTPDevice, error)
@@ -100,13 +90,12 @@ type UsedTokenRepo interface {
 	IsUsed(ctx context.Context, jti string) (bool, error)
 }
 
-// ---- Notifier (for OTP / reset / verify emails) ----
+// ---- Notifier (for reset / verify emails) ----
 
-// Notifier delivers OTP / password-reset / email-verification messages.
+// Notifier delivers password-reset / email-verification messages.
 // The default implementation logs to console; swap for an SMTP-backed one
 // in production.
 type Notifier interface {
-	SendOTP(to, code, purpose string) error
 	SendPasswordReset(to, resetToken string) error
 	SendEmailVerification(to, verifyToken string) error
 }

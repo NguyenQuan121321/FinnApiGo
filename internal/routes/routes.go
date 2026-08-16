@@ -134,10 +134,8 @@ func Register(deps Deps) *gin.Engine {
 		mfaPending.POST("/login-verify", deps.RateLimit.Handler(), deps.Auth.CompleteMFALogin)
 	}
 
-	// ---- MFA sub-group (authenticated) ----
+	// ---- MFA sub-group (authenticated; TOTP is the only MFA mechanism) ----
 	mfa := authed.Group("/mfa")
-	mfa.POST("/send-otp", deps.RateLimit.Handler(), deps.MFA.SendOTP)
-	mfa.POST("/verify-otp", deps.MFA.VerifyOTP)
 
 	// ---- TOTP endpoints (rate-limited + concurrency-gated) ----
 	// The concurrency limiter (deps.TOTPCluster) is installed BEFORE the
@@ -167,7 +165,7 @@ func Register(deps Deps) *gin.Engine {
 
 // requestLogger is a minimal access log (§4 — token redaction). It logs
 // method, path, status, latency, and request-ID but NEVER logs the
-// Authorization header, refreshToken, token, password, or otp code fields.
+// Authorization header, refreshToken, token, password, or code fields.
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()

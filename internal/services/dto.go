@@ -46,19 +46,6 @@ type EmailVerifyInput struct {
 	Token string
 }
 
-// OTPSendInput is the input to MFAService.SendOTP.
-type OTPSendInput struct {
-	UserID  uint
-	Purpose string
-}
-
-// OTPVerifyInput is the input to MFAService.VerifyOTP.
-type OTPVerifyInput struct {
-	UserID  uint
-	Code    string
-	Purpose string
-}
-
 // TokenPair is returned by login / refresh-token — the access + refresh pair.
 type TokenPair struct {
 	AccessToken  string    `json:"accessToken"`

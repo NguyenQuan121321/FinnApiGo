@@ -125,14 +125,14 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 	}
 	if d == nil {
 		s.recordFailure(ctx, userID, "no pending device")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	if d.Enabled {
 		return nil, ErrInvalidInput
 	}
 	if !totpValid(code, d.Secret) {
 		s.recordFailure(ctx, userID, "bad enable code")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	d.Enabled = true
 	if err = s.repo.Upsert(ctx, d); err != nil {
@@ -163,14 +163,14 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 	}
 	if d == nil || !d.Enabled {
 		s.recordFailure(ctx, userID, "device not enabled")
-		return ErrInvalidOTP
+		return ErrInvalidCode
 	}
 
 	// ---- 6-digit TOTP fast path ----
 	if len(code) == 6 {
 		if !totpValid(code, d.Secret) {
 			s.recordFailure(ctx, userID, "bad totp code")
-			return ErrInvalidOTP
+			return ErrInvalidCode
 		}
 		// Replay protection: a code may only be used once within its validity
 		// window. SetNX is atomic, so concurrent identical submissions collide
@@ -179,7 +179,7 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 			// Same code reused within the window — treat as a failed
 			// attempt so repeat offenders hit the brute-force cap.
 			s.recordFailure(ctx, userID, "totp replay")
-			return ErrInvalidOTP
+			return ErrInvalidCode
 		}
 		s.recordSuccess(ctx, userID, models.AuditEventTOTPValidated, "totp validated")
 		return nil
@@ -201,7 +201,7 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 		}
 	}
 	s.recordFailure(ctx, userID, "bad recovery code")
-	return ErrInvalidOTP
+	return ErrInvalidCode
 }
 
 // ViewRecoveryCodes re-displays the user's saved (unused) recovery codes.
@@ -220,15 +220,15 @@ func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code s
 	}
 	if d == nil || !d.Enabled {
 		s.recordFailure(ctx, userID, "view codes: device not enabled")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	if len(code) != 6 || !totpValid(code, d.Secret) {
 		s.recordFailure(ctx, userID, "view codes: bad totp code")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	if !s.replayGuard(ctx, userID, code) {
 		s.recordFailure(ctx, userID, "view codes: totp replay")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	rows, err := s.repo.ActiveRecoveryCodes(ctx, userID)
 	if err != nil {
@@ -264,7 +264,7 @@ func (s *TOTPService) RegenerateRecoveryCodes(ctx context.Context, userID uint) 
 	}
 	if d == nil || !d.Enabled {
 		s.recordFailure(ctx, userID, "regenerate codes: device not enabled")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	codes, err := s.newRecoveryCodes(ctx, userID)
 	if err != nil {
@@ -361,7 +361,7 @@ func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail str
 // IsTOTPError reports whether err is one of the TOTP-related sentinel errors,
 // so callers (e.g. handlers) can branch without importing the sentinels.
 func IsTOTPError(err error) bool {
-	return errors.Is(err, ErrInvalidOTP) || errors.Is(err, ErrRateLimited)
+	return errors.Is(err, ErrInvalidCode) || errors.Is(err, ErrRateLimited)
 }
 
 // totpValid validates a 6-digit code against the secret with a ±1 step skew to

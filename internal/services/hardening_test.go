@@ -246,35 +246,6 @@ func TestLogin_RequireEmailVerified(t *testing.T) {
 }
 
 // =====================================================================
-// §5 — per-user OTP send velocity limit
-// =====================================================================
-
-func TestSendOTP_PerUserVelocityLimit(t *testing.T) {
-	otps := newMockOtpRepo()
-	users := newMockUserRepo()
-	audit := &mockAuditRepo{}
-	notify := &mockNotifier{}
-	store := newMockStore()
-	_ = users.Create(context.Background(), &models.User{ID: 1, Email: "a@example.com", IsActive: true})
-	cfg := config.AuthConfig{OTPTTL: 5 * time.Minute, OTPLength: 6, OTPMaxAttempts: 5}
-	rlCfg := config.RateLimitConfig{OTPSendPerUserMax: 2, OTPSendWindow: time.Hour}
-	svc := NewMFAService(otps, users, audit, notify, cfg, rlCfg, store)
-
-	// First 2 sends succeed.
-	if err := svc.SendOTP(context.Background(), OTPSendInput{UserID: 1, Purpose: models.OTPPurposeLogin}, "ip"); err != nil {
-		t.Fatalf("send 1 failed: %v", err)
-	}
-	if err := svc.SendOTP(context.Background(), OTPSendInput{UserID: 1, Purpose: models.OTPPurposeLogin}, "ip"); err != nil {
-		t.Fatalf("send 2 failed: %v", err)
-	}
-	// 3rd send is throttled.
-	err := svc.SendOTP(context.Background(), OTPSendInput{UserID: 1, Purpose: models.OTPPurposeLogin}, "ip")
-	if !errors.Is(err, ErrRateLimited) {
-		t.Errorf("expected ErrRateLimited on 3rd OTP send, got %v", err)
-	}
-}
-
-// =====================================================================
 // §1.7 — duplicate-key error mapping (errors.As *mysql.MySQLError)
 // =====================================================================
 

@@ -13,7 +13,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/models"
 )
 
-// newTestAuthService builds an AuthService wired to in-memory mocks. OTP/lockout
+// newTestAuthService builds an AuthService wired to in-memory mocks. Lockout
 // knobs are tuned short for test speed.
 func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier) {
 	users := newMockUserRepo()
@@ -26,9 +26,6 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 	cfg := config.AuthConfig{
 		MaxLoginAttempts:     5,
 		LoginLockoutDuration: 15 * time.Minute,
-		OTPTTL:               5 * time.Minute,
-		OTPLength:            6,
-		OTPMaxAttempts:       5,
 	}
 
 	rateLimitCfg := config.RateLimitConfig{
@@ -38,8 +35,6 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 		LoginWindow:              time.Minute, // tests are unaffected by velocity
 		RegisterPerIPMax:         10000,       // limiters; tight-limit tests build a
 		RegisterWindow:           time.Hour,   // dedicated service.
-		OTPSendPerUserMax:        10000,
-		OTPSendWindow:            time.Minute,
 		VerifyResendPerEmailMax:  10000,
 		VerifyResendWindow:       time.Minute,
 		VerifyResendGlobalMax:    10000,
@@ -516,7 +511,7 @@ func TestResendVerifyEmail_RateLimited(t *testing.T) {
 		VerifyResendWindow:      time.Minute,
 	}
 	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr,
-		config.AuthConfig{OTPLength: 6}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil)
+		config.AuthConfig{}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil)
 
 	if _, err := svc.Register(context.Background(), RegisterInput{
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
@@ -563,7 +558,7 @@ func newResendTestService(rlCfg config.RateLimitConfig, users *mockUserRepo, aud
 	return NewAuthService(
 		users, newMockTokenRepo(), newMockUsedTokenRepo(), audit, newMockStore(),
 		jwt.NewJWTManager("test-secret", "test-issuer"),
-		config.AuthConfig{OTPLength: 6}, rlCfg,
+		config.AuthConfig{}, rlCfg,
 		config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil,
 	)
 }
@@ -1138,13 +1133,13 @@ func TestCompleteMFALogin_WrongCode(t *testing.T) {
 	// ... rest of test
 
 	// Set up mock to reject the code.
-	totpVal.err = ErrInvalidOTP
+	totpVal.err = ErrInvalidCode
 
 	_, _, err := svc.CompleteMFALogin(context.Background(), CompleteMFALoginInput{
 		UserID: 1, Code: "000000", IP: "1.2.3.4", UA: "agent",
 	})
-	if !errors.Is(err, ErrInvalidOTP) {
-		t.Errorf("expected ErrInvalidOTP, got %v", err)
+	if !errors.Is(err, ErrInvalidCode) {
+		t.Errorf("expected ErrInvalidCode, got %v", err)
 	}
 }
 

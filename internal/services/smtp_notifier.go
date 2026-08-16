@@ -54,11 +54,6 @@ func (n *SMTPNotifier) send(to, subject, body string) error {
 	return smtp.SendMail(addr, auth, n.from, []string{to}, []byte(msg))
 }
 
-func (n *SMTPNotifier) SendOTP(to, code, purpose string) error {
-	return n.send(to, "Your "+purpose+" code",
-		"Your verification code is: "+code+"\n\nIt expires in a few minutes. If you did not request it, ignore this email.")
-}
-
 func (n *SMTPNotifier) SendPasswordReset(to, resetToken string) error {
 	return n.send(to, "Password reset",
 		"Use this token to reset your password: "+resetToken+"\n\nIf you did not request a reset, ignore this email.")

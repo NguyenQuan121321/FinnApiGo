@@ -4,7 +4,7 @@ import "time"
 
 // UsedToken records a consumed single-use JWT (reset-password / verify-email)
 // by its jti (JWT ID). It enforces single-use semantics for otherwise-stateless
-// JWTs, mirroring the OTP MarkUsed guarantee (§1.8).
+// JWTs, mirroring the refresh-token single-use guarantee (§1.8).
 //
 // Lookups also go through the Store abstraction (SetNX) for the hot path, so
 // multi-instance correctness doesn't depend on DB row visibility timing; this

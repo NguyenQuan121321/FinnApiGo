@@ -53,7 +53,7 @@ func run() error {
 
 	// --- Migrations (explicit; safe to run on every boot) ---
 	if err := db.AutoMigrate(
-		&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
+		&models.User{}, &models.RefreshToken{},
 		&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
 		&models.OAuthIdentity{},
 	); err != nil {
@@ -63,7 +63,6 @@ func run() error {
 	// --- Repositories ---
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
-	otpRepo := repositories.NewOtpRepository(db)
 	baseAuditRepo := repositories.NewAuditRepository(db)
 	auditRepo := services.NewAsyncAuditWriter(baseAuditRepo, baseAuditRepo, cfg.Audit)
 	defer auditRepo.Close()
@@ -133,7 +132,6 @@ func run() error {
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
 		totpRepo, totpSvc,
 	)
-	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
 
 	// --- Google OAuth (endpoints only registered when fully configured) ---
 	var oauthHandler *handlers.OAuthHandler
@@ -148,7 +146,7 @@ func run() error {
 
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
-	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc, jwtMgr, cfg.JWT.SudoTTL)
+	mfaHandler := handlers.NewMFAHandler(totpSvc, jwtMgr, cfg.JWT.SudoTTL)
 	sessionHandler := handlers.NewSessionHandler(authSvc)
 
 	// --- Rate limiter ---
@@ -182,8 +180,8 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Run token/OTP/used-token cleanup in the background.
-	go startCleanup(tokenRepo, otpRepo, usedTokenRepo)
+	// Run token/used-token cleanup in the background.
+	go startCleanup(tokenRepo, usedTokenRepo)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -234,11 +232,10 @@ func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 	return sum[:], nil
 }
 
-// startCleanup periodically purges expired refresh tokens, OTP codes, and
-// used-token rows. Failures are logged but never fatal.
+// startCleanup periodically purges expired refresh tokens and used-token
+// rows. Failures are logged but never fatal.
 func startCleanup(
 	tokenRepo *repositories.RefreshTokenRepository,
-	otpRepo *repositories.OtpRepository,
 	usedTokenRepo *repositories.UsedTokenRepository,
 ) {
 	ticker := time.NewTicker(15 * time.Minute)
@@ -248,9 +245,6 @@ func startCleanup(
 		now := time.Now()
 		if n, err := tokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			log.Printf("cleanup: purged %d expired refresh tokens", n)
-		}
-		if n, err := otpRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
-			log.Printf("cleanup: purged %d expired/used OTPs", n)
 		}
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			log.Printf("cleanup: purged %d expired used tokens", n)

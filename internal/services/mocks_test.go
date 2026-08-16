@@ -248,72 +248,6 @@ func (m *mockTokenRepo) PurgeExpired(ctx context.Context, before time.Time) (int
 	return 0, nil
 }
 
-// ---- mock OTP repo ----
-
-type mockOtpRepo struct {
-	mu     sync.Mutex
-	rows   []*models.OtpCode
-	nextID uint
-}
-
-func newMockOtpRepo() *mockOtpRepo { return &mockOtpRepo{} }
-
-func (m *mockOtpRepo) Create(ctx context.Context, o *models.OtpCode) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.nextID++
-	o.ID = m.nextID
-	o.CreatedAt = time.Now()
-	m.rows = append(m.rows, o)
-	return nil
-}
-
-func (m *mockOtpRepo) FindLatestActive(ctx context.Context, userID uint, purpose string) (*models.OtpCode, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var latest *models.OtpCode
-	for _, o := range m.rows {
-		if o.UserID == userID && o.Purpose == purpose && !o.IsUsed && time.Now().Before(o.ExpiresAt) {
-			if latest == nil || o.CreatedAt.After(latest.CreatedAt) {
-				c := *o
-				latest = &c
-			}
-		}
-	}
-	return latest, nil
-}
-
-func (m *mockOtpRepo) Update(ctx context.Context, o *models.OtpCode) error { return nil }
-
-func (m *mockOtpRepo) MarkUsed(ctx context.Context, o *models.OtpCode) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, row := range m.rows {
-		if row.ID == o.ID {
-			row.IsUsed = true
-			o.IsUsed = true
-		}
-	}
-	return nil
-}
-
-func (m *mockOtpRepo) IncrementAttempts(ctx context.Context, o *models.OtpCode) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, row := range m.rows {
-		if row.ID == o.ID {
-			row.AttemptCount++
-			o.AttemptCount = row.AttemptCount
-			return row.AttemptCount, nil
-		}
-	}
-	return 0, nil
-}
-
-func (m *mockOtpRepo) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
-	return 0, nil
-}
-
 // ---- mock used-token repo (§1.8) ----
 
 type mockUsedTokenRepo struct {
@@ -376,20 +310,10 @@ func (m *mockAuditRepo) count() int {
 // ---- mock notifier (captures last sent values) ----
 
 type mockNotifier struct {
-	mu             sync.Mutex
-	lastOTPCode    string
-	lastOTPPurpose string
-	lastReset      string
-	lastVerify     string
-	verifySendErr  error
-}
-
-func (n *mockNotifier) SendOTP(to, code, purpose string) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.lastOTPCode = code
-	n.lastOTPPurpose = purpose
-	return nil
+	mu            sync.Mutex
+	lastReset     string
+	lastVerify    string
+	verifySendErr error
 }
 
 func (n *mockNotifier) SendPasswordReset(to, resetToken string) error {

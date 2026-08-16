@@ -19,11 +19,6 @@ func NewConsoleNotifier(from string) *ConsoleNotifier {
 	return &ConsoleNotifier{From: from}
 }
 
-func (n *ConsoleNotifier) SendOTP(to, code, purpose string) error {
-	log.Printf("[MAIL] to=%s from=%s subject=Your %s code  CODE=%s", to, n.From, purpose, code)
-	return nil
-}
-
 func (n *ConsoleNotifier) SendPasswordReset(to, resetToken string) error {
 	log.Printf("[MAIL] to=%s from=%s subject=Password reset  RESET_TOKEN=%s", to, n.From, resetToken)
 	return nil

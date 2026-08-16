@@ -75,9 +75,6 @@ type AuthConfig struct {
 	// MaxLockoutMultiplier caps the exponential backoff applied to repeat
 	// offenders (§3). E.g. base 15m * min(lockoutCount, MaxLockoutMultiplier).
 	MaxLockoutMultiplier int
-	OTPTTL               time.Duration
-	OTPLength            int
-	OTPMaxAttempts       int
 	// RequireEmailVerified gates sensitive actions behind is_email_verified
 	// (§2). When true, login is still allowed (UX) but document it as a policy.
 	RequireEmailVerified bool
@@ -109,11 +106,8 @@ type RateLimitConfig struct {
 	// Registration velocity (§2): max registrations per IP/subnet per hour.
 	RegisterPerIPMax int
 	RegisterWindow   time.Duration
-	// OTP send limiter per user (§5).
-	OTPSendPerUserMax int
-	OTPSendWindow     time.Duration
 	// Verify-email resend limiter per email (§3): stops an attacker
-	// email-bombing one inbox by rotating IPs. Mirrors OTPSendPerUserMax.
+	// email-bombing one inbox by rotating IPs.
 	VerifyResendPerEmailMax int
 	VerifyResendWindow      time.Duration
 	// Global resend volume cap (§7.6.3 anti-automation): hard circuit-breaker on
@@ -222,9 +216,6 @@ func Load() (*Config, error) {
 			MaxLoginAttempts:     envInt("MAX_LOGIN_ATTEMPTS", 5),
 			LoginLockoutDuration: envDuration("LOGIN_LOCKOUT_DURATION", 15*time.Minute),
 			MaxLockoutMultiplier: envInt("MAX_LOCKOUT_MULTIPLIER", 4),
-			OTPTTL:               envDuration("OTP_TTL", 5*time.Minute),
-			OTPLength:            envInt("OTP_LENGTH", 6),
-			OTPMaxAttempts:       envInt("OTP_MAX_ATTEMPTS", 5),
 			RequireEmailVerified: envBool("REQUIRE_EMAIL_VERIFIED", false),
 			TOTPMaxAttempts:      envInt("TOTP_MAX_ATTEMPTS", 5),
 			TOTPAttemptWindow:    envDuration("TOTP_ATTEMPT_WINDOW", 5*time.Minute),
@@ -239,8 +230,6 @@ func Load() (*Config, error) {
 			LoginWindow:              envDuration("LOGIN_WINDOW", 1*time.Minute),
 			RegisterPerIPMax:         envInt("REGISTER_PER_IP_MAX", 5),
 			RegisterWindow:           envDuration("REGISTER_WINDOW", 1*time.Hour),
-			OTPSendPerUserMax:        envInt("OTP_SEND_PER_USER_MAX", 5),
-			OTPSendWindow:            envDuration("OTP_SEND_WINDOW", 1*time.Hour),
 			VerifyResendPerEmailMax:  envInt("VERIFY_RESEND_PER_EMAIL_MAX", 3),
 			VerifyResendWindow:       envDuration("VERIFY_RESEND_WINDOW", 1*time.Hour),
 			VerifyResendGlobalMax:    envInt("VERIFY_RESEND_GLOBAL_MAX", 100),

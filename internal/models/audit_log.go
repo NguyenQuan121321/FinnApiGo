@@ -10,8 +10,6 @@ const (
 	AuditEventPasswordChanged          = "password_changed"
 	AuditEventPasswordReset            = "password_reset"
 	AuditEventPasswordSet              = "password_set" // first password established (OAuth-only account)
-	AuditEventOTPSent                  = "otp_sent"
-	AuditEventOTPVerified              = "otp_verified"
 	AuditEventRefreshToken             = "refresh_token"
 	AuditEventTokenReuse               = "token_reuse"
 	AuditEventVerifyResendBlocked      = "verify_resend_blocked" // §7.6.3 — anti-automation event

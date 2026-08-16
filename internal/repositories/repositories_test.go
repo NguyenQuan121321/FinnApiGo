@@ -21,7 +21,7 @@ func testDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.OtpCode{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -227,31 +227,11 @@ func TestRefreshTokenRepository_TouchLastActive(t *testing.T) {
 	}
 }
 
-func TestOtpAndUsedTokenRepositories(t *testing.T) {
+func TestUsedTokenRepository(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	u := testUser(t, db)
-	otpRepo := NewOtpRepository(db)
 	usedRepo := NewUsedTokenRepository(db)
-	active := &models.OtpCode{UserID: u.ID, CodeHash: "a", Purpose: models.OTPPurposeLogin, ExpiresAt: time.Now().Add(time.Hour)}
-	if err := otpRepo.Create(ctx, active); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := otpRepo.FindLatestActive(ctx, u.ID, models.OTPPurposeLogin); err != nil || got == nil {
-		t.Fatalf("active=%+v err=%v", got, err)
-	}
-	if n, err := otpRepo.IncrementAttempts(ctx, active); err != nil || n != 1 {
-		t.Fatalf("attempts=%d err=%v", n, err)
-	}
-	if err := otpRepo.MarkUsed(ctx, active); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := otpRepo.FindLatestActive(ctx, u.ID, models.OTPPurposeLogin); err != nil || got != nil {
-		t.Fatalf("used=%+v err=%v", got, err)
-	}
-	if n, err := otpRepo.PurgeExpired(ctx, time.Now()); err != nil || n != 1 {
-		t.Fatalf("purge=%d err=%v", n, err)
-	}
 	if marked, err := usedRepo.MarkUsed(ctx, "jti", "verify", u.ID, time.Now().Add(time.Hour)); err != nil || !marked {
 		t.Fatalf("marked=%t err=%v", marked, err)
 	}
@@ -268,7 +248,7 @@ func TestAuditRepository(t *testing.T) {
 	db := testDB(t)
 	repo := NewAuditRepository(db)
 	repo.Record(ctx, &models.AuditLog{Event: models.AuditEventLogin, Success: true})
-	if n := repo.BatchInsert(ctx, []*models.AuditLog{{Event: models.AuditEventLogout}, {Event: models.AuditEventOTPSent}}); n != 2 {
+	if n := repo.BatchInsert(ctx, []*models.AuditLog{{Event: models.AuditEventLogout}, {Event: models.AuditEventTOTPEnabled}}); n != 2 {
 		t.Fatalf("BatchInsert=%d", n)
 	}
 	var count int64

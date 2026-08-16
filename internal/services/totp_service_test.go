@@ -133,8 +133,8 @@ func TestTOTPService_VerifyEnable_BadCode(t *testing.T) {
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 	_, err := svc.VerifyEnable(context.Background(), 1, "000000")
-	if !errors.Is(err, ErrInvalidOTP) {
-		t.Fatalf("expected ErrInvalidOTP, got %v", err)
+	if !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode, got %v", err)
 	}
 }
 
@@ -156,8 +156,8 @@ func TestTOTPService_VerifyEnable_NoDevice(t *testing.T) {
 	svc := newTestTOTPService(repo, nil, nil)
 
 	_, err := svc.VerifyEnable(context.Background(), 99, "000000")
-	if !errors.Is(err, ErrInvalidOTP) {
-		t.Fatalf("expected ErrInvalidOTP, got %v", err)
+	if !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode, got %v", err)
 	}
 }
 
@@ -214,8 +214,8 @@ func TestTOTPService_Validate_ReplayPrevention(t *testing.T) {
 	if replayErr == nil {
 		t.Fatal("replayed code should be rejected")
 	}
-	if !errors.Is(replayErr, ErrInvalidOTP) {
-		t.Fatalf("expected ErrInvalidOTP for replay, got %v", replayErr)
+	if !errors.Is(replayErr, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode for replay, got %v", replayErr)
 	}
 }
 
@@ -342,7 +342,7 @@ func TestTOTPService_BruteForce_NoStore_NoOp(t *testing.T) {
 
 	_, _ = enableAndVerify(t, svc, 1)
 
-	// Many wrong codes should still return ErrInvalidOTP, not ErrRateLimited.
+	// Many wrong codes should still return ErrInvalidCode, not ErrRateLimited.
 	for i := 0; i < 20; i++ {
 		err := svc.Validate(context.Background(), 1, "000000")
 		if err == nil {
@@ -357,8 +357,8 @@ func TestTOTPService_BruteForce_NoStore_NoOp(t *testing.T) {
 // ---------- IsTOTPError ----------
 
 func TestIsTOTPError(t *testing.T) {
-	if !IsTOTPError(ErrInvalidOTP) {
-		t.Fatal("should match ErrInvalidOTP")
+	if !IsTOTPError(ErrInvalidCode) {
+		t.Fatal("should match ErrInvalidCode")
 	}
 	if !IsTOTPError(ErrRateLimited) {
 		t.Fatal("should match ErrRateLimited")
@@ -401,8 +401,8 @@ func TestTOTPService_ViewRecoveryCodes_BadCode(t *testing.T) {
 	_, _ = enableAndVerify(t, svc, 1)
 
 	_, err := svc.ViewRecoveryCodes(context.Background(), 1, "000000")
-	if !errors.Is(err, ErrInvalidOTP) {
-		t.Fatalf("expected ErrInvalidOTP, got %v", err)
+	if !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode, got %v", err)
 	}
 }
 
@@ -414,8 +414,8 @@ func TestTOTPService_ViewRecoveryCodes_RecoveryCodeNotAllowed(t *testing.T) {
 
 	// A recovery code must NOT unlock viewing the saved codes.
 	_, err := svc.ViewRecoveryCodes(context.Background(), 1, codes[0])
-	if !errors.Is(err, ErrInvalidOTP) {
-		t.Fatalf("expected ErrInvalidOTP for recovery code, got %v", err)
+	if !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode for recovery code, got %v", err)
 	}
 }
 
@@ -430,7 +430,7 @@ func TestTOTPService_ViewRecoveryCodes_ReplayRejected(t *testing.T) {
 	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, code); err != nil {
 		t.Fatalf("first view should succeed: %v", err)
 	}
-	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, code); !errors.Is(err, ErrInvalidOTP) {
+	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, code); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("replayed TOTP code should be rejected, got %v", err)
 	}
 }
@@ -441,8 +441,8 @@ func TestTOTPService_ViewRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 
-	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, "123456"); !errors.Is(err, ErrInvalidOTP) {
-		t.Fatalf("expected ErrInvalidOTP for unverified device, got %v", err)
+	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, "123456"); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode for unverified device, got %v", err)
 	}
 }
 
@@ -564,8 +564,8 @@ func TestTOTPService_RegenerateRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 
-	if _, err := svc.RegenerateRecoveryCodes(context.Background(), 1); !errors.Is(err, ErrInvalidOTP) {
-		t.Fatalf("expected ErrInvalidOTP for unverified device, got %v", err)
+	if _, err := svc.RegenerateRecoveryCodes(context.Background(), 1); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode for unverified device, got %v", err)
 	}
 }
 
