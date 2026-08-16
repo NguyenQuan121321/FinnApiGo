@@ -72,6 +72,7 @@ func TestRegister_Success(t *testing.T) {
 	u, _ := users.FindByEmail(context.Background(), "alice@example.com")
 	if u == nil {
 		t.Fatal("user not persisted")
+		return
 	}
 	if u.Password == "Password1" {
 		t.Error("password must be hashed, not stored in plaintext")
@@ -883,6 +884,7 @@ func TestRefresh_MetadataPopulated(t *testing.T) {
 	tokens.mu.Unlock()
 	if loginRT == nil {
 		t.Fatal("no active session found after login")
+		return
 	}
 	if loginRT.IPAddress != "10.0.0.1" {
 		t.Errorf("ip = %q, want %q", loginRT.IPAddress, "10.0.0.1")
@@ -911,6 +913,7 @@ func TestRefresh_MetadataPopulated(t *testing.T) {
 	tokens.mu.Unlock()
 	if refreshRT == nil {
 		t.Fatal("no active session found after refresh")
+		return
 	}
 	if refreshRT.IPAddress != "20.0.0.2" {
 		t.Errorf("refreshed session ip = %q, want %q", refreshRT.IPAddress, "20.0.0.2")
