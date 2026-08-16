@@ -140,3 +140,27 @@ func TestRedisStore_FailClosedOnOutage(t *testing.T) {
 		t.Error("SetNX on dead redis must return false (fail closed)")
 	}
 }
+
+// TestRedisStore_IncrBy_FixedWindowNotExtended_C4 — C4 regression: the
+// counter's TTL must be anchored at the FIRST increment of a window; later
+// increments (including denied requests) must not extend it. Otherwise a
+// client that keeps hammering stays 429-locked indefinitely.
+func TestRedisStore_IncrBy_FixedWindowNotExtended_C4(t *testing.T) {
+	s, mr, cleanup := newMiniredisStore(t)
+	defer cleanup()
+
+	s.IncrBy("c", 1, time.Second) // window starts at t=0
+	mr.FastForward(700 * time.Millisecond)
+	if n := s.IncrBy("c", 1, time.Second); n != 2 {
+		t.Fatalf("mid-window IncrBy = %d, want 2", n)
+	}
+	if n := s.IncrBy("c", 1, time.Second); n != 3 {
+		t.Fatalf("mid-window IncrBy = %d, want 3", n)
+	}
+	// 1.1s after the FIRST increment — the window must have elapsed even
+	// though later increments happened at t=0.7s.
+	mr.FastForward(400 * time.Millisecond)
+	if n := s.IncrBy("c", 1, time.Second); n != 1 {
+		t.Errorf("counter must reset one window after the first increment, got %d", n)
+	}
+}

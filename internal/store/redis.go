@@ -10,12 +10,15 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// incrWithExpireScript atomically increments a counter and (re)applies its
-// TTL, closing the crash window that existed between a plain INCRBY and a
-// separate PEXPIRE.
+// incrWithExpireScript atomically increments a counter and anchors its TTL at
+// the FIRST increment of a window: PEXPIRE fires only when the increment just
+// created the key (n == delta). Later increments — including requests the
+// limiter denies — never extend the window, so a counter always resets even
+// under sustained traffic (C4); before, every call refreshed the TTL and a
+// hammering client stayed 429-locked indefinitely.
 var incrWithExpireScript = redis.NewScript(`
     local n = redis.call('INCRBY', KEYS[1], ARGV[1])
-    if tonumber(ARGV[2]) > 0 then
+    if tonumber(ARGV[2]) > 0 and n == tonumber(ARGV[1]) then
         redis.call('PEXPIRE', KEYS[1], ARGV[2])
     end
     return n
@@ -34,8 +37,9 @@ var incrWithExpireScript = redis.NewScript(`
 //   - Get: missing/expired key → (nil,false).
 //   - Set: ttl<=0 means no expiry.
 //   - SetNX: writes only if absent; atomic via SET NX PX.
-//   - IncrBy: missing treated as 0; ttl is refreshed on every call so the
-//     window is sliding (matches the in-memory behavior tests rely on).
+//   - IncrBy: missing treated as 0; the TTL anchors at the first increment
+//     of a window (fixed-window semantics) and is NOT refreshed by later
+//     increments (matches the in-memory behavior tests rely on).
 type RedisStore struct {
 	client redis.UniversalClient
 	ctx    context.Context // background ctx for fire-and-forget calls
@@ -97,9 +101,11 @@ func (s *RedisStore) SetNX(key string, value any, ttl time.Duration) bool {
 }
 
 // IncrBy atomically adds delta to the numeric value at key (missing = 0) and
-// returns the new value. The TTL is refreshed on every call so the window is
-// sliding, matching InMemoryStore's behavior; INCRBY+PEXPIRE run as one Lua
-// script so the counter never survives without its window.
+// returns the new value. The TTL is anchored at the first increment of a
+// window — later increments do not extend it, so the counter always resets
+// one TTL after the window started (fixed-window semantics, C4). INCRBY and
+// the conditional PEXPIRE run as one Lua script, so the counter never
+// survives without its window.
 //
 // On Redis failure it returns math.MaxInt64 — fail CLOSED. That value exceeds
 // any configured threshold, so every rate limiter reading it DENIES the

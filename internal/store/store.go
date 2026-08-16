@@ -26,8 +26,9 @@ import (
 //     this is the atomic primitive used for single-use token enforcement and
 //     for fixed-window counters.
 //   - IncrBy atomically adds delta to a numeric value (treating missing keys
-//     as 0) and returns the new value. Used for rate-limit counters and
-//     per-account/per-IP attempt counters.
+//     as 0) and returns the new value. The TTL anchors at the first increment
+//     of a window and is not refreshed by later increments — fixed-window
+//     semantics for rate limits and attempt counters.
 //   - Delete removes a key (idempotent).
 type Store interface {
 	Get(key string) (any, bool)
@@ -70,12 +71,16 @@ func WithClock(now func() time.Time) Option {
 
 // NewInMemoryStore constructs an InMemoryStore and starts a background sweeper
 // that purges expired keys every sweepInterval. Pass 0 to disable the sweeper
-// (expired entries are still reaped lazily on Get/SetNX/IncrBy).
-func NewInMemoryStore(sweepInterval time.Duration) *InMemoryStore {
+// (expired entries are still reaped lazily on Get/SetNX/IncrBy). Options such
+// as WithClock apply before the sweeper starts.
+func NewInMemoryStore(sweepInterval time.Duration, opts ...Option) *InMemoryStore {
 	s := &InMemoryStore{
 		data:   make(map[string]entry),
 		now:    time.Now,
 		stopCh: make(chan struct{}),
+	}
+	for _, o := range opts {
+		o(s)
 	}
 	if sweepInterval > 0 {
 		go s.sweepLoop(sweepInterval)
@@ -126,25 +131,36 @@ func (s *InMemoryStore) SetNX(key string, value any, ttl time.Duration) bool {
 	return true
 }
 
-// IncrBy atomically adds delta to the numeric value at key (missing = 0),
-// applies ttl (refreshed on every call), and returns the new value.
+// IncrBy atomically adds delta to the numeric value at key (missing = 0) and
+// returns the new value. The TTL anchors at the first increment of a window
+// and is NOT refreshed by later increments (fixed-window semantics) — a
+// counter always resets one TTL after the window began, even under sustained
+// traffic. Used for rate-limit counters and per-account/per-IP attempt
+// counters.
 func (s *InMemoryStore) IncrBy(key string, delta int64, ttl time.Duration) int64 {
 	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.data[key]
+	if ok && e.expired(now) {
+		ok = false // window elapsed — a fresh one starts below
+	}
+	if ok {
+		var current int64
+		if n, isInt := e.value.(int64); isInt {
+			current = n
+		}
+		// Keep the existing expiry: the window is anchored at its first
+		// increment and must not be extended by later ones.
+		s.data[key] = entry{value: current + delta, exp: e.exp}
+		return current + delta
+	}
 	var exp time.Time
 	if ttl > 0 {
 		exp = now.Add(ttl)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var current int64
-	if e, ok := s.data[key]; ok && !e.expired(now) {
-		if n, ok := e.value.(int64); ok {
-			current = n
-		}
-	}
-	current += delta
-	s.data[key] = entry{value: current, exp: exp}
-	return current
+	s.data[key] = entry{value: delta, exp: exp}
+	return delta
 }
 
 // Delete removes key (idempotent).
