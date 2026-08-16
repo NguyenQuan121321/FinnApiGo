@@ -49,6 +49,14 @@ type ChangePasswordRequest struct {
 	NewPassword string `json:"newPassword" binding:"required,min=8,max=128"`
 }
 
+// SetPasswordRequest is the body of POST /api/v1/auth/set-password. There is
+// deliberately NO oldPassword field: this endpoint serves Google-OAuth-only
+// accounts that have never had a password. The service layer hard-rejects
+// (409) any account that already has one.
+type SetPasswordRequest struct {
+	Password string `json:"password" binding:"required,min=8,max=128"`
+}
+
 type VerifyEmailRequest struct {
 	Token string `json:"token" binding:"required"`
 }

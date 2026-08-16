@@ -21,6 +21,7 @@ type AuthService interface {
 	ForgotPassword(context.Context, string, string) error
 	ResetPassword(context.Context, services.ResetPasswordInput, string) error
 	ChangePassword(context.Context, services.ChangePasswordInput, string) error
+	SetPassword(context.Context, uint, string, string) error
 	Me(context.Context, uint) (services.UserProfile, error)
 	VerifyEmail(context.Context, services.EmailVerifyInput) error
 	ResendVerifyEmail(context.Context, string, string) error
@@ -201,6 +202,28 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 	response.Respond(c, http.StatusOK, "password changed; all sessions signed out", nil)
+}
+
+// SetPassword lets a Google-OAuth-only account establish a first password.
+// Unlike ChangePassword there is no oldPassword to verify — but the service
+// layer independently re-checks that no password exists yet and rejects with
+// 409 otherwise, so this can never act as a change-password bypass.
+func (h *AuthHandler) SetPassword(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req SetPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+	if err := h.svc.SetPassword(c.Request.Context(), uid, req.Password, clientIP(c)); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "password has been set", nil)
 }
 
 func (h *AuthHandler) Me(c *gin.Context) {

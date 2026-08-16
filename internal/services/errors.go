@@ -32,6 +32,9 @@ var (
 	// 409
 	ErrEmailExists    = errors.New("email already registered")
 	ErrUsernameExists = errors.New("username already taken")
+	// set-password guard: the account already has a usable password and must
+	// go through change-password (which verifies the old one) instead.
+	ErrPasswordAlreadySet = errors.New("password already set; use change-password instead")
 
 	// 422 / policy
 	ErrDisposableEmail = errors.New("disposable email addresses are not allowed")

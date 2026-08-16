@@ -179,6 +179,7 @@ Base path: `/api/v1/auth`. MFA endpoints are nested under `/api/v1/auth/mfa`.
 | POST | `/logout` | Yes | Revoke one refresh token |
 | POST | `/logout-all` | Yes | Revoke every refresh token for the current user |
 | POST | `/change-password` | Yes | Change password (revokes all sessions afterward) |
+| POST | `/set-password` | Yes | Establish a first password for Google-OAuth-only accounts (409 if a password already exists) |
 | GET | `/me` | Yes | Current user's profile |
 
 ### MFA
