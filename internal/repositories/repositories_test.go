@@ -320,3 +320,39 @@ func TestTOTPRepository_MarkRecoveryCodeUsedCAS_C2(t *testing.T) {
 		t.Error("row must remain used after rejected second mark")
 	}
 }
+
+// TestUserRepository_IncrementFailedAttempts_Atomic_C3 — C3 regression: the
+// increment must happen in SQL (read-modify-write from a stale struct loses
+// concurrent failures, letting an attacker evade the lockout threshold). Two
+// racers starting from the SAME snapshot must both land in the DB.
+func TestUserRepository_IncrementFailedAttempts_Atomic_C3(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	repo := NewUserRepository(db)
+
+	// Both racers hold a snapshot taken before either wrote (the exact state
+	// two parallel failed logins produce).
+	stale1, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale2, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.IncrementFailedAttempts(ctx, stale1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.IncrementFailedAttempts(ctx, stale2, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FailedLoginAttempts != 2 {
+		t.Fatalf("parallel failures must both persist: attempts=%d, want 2", got.FailedLoginAttempts)
+	}
+}

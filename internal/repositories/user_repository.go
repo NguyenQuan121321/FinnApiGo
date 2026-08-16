@@ -75,11 +75,14 @@ func (r *UserRepository) UpdatePassword(ctx context.Context, user *models.User, 
 }
 
 // IncrementFailedAttempts bumps the failed-login counter and (when lockUntil
-// is non-nil) sets the lockout timestamp.
+// is non-nil) sets the lockout timestamp. The counter bump runs as SQL
+// (failed_login_attempts + 1), never as a value computed from the in-memory
+// struct — parallel failures from stale snapshots must all persist or the
+// lockout threshold can be evaded (C3).
 func (r *UserRepository) IncrementFailedAttempts(ctx context.Context, user *models.User, lockUntil *time.Time) error {
 	user.FailedLoginAttempts++
 	updates := map[string]interface{}{
-		"failed_login_attempts": user.FailedLoginAttempts,
+		"failed_login_attempts": gorm.Expr("failed_login_attempts + 1"),
 	}
 	if lockUntil != nil {
 		user.LockedUntil = lockUntil
