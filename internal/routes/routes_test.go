@@ -161,3 +161,31 @@ func issueTestToken(t *testing.T, uid uint) string {
 	}
 	return tok
 }
+
+// TestRoutes_TokenEndpointsRateLimited_A5 — A5 regression: the public
+// token-consumption endpoints (/refresh-token, /reset-password,
+// /verify-email) must sit behind the rate limiter. With burst=1 the second
+// immediate request must 429 before reaching the (nil-service) handler.
+func TestRoutes_TokenEndpointsRateLimited_A5(t *testing.T) {
+	for _, path := range []string{"/api/v1/auth/refresh-token", "/api/v1/auth/reset-password", "/api/v1/auth/verify-email"} {
+		t.Run(path, func(t *testing.T) {
+			router := Register(Deps{
+				Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil, nil, 0),
+				JWT:       jwt.NewJWTManager("test-secret", "test"),
+				RateLimit: middleware.NewRateLimiter(100, 1, time.Minute),
+			})
+			hit := func() int {
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, nil))
+				return w.Code
+			}
+			first := hit()
+			if first == http.StatusTooManyRequests {
+				t.Fatalf("first request must not be rate limited, got %d", first)
+			}
+			if second := hit(); second != http.StatusTooManyRequests {
+				t.Fatalf("second request within burst=1 window must 429, got %d", second)
+			}
+		})
+	}
+}

@@ -90,10 +90,13 @@ func Register(deps Deps) *gin.Engine {
 	// ---- Public core-auth endpoints (no auth middleware) ----
 	auth.POST("/register", deps.RateLimit.Handler(), deps.Auth.Register)
 	auth.POST("/login", deps.RateLimit.Handler(), deps.Auth.Login)
-	auth.POST("/refresh-token", deps.Auth.Refresh)
+	// A5 — refresh/reset/verify are unauthenticated token-consumption
+	// endpoints: without the limiter they are free brute-force / replay
+	// surfaces (single-use guards reject, but the requests still cost CPU).
+	auth.POST("/refresh-token", deps.RateLimit.Handler(), deps.Auth.Refresh)
 	auth.POST("/forgot-password", deps.RateLimit.Handler(), deps.Auth.ForgotPassword)
-	auth.POST("/reset-password", deps.Auth.ResetPassword)
-	auth.POST("/verify-email", deps.Auth.VerifyEmail)
+	auth.POST("/reset-password", deps.RateLimit.Handler(), deps.Auth.ResetPassword)
+	auth.POST("/verify-email", deps.RateLimit.Handler(), deps.Auth.VerifyEmail)
 	auth.POST("/resend-verification", deps.RateLimit.Handler(), deps.Auth.ResendVerifyEmail)
 
 	// ---- Google OAuth 2.0 / OpenID Connect ----
