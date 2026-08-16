@@ -32,6 +32,9 @@ type Deps struct {
 	// X-Real-IP, so c.ClientIP() resolves the real client IP securely behind a
 	// reverse proxy (Cloudflare/Nginx). Empty trusts no one (RemoteAddr only).
 	TrustedProxies []string
+	// HSTSSeconds enables Strict-Transport-Security on HTTPS responses when
+	// > 0 (A3). Ignored for plain-HTTP requests.
+	HSTSSeconds int
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -49,6 +52,10 @@ func Register(deps Deps) *gin.Engine {
 	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
+	// A3 — baseline security headers on every response: nosniff, no-referrer,
+	// Cache-Control: no-store (this is an auth API — nothing is cacheable),
+	// and HSTS on HTTPS responses when configured.
+	r.Use(middleware.SecurityHeaders(deps.HSTSSeconds))
 	// §5 — global body-size limit. Applied here (before any route group) so it
 	// covers every endpoint. Must be in Register, not after, because Gin
 	// middlewares registered via Use apply only to routes defined afterwards.

@@ -35,6 +35,10 @@ type ServerConfig struct {
 	// Set this to your load balancer / Cloudflare / Nginx egress CIDRs in
 	// production so the app resolves the real client IP for session metadata.
 	TrustedProxies []string
+	// HSTSSeconds (env HSTS_SECONDS) enables the Strict-Transport-Security
+	// header on HTTPS responses when > 0 (A3). 0 (default) sends no HSTS —
+	// correct for plain-HTTP dev setups behind no TLS terminator.
+	HSTSSeconds int
 }
 
 type DBConfig struct {
@@ -199,6 +203,7 @@ func Load() (*Config, error) {
 			Port:           env("SERVER_PORT", "8080"),
 			GinMode:        env("GIN_MODE", "debug"),
 			TrustedProxies: envCSV("TRUSTED_PROXIES"),
+			HSTSSeconds:    envInt("HSTS_SECONDS", 0),
 		},
 		DB: DBConfig{
 			Host:         env("DB_HOST", "127.0.0.1"),

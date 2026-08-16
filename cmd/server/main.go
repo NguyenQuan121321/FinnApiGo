@@ -182,6 +182,7 @@ func run() error {
 		DB:                  db,
 		MaxRequestBodyBytes: cfg.Security.MaxRequestBodyBytes,
 		TrustedProxies:      cfg.Server.TrustedProxies,
+		HSTSSeconds:         cfg.Server.HSTSSeconds,
 	})
 
 	// --- HTTP server with graceful shutdown ---

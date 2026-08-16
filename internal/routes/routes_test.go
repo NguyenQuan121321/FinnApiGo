@@ -3,6 +3,7 @@ package routes
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"net/http"
@@ -187,5 +188,49 @@ func TestRoutes_TokenEndpointsRateLimited_A5(t *testing.T) {
 				t.Fatalf("second request within burst=1 window must 429, got %d", second)
 			}
 		})
+	}
+}
+
+// TestRoutes_SecurityHeadersOnTokenBearingResponse_A3 — A3: responses from
+// the auth API must carry X-Content-Type-Options: nosniff and
+// Cache-Control: no-store (HSTS additionally on HTTPS requests when
+// configured). Asserted on /login, which mints tokens.
+func TestRoutes_SecurityHeadersOnTokenBearingResponse_A3(t *testing.T) {
+	router := Register(Deps{
+		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil, nil, 0),
+		JWT:         jwt.NewJWTManager("test-secret", "test"),
+		RateLimit:   middleware.NewRateLimiter(100, 100, time.Minute),
+		HSTSSeconds: 31536000,
+	})
+
+	// Plain-HTTP request: nosniff + no-store, but no HSTS.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
+		strings.NewReader(`{"email":"a@example.com","password":"Password1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(w, req)
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+	if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", got)
+	}
+	if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("HSTS must not be sent over plain HTTP, got %q", got)
+	}
+
+	// HTTPS request (X-Forwarded-Proto from a trusted peer): HSTS appears.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
+		strings.NewReader(`{"email":"a@example.com","password":"Password1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.TLS = &tls.ConnectionState{}
+	router.ServeHTTP(w, req)
+	if got := w.Header().Get("Strict-Transport-Security"); got != "max-age=31536000" {
+		t.Errorf("Strict-Transport-Security = %q, want max-age=31536000", got)
 	}
 }
