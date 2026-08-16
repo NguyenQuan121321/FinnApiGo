@@ -40,6 +40,10 @@ type RefreshTokenRepo interface {
 	// session (defense against IDOR). Returns ErrSessionNotFound (via gorm's
 	// ErrRecordNotFound sentinel → mapped by the service) when no row matches.
 	RevokeByID(ctx context.Context, id, userID uint) error
+	// Revoke marks the given token row revoked via compare-and-set
+	// (WHERE revoked = false). It returns repositories.ErrTokenAlreadyRevoked
+	// when the row was already revoked by a concurrent request — callers must
+	// treat that as token reuse, not as an error to propagate.
 	Revoke(ctx context.Context, rt *models.RefreshToken) error
 	RevokeAllForUser(ctx context.Context, userID uint) error
 	// TouchLastActive bumps last_active_at for the token — called whenever the

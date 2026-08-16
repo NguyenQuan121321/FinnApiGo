@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,8 +18,16 @@ import (
 // newTestAuthService builds an AuthService wired to in-memory mocks. Lockout
 // knobs are tuned short for test speed.
 func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier) {
-	users := newMockUserRepo()
 	tokens := newMockTokenRepo()
+	svc, users, audit, notify := newTestAuthServiceWithTokens(tokens)
+	return svc, users, tokens, audit, notify
+}
+
+// newTestAuthServiceWithTokens is newTestAuthService with a caller-supplied
+// RefreshTokenRepo, for concurrency tests that must control the read→revoke
+// race window deterministically.
+func newTestAuthServiceWithTokens(tokens RefreshTokenRepo) (*AuthService, *mockUserRepo, *mockAuditRepo, *mockNotifier) {
+	users := newMockUserRepo()
 	usedTokens := newMockUsedTokenRepo()
 	store := newMockStore()
 	audit := &mockAuditRepo{}
@@ -27,7 +37,6 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 		MaxLoginAttempts:     5,
 		LoginLockoutDuration: 15 * time.Minute,
 	}
-
 	rateLimitCfg := config.RateLimitConfig{
 		RPS:                      100,
 		Burst:                    20,
@@ -47,9 +56,8 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
-
 	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil)
-	return svc, users, tokens, audit, notify
+	return svc, users, audit, notify
 }
 
 // ----- Register -----
@@ -295,6 +303,85 @@ func TestRefresh_ReuseDetection_RevokesAll(t *testing.T) {
 	}
 	if events[0].Detail != "revoked refresh token presented" {
 		t.Errorf("detail = %q", events[0].Detail)
+	}
+}
+
+// barrierTokenRepo holds every concurrent FindByHash call for one target hash
+// until all racers have READ their clone, then releases them together — each
+// racer is thereby guaranteed a pre-revoke copy of the token row. It
+// reproduces the read→revoke TOCTOU window deterministically instead of
+// relying on scheduler luck.
+type barrierTokenRepo struct {
+	*mockTokenRepo
+	target   string
+	racers   int32
+	arrived  int32
+	released chan struct{}
+}
+
+func (b *barrierTokenRepo) FindByHash(ctx context.Context, hash string) (*models.RefreshToken, error) {
+	rt, err := b.mockTokenRepo.FindByHash(ctx, hash)
+	if hash == b.target && atomic.AddInt32(&b.arrived, 1) <= b.racers {
+		if atomic.LoadInt32(&b.arrived) == b.racers {
+			close(b.released)
+		}
+		<-b.released
+	}
+	return rt, err
+}
+
+// TestRefresh_ConcurrentDoubleRefresh_ExactlyOneSuccess_C1 — C1 regression:
+// concurrent refreshes presenting the SAME token must yield exactly one
+// success; every loser must be rejected as reuse (which also triggers
+// revoke-all). The barrier guarantees every racer reads the token as
+// un-revoked, which before the CAS fix made ALL of them rotate successfully.
+func TestRefresh_ConcurrentDoubleRefresh_ExactlyOneSuccess_C1(t *testing.T) {
+	inner := newMockTokenRepo()
+	tokens := &barrierTokenRepo{mockTokenRepo: inner, racers: 8, released: make(chan struct{})}
+	svc, _, audit, _ := newTestAuthServiceWithTokens(tokens)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pair, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "ip", "test-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Login itself called FindByHash? No — but Refresh does; arm the barrier to
+	// the token issued by Login now that its hash is computable.
+	tokens.target = hash.HashToken(pair.RefreshToken)
+
+	const racers = 8
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := svc.Refresh(context.Background(), pair.RefreshToken, "ip", "test-agent"); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("exactly one concurrent refresh must succeed, got %d/%d", got, racers)
+	}
+	// The losers' reuse handling must be observable: token_reuse audits and a
+	// fully revoked session set (the winner's fresh token is dead too).
+	if events := audit.byEvent("token_reuse"); len(events) == 0 {
+		t.Error("expected token_reuse audit events from the losing racers")
+	}
+	_, err = svc.Refresh(context.Background(), pair.RefreshToken, "ip", "test-agent")
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("expected ErrInvalidToken after revoke-all, got %v", err)
 	}
 }
 

@@ -6,6 +6,7 @@ package repositories
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -174,6 +175,34 @@ func TestRefreshTokenRepository_FindActiveByUser(t *testing.T) {
 	}
 	if rows[1].TokenHash != "b" {
 		t.Errorf("second row hash = %q, want %q", rows[1].TokenHash, "b")
+	}
+}
+
+// TestRefreshTokenRepository_RevokeCAS_C1 — C1 regression: Revoke must be a
+// compare-and-set. Revoking an already-revoked row must report
+// ErrTokenAlreadyRevoked instead of silently succeeding, so a concurrent
+// double-refresh of one token can be detected as reuse.
+func TestRefreshTokenRepository_RevokeCAS_C1(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	repo := NewRefreshTokenRepository(db)
+	rt := &models.RefreshToken{UserID: u.ID, TokenHash: "cas", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := repo.Create(ctx, rt); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Revoke(ctx, rt); err != nil {
+		t.Fatalf("first Revoke err=%v", err)
+	}
+	if err := repo.Revoke(ctx, rt); !errors.Is(err, ErrTokenAlreadyRevoked) {
+		t.Fatalf("second Revoke must return ErrTokenAlreadyRevoked, got %v", err)
+	}
+	got, err := repo.FindByHash(ctx, "cas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Revoked {
+		t.Error("row must remain revoked after rejected second Revoke")
 	}
 }
 

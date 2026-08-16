@@ -65,9 +65,22 @@ func (r *RefreshTokenRepository) RevokeByID(ctx context.Context, id, userID uint
 	return nil
 }
 
+// Revoke marks the token revoked via compare-and-set: the UPDATE only matches
+// while revoked = false, so of two concurrent refreshes of the same token
+// exactly one wins. RowsAffected == 0 means the row was already revoked (or
+// purged) — returned as ErrTokenAlreadyRevoked so callers detect the reuse.
 func (r *RefreshTokenRepository) Revoke(ctx context.Context, rt *models.RefreshToken) error {
 	rt.Revoked = true
-	return r.db.WithContext(ctx).Model(rt).Update("revoked", true).Error
+	res := r.db.WithContext(ctx).Model(rt).
+		Where("revoked = ?", false).
+		Update("revoked", true)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return ErrTokenAlreadyRevoked
+	}
+	return nil
 }
 
 // RevokeAllForUser revokes every active refresh token for a user — used after

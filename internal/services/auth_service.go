@@ -17,6 +17,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
@@ -337,7 +338,9 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken, ip string) error
 	if rt == nil || rt.Revoked {
 		return nil
 	}
-	if err := s.tokens.Revoke(ctx, rt); err != nil {
+	// A concurrent revocation (rotation race) also leaves the session dead —
+	// Logout's contract is idempotent, so that outcome is still success here.
+	if err := s.tokens.Revoke(ctx, rt); err != nil && !errors.Is(err, repositories.ErrTokenAlreadyRevoked) {
 		return err
 	}
 	uid := rt.UserID
@@ -405,8 +408,18 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 	}
 
 	// Rotate: revoke the old, issue a new pair (carrying the caller's device
-	// metadata so the "sessions" list reflects the rotating device).
+	// metadata so the "sessions" list reflects the rotating device). Revoke is
+	// a compare-and-set — losing the race means a concurrent request already
+	// consumed this token, which is reuse by definition (C1).
 	if err := s.tokens.Revoke(ctx, rt); err != nil {
+		if errors.Is(err, repositories.ErrTokenAlreadyRevoked) {
+			_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
+			s.audits.Record(ctx, &models.AuditLog{
+				UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
+				IPAddress: ip, Success: false, Detail: "concurrent refresh lost revoke race",
+			})
+			return TokenPair{}, ErrInvalidToken
+		}
 		return TokenPair{}, err
 	}
 	pair, err := s.issueTokenPair(ctx, user, ip, ua)

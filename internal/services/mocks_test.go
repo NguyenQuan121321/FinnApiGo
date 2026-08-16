@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/repositories"
 )
 
 // ---- In-memory mock repositories for unit tests ----
@@ -172,13 +173,18 @@ func (m *mockTokenRepo) FindByHash(ctx context.Context, hash string) (*models.Re
 	return nil, nil
 }
 
+// Revoke mirrors the GORM repository's compare-and-set: revoking an
+// already-revoked (or unknown) row reports repositories.ErrTokenAlreadyRevoked
+// so the service's reuse-detection path is exercised identically to production.
 func (m *mockTokenRepo) Revoke(ctx context.Context, rt *models.RefreshToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if row, ok := m.rows[rt.ID]; ok {
-		row.Revoked = true
-		rt.Revoked = true
+	row, ok := m.rows[rt.ID]
+	if !ok || row.Revoked {
+		return repositories.ErrTokenAlreadyRevoked
 	}
+	row.Revoked = true
+	rt.Revoked = true
 	return nil
 }
 
