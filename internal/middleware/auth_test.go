@@ -1,9 +1,12 @@
 package middleware
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -140,4 +143,39 @@ func TestRequireRole_RejectsMismatchedRole(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// TestAuthMiddleware_DenialsAreLogged_A4 — A4 regression: every 401 from
+// AuthMiddleware must emit exactly one slog.Warn carrying the client IP and
+// request id so denials are triageable.
+func TestAuthMiddleware_DenialsAreLogged_A4(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	r := gin.New()
+	r.Use(func(c *gin.Context) { c.Set("request_id", "rid-a4-test"); c.Next() })
+	r.GET("/p", AuthMiddleware(jwtMgr), func(c *gin.Context) { c.Status(200) })
+
+	req := httptest.NewRequest(http.MethodGet, "/p", nil)
+	req.Header.Set("Authorization", "Bearer not-a-jwt")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != 401 {
+		t.Fatalf("status = %d, want 401", w.Code)
+	}
+	out := logs.String()
+	if n := strings.Count(out, `level=WARN msg="auth denied"`); n != 1 {
+		t.Fatalf("expected exactly one auth-denied warn, got %d in: %s", n, out)
+	}
+	if !strings.Contains(out, "client_ip=") {
+		t.Error("denial log must carry client_ip")
+	}
+	if !strings.Contains(out, "rid=rid-a4-test") {
+		t.Error("denial log must carry the request id")
+	}
 }

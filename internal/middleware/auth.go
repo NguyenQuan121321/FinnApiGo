@@ -3,6 +3,7 @@
 package middleware
 
 import (
+	"log/slog"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -19,7 +20,26 @@ const (
 	// CtxSudoUntil holds the expiry time.Time of the verified sudo token —
 	// set by SudoMiddleware, which must run after AuthMiddleware.
 	CtxSudoUntil = "sudo_until"
+	// CtxRequestID is the request identifier set by the routes request
+	// logger; AuthMiddleware copies it onto its denial log lines.
+	CtxRequestID = "request_id"
 )
+
+// denyAuth answers 401 and makes the denial observable: one slog.Warn per
+// rejection carrying the client IP and request id (A4) — before, middleware
+// 401s were invisible to operators triaging credential-stuffing incidents.
+func denyAuth(c *gin.Context, msg string) {
+	rid, _ := c.Get(CtxRequestID)
+	ridStr, _ := rid.(string)
+	slog.Warn("auth denied",
+		"reason", msg,
+		"client_ip", c.ClientIP(),
+		"rid", ridStr,
+		"path", c.Request.URL.Path,
+	)
+	response.Respond(c, 401, msg, nil)
+	c.Abort()
+}
 
 // AuthMiddleware verifies the Bearer JWT from the Authorization header.
 // On success it stores user_id / role / email into the Gin context for
@@ -28,26 +48,22 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
-			response.Respond(c, 401, "missing authorization header", nil)
-			c.Abort()
+			denyAuth(c, "missing authorization header")
 			return
 		}
 		parts := strings.SplitN(header, " ", 2)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
-			response.Respond(c, 401, "invalid authorization header format", nil)
-			c.Abort()
+			denyAuth(c, "invalid authorization header format")
 			return
 		}
 		claims, err := jwtMgr.Verify(parts[1])
 		if err != nil {
-			response.Respond(c, 401, "invalid or expired token", nil)
-			c.Abort()
+			denyAuth(c, "invalid or expired token")
 			return
 		}
 		// Only genuine access tokens are accepted on protected endpoints.
 		if claims.Type != jwt.TokenTypeAccess {
-			response.Respond(c, 401, "invalid token type", nil)
-			c.Abort()
+			denyAuth(c, "invalid token type")
 			return
 		}
 		c.Set(CtxUserID, claims.UserID)

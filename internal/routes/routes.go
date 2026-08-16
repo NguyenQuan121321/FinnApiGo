@@ -183,7 +183,9 @@ func requestLogger() gin.HandlerFunc {
 
 		c.Next()
 
-		// Log after request completes — safe fields only.
+		// Log after request completes — safe fields only. client_ip is set
+		// after Next() so middlewares that ran earlier (auth denials in
+		// particular) read the same resolution via c.ClientIP() themselves.
 		status := c.Writer.Status()
 		latency := time.Since(start)
 		slog.Info("request",
@@ -191,6 +193,7 @@ func requestLogger() gin.HandlerFunc {
 			"path", c.Request.URL.Path,
 			"status", status,
 			"latency_ms", latency.Milliseconds(),
+			"client_ip", c.ClientIP(),
 			"rid", requestID,
 		)
 	}
