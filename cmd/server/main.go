@@ -9,7 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -32,8 +32,14 @@ import (
 )
 
 func main() {
+	// Structured JSON logs for the whole process — every slog call (including
+	// from libraries that use the default logger) emits machine-parseable JSON.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
 	if err := run(); err != nil {
-		log.Fatalf("finnapigo: %v", err)
+		slog.Error("finnapigo fatal", "err", err)
+		os.Exit(1)
 	}
 }
 
@@ -49,7 +55,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("database connected: %s:%s/%s", cfg.DB.Host, cfg.DB.Port, cfg.DB.Name)
+	slog.Info("database connected", "host", cfg.DB.Host, "port", cfg.DB.Port, "db", cfg.DB.Name)
 
 	// --- Migrations (explicit; safe to run on every boot) ---
 	if err := db.AutoMigrate(
@@ -76,7 +82,7 @@ func run() error {
 	// --- Store (in-memory default; Redis when REDIS_URL set) ---
 	// §1.3/§7 — rate-limit counters, velocity windows, and jti tracking are
 	// shared across instances when Redis is configured; otherwise in-memory.
-	var kvStore services.StoreProvider
+	var kvStore store.Store
 	if cfg.Redis.URL != "" {
 		redisStore, closeRedis, err := store.NewRedisStoreFromURL(cfg.Redis.URL)
 		if err != nil {
@@ -84,12 +90,12 @@ func run() error {
 		}
 		defer func() { _ = closeRedis() }()
 		kvStore = redisStore
-		log.Println("store: Redis-backed (shared across instances)")
+		slog.Info("store: Redis-backed (shared across instances)")
 	} else {
 		memStore := store.NewInMemoryStore(5 * time.Minute)
 		defer memStore.Close()
 		kvStore = memStore
-		log.Println("store: in-memory (single-instance mode)")
+		slog.Info("store: in-memory (single-instance mode)")
 	}
 
 	// --- JWT ---
@@ -101,21 +107,20 @@ func run() error {
 	var notifier services.Notifier
 	if smtpNotif.Enabled() {
 		notifier = smtpNotif
-		log.Println("email: SMTP notifier enabled")
+		slog.Info("email: SMTP notifier enabled")
 	} else {
 		notifier = services.NewConsoleNotifier(cfg.SMTP.From)
-		log.Println("email: SMTP_HOST not set — using console notifier (tokens logged to stdout)")
+		slog.Warn("email: SMTP_HOST not set — using console notifier (tokens logged to stdout)")
 	}
 
 	// --- CAPTCHA verifier (§2: off by default) ---
 	var captchaVerifier services.CaptchaVerifier // nil = NoOp in handler
-	switch cfg.Captcha.Provider {
-	case "turnstile":
+	if cfg.Captcha.Provider == "turnstile" {
 		if cfg.Captcha.Secret == "" {
-			log.Println("captcha: CAPTCHA_PROVIDER=turnstile but CAPTCHA_SECRET is empty — CAPTCHA disabled")
+			slog.Warn("captcha: CAPTCHA_PROVIDER=turnstile but CAPTCHA_SECRET is empty — CAPTCHA disabled")
 		} else {
 			captchaVerifier = services.NewTurnstileVerifier(cfg.Captcha.Secret)
-			log.Println("captcha: Turnstile verifier enabled")
+			slog.Info("captcha: Turnstile verifier enabled")
 		}
 	}
 
@@ -148,9 +153,9 @@ func run() error {
 		gVerifier := services.NewProductionGoogleVerifier(cfg.GoogleOAuth.ClientID)
 		oauthSvc := services.NewOAuthService(userRepo, oauthIdentityRepo, kvStore, authSvc, gVerifier, gClient)
 		oauthHandler = handlers.NewOAuthHandler(oauthSvc)
-		log.Println("oauth: Google sign-in enabled")
+		slog.Info("oauth: Google sign-in enabled")
 	} else {
-		log.Println("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
+		slog.Info("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
 	}
 
 	// --- Handlers ---
@@ -194,7 +199,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("server listening on :%s (mode=%s)", cfg.Server.Port, cfg.Server.GinMode)
+		slog.Info("server listening", "port", cfg.Server.Port, "mode", cfg.Server.GinMode)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -205,9 +210,9 @@ func run() error {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case <-stop:
-		log.Println("shutdown signal received")
+		slog.Info("shutdown signal received")
 	case err := <-errCh:
-		log.Printf("server error: %v", err)
+		slog.Error("server error", "err", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -217,7 +222,7 @@ func run() error {
 	// Flush resources in dependency order: the async audit writer drains its
 	// buffer into the DB first, then the DB pool itself is closed. Closing in
 	// the reverse order would drop buffered audit rows.
-	log.Println("flushing resources...")
+	slog.Info("flushing resources")
 	auditRepo.Close()
 	if sqlDB, derr := db.DB(); derr == nil {
 		_ = sqlDB.Close()
@@ -226,7 +231,7 @@ func run() error {
 	if err != nil {
 		return errors.Join(errors.New("graceful shutdown failed"), err)
 	}
-	log.Println("server stopped cleanly")
+	slog.Info("server stopped cleanly")
 	return nil
 }
 
@@ -247,7 +252,7 @@ func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 	if cfg.JWT.Secret == "" {
 		return nil, errors.New("cannot derive recovery-code key: JWT_SECRET is empty")
 	}
-	log.Println("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
+	slog.Warn("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
 	sum := sha256.Sum256([]byte(cfg.JWT.Secret + ":finnapigo:recovery-codes:v1"))
 	return sum[:], nil
 }
@@ -264,10 +269,10 @@ func startCleanup(
 	for range ticker.C {
 		now := time.Now()
 		if n, err := tokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
-			log.Printf("cleanup: purged %d expired refresh tokens", n)
+			slog.Info("cleanup: purged expired refresh tokens", "count", n)
 		}
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
-			log.Printf("cleanup: purged %d expired used tokens", n)
+			slog.Info("cleanup: purged expired used tokens", "count", n)
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/store"
 )
 
 // testEncryptor builds the AES-256-GCM encryptor used for sealing recovery
@@ -34,7 +35,7 @@ func testEncKey() []byte {
 
 // newTestTOTPService builds a TOTPService with sensible test defaults. Pass
 // nil for store/audits to disable those subsystems.
-func newTestTOTPService(t *testing.T, repo TOTPRepo, store StoreProvider, audits AuditRepo, cfgOverrides ...config.AuthConfig) *TOTPService {
+func newTestTOTPService(t *testing.T, repo TOTPRepo, kv store.Store, audits AuditRepo, cfgOverrides ...config.AuthConfig) *TOTPService {
 	cfg := config.AuthConfig{
 		TOTPMaxAttempts:   5,
 		TOTPAttemptWindow: 5 * time.Minute,
@@ -44,7 +45,7 @@ func newTestTOTPService(t *testing.T, repo TOTPRepo, store StoreProvider, audits
 	if len(cfgOverrides) > 0 {
 		cfg = cfgOverrides[0]
 	}
-	return NewTOTPService(repo, store, audits, "TestIssuer", cfg, testEncryptor(t))
+	return NewTOTPService(repo, kv, audits, "TestIssuer", cfg, testEncryptor(t))
 }
 
 // enableAndVerify is a test helper that runs Enable then VerifyEnable, returning

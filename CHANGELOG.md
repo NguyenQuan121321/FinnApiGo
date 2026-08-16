@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+- Removed the legacy email-OTP MFA feature entirely (model, repository, service, `/mfa/send-otp`, `/mfa/verify-otp`, OTP config knobs). TOTP is the only MFA mechanism.
+
+### Security
+- Redis store now fails CLOSED: `IncrBy` returns `math.MaxInt64` on Redis errors so every rate limiter denies instead of failing open; `SetNX` returns false. INCRBY+PEXPIRE run as one atomic Lua script.
+- Request IDs are UUIDv4 (the previous generator's last 8 chars were always `00000000`).
+- `recordFailedLogin` logs `IncrementFailedAttempts` failures instead of silently dropping them (silent failures meant lockouts never triggered).
+- New `DB_TLS` config appends `&tls=...` to the MySQL DSN for encrypted DB connections.
+
+### Performance
+- AES-256-GCM cipher block is computed once at startup (`crypto.Encryptor`) instead of per Encrypt/Decrypt call.
+- In-memory store sweeper deletes expired keys in bounded batches (1000) instead of holding the global lock across the whole map.
+- Fixed an off-by-one that rejected request bodies of exactly 1 KiB on sonic-bound TOTP endpoints.
+- Graceful shutdown now drains the async audit writer before closing the DB pool (ordered flush).
+
+### Quality
+- Structured logging via `log/slog` with a JSON default handler; request logs emit method/path/status/latency_ms/rid as fields.
+- Audit write and batch-insert failures are logged instead of silently dropped.
+- Hardened `.golangci.yml` (gosec, gocritic, exhaustive, nilerr, errorlint, unused, ineffassign) — 0 issues.
+- Removed the services-local `StoreProvider` interface; services now consume `store.Store` directly so the KV contract has one definition.
+
 ## [1.6] - 2026-08-07
 
 ### Security

@@ -1,7 +1,7 @@
 package services
 
 import (
-	"log"
+	"log/slog"
 )
 
 // ConsoleNotifier is the default Notifier implementation: it logs messages to
@@ -20,13 +20,13 @@ func NewConsoleNotifier(from string) *ConsoleNotifier {
 }
 
 func (n *ConsoleNotifier) SendPasswordReset(to, resetToken string) error {
-	log.Printf("[MAIL] to=%s from=%s subject=Password reset  RESET_TOKEN=%s", to, n.From, resetToken)
+	slog.Info("[MAIL]", "to", to, "from", n.From, "subject", "Password reset", "reset_token", resetToken)
 	return nil
 }
 
 // SendEmailVerification delivers the email-verification JWT so the user must
 // prove inbox control to self-verify (§1.1).
 func (n *ConsoleNotifier) SendEmailVerification(to, verifyToken string) error {
-	log.Printf("[MAIL] to=%s from=%s subject=Verify your email  VERIFY_TOKEN=%s", to, n.From, verifyToken)
+	slog.Info("[MAIL]", "to", to, "from", n.From, "subject", "Verify your email", "verify_token", verifyToken)
 	return nil
 }

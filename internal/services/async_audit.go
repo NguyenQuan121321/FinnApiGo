@@ -2,7 +2,7 @@ package services
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
@@ -63,7 +63,7 @@ func (w *AsyncAuditWriter) Record(ctx context.Context, entry *models.AuditLog) {
 	select {
 	case w.buffer <- entry:
 	default:
-		log.Printf("audit: buffer full, dropping audit log entry for event=%s", entry.Event)
+		slog.Error("audit buffer full, dropping entry", "event", entry.Event)
 	}
 }
 

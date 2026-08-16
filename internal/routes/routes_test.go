@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,10 +18,12 @@ import (
 )
 
 func TestRegisterSmokeAndLogRedaction(t *testing.T) {
+	// Capture the default slog handler's output so the redaction assertion
+	// below actually inspects what requestLogger emitted.
 	var logs bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(previous)
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
 	router := Register(Deps{
 		Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil, nil, 0),
 		JWT: jwt.NewJWTManager("test-secret", "test"), RateLimit: middleware.NewRateLimiter(100, 100, time.Minute),

@@ -372,6 +372,12 @@ func (m *mockStore) Get(key string) (any, bool) {
 	return v, ok
 }
 
+func (m *mockStore) Set(key string, value any, ttl time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data[key] = value
+}
+
 func (m *mockStore) Delete(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

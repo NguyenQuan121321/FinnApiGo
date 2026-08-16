@@ -26,7 +26,7 @@ The application enforces a transport-to-domain flow: handlers parse and validate
 - JWTs are purpose-bound; reset and verification tokens are single-use through `jti` tracking.
 - Refresh tokens are opaque, stored only as SHA-256 hashes, rotated on use, and reuse revokes all user sessions.
 - Public auth flows avoid account enumeration. Verification resend combines per-email, shared per-IP, and global volume caps; rejected abuse is audited.
-- Request logging emits only method, path, status, latency, and request ID. Authorization values, credentials, and OTPs are excluded.
+- Request logging emits only method, path, status, latency, and request ID via structured (slog JSON) logs. Authorization values, credentials, and MFA codes are excluded.
 
 ## Testing strategy
 

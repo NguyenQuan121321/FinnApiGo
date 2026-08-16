@@ -12,6 +12,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/go-sql-driver/mysql"
 )
 
@@ -19,7 +20,7 @@ import (
 // rate-limit config and an injectable captcha verifier, for the hardening
 // tests. All other deps are the standard in-memory mocks.
 func buildAuthService(t *testing.T, cfg config.AuthConfig, rlCfg config.RateLimitConfig, captcha CaptchaVerifier) (
-	*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier, StoreProvider,
+	*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier, store.Store,
 ) {
 	t.Helper()
 	users := newMockUserRepo()
@@ -35,18 +36,6 @@ func buildAuthService(t *testing.T, cfg config.AuthConfig, rlCfg config.RateLimi
 	}
 	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rlCfg, jwtCfg, notify, captcha, nil, nil, nil)
 	return svc, users, tokens, audit, notify, store
-}
-
-// registerAlice is a shortcut to create a verified, active user and return her.
-func registerAlice(t *testing.T, svc *AuthService) *models.User {
-	t.Helper()
-	_, err := svc.Register(context.Background(), RegisterInput{
-		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
-	})
-	if err != nil {
-		t.Fatalf("register alice: %v", err)
-	}
-	return &models.User{ID: 1, Email: "alice@example.com", Password: "", IsActive: true}
 }
 
 // =====================================================================

@@ -12,6 +12,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
@@ -44,7 +45,7 @@ const totpReplayTTL = 120 * time.Second
 //   - Replay protection uses a single atomic SetNX per validation.
 type TOTPService struct {
 	repo   TOTPRepo
-	store  StoreProvider
+	store  store.Store
 	audits AuditRepo
 	issuer string
 	cfg    config.AuthConfig
@@ -63,7 +64,7 @@ type TOTPService struct {
 // callers that only care about the core flow (e.g. legacy tests) still work.
 // enc seals the displayable recovery-code copies with AES-256-GCM (see
 // cmd/server wiring for how the key is sourced).
-func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor) *TOTPService {
+func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor) *TOTPService {
 	if cfg.TOTPMaxAttempts <= 0 {
 		cfg.TOTPMaxAttempts = 5
 	}

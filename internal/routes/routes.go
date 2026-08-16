@@ -3,7 +3,7 @@ package routes
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -183,9 +183,12 @@ func requestLogger() gin.HandlerFunc {
 		// Log after request completes — safe fields only.
 		status := c.Writer.Status()
 		latency := time.Since(start)
-		log.Printf("[%s] %s %d %v rid=%s",
-			c.Request.Method, c.Request.URL.Path,
-			status, latency, requestID,
+		slog.Info("request",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"status", status,
+			"latency_ms", latency.Milliseconds(),
+			"rid", requestID,
 		)
 	}
 }

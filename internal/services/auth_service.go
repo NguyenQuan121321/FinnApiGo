@@ -17,6 +17,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 )
@@ -41,7 +42,7 @@ type AuthService struct {
 	tokens        RefreshTokenRepo
 	usedTokens    UsedTokenRepo
 	audits        AuditRepo
-	store         StoreProvider
+	store         store.Store
 	jwt           *jwt.JWTManager
 	cfg           config.AuthConfig
 	rlCfg         config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
@@ -53,15 +54,6 @@ type AuthService struct {
 	totpValidator TOTPValidator   // nil-safe — MFA completion unavailable when nil
 }
 
-// StoreProvider abstracts the key-value store for per-account/per-IP counters
-// and single-use token tracking. Injected via config — InMemoryStore by default,
-// RedisStore for multi-instance so counters are shared.
-type StoreProvider interface {
-	SetNX(key string, value any, ttl time.Duration) bool
-	IncrBy(key string, delta int64, ttl time.Duration) int64
-	Get(key string) (any, bool)
-}
-
 // NewAuthService constructs the service. Repos are interfaces so mocks can be
 // passed in tests. store may be nil (some features will be no-ops). rlCfg drives
 // the §2/§3 velocity limiters and adaptive CAPTCHA; captcha may be nil.
@@ -71,7 +63,7 @@ func NewAuthService(
 	tokens RefreshTokenRepo,
 	usedTokens UsedTokenRepo,
 	audits AuditRepo,
-	store StoreProvider,
+	store store.Store,
 	jwt *jwt.JWTManager,
 	authCfg config.AuthConfig,
 	rlCfg config.RateLimitConfig,
@@ -461,7 +453,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 // legitimate client back off.
 //
 // Defense-in-depth layering (each layer short-circuits before the next, and
-// every store-backed layer is shared across instances via the StoreProvider):
+// every store-backed layer is shared across instances via the store.Store):
 //  1. per-IP middleware limiter (process-local, cheap first filter)
 //  2. GLOBAL volume cap — circuit-breaker vs botnet floods rotating IPs+emails
 //  3. per-IP service throttle — store-backed, survives IP rotation

@@ -147,7 +147,7 @@ Everything is read from environment variables (`.env` supported). See `.env.exam
 | Group | Variables | Notes |
 |---|---|---|
 | Server | `SERVER_PORT`, `GIN_MODE`, `TRUSTED_PROXIES` | `TRUSTED_PROXIES` is a comma-separated CIDR list; empty = trust no one |
-| Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS` | |
+| Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS`, `DB_TLS` | `DB_TLS` appends `&tls=...` to the DSN (`true`/`skip-verify`/`preferred`); empty = plaintext (local dev) |
 | JWT | `JWT_SECRET` (required, no default), `JWT_ISSUER`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `RESET_TOKEN_TTL`, `EMAIL_VERIFY_TOKEN_TTL` | |
 | Account security | `MAX_LOGIN_ATTEMPTS`, `LOGIN_LOCKOUT_DURATION`, `MAX_LOCKOUT_MULTIPLIER`, `REQUIRE_EMAIL_VERIFIED` | `MAX_LOCKOUT_MULTIPLIER` scales lockout duration for repeat offenders |
 | MFA / TOTP | `TOTP_MAX_ATTEMPTS`, `TOTP_ATTEMPT_WINDOW`, `TOTP_MAX_CONCURRENT` | Brute-force lockout + concurrency gate on CPU-bound verification |
