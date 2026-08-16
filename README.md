@@ -210,6 +210,7 @@ A few decisions worth knowing if you're extending this:
 - **`locked_until` is a nullable timestamp**, distinct from `is_active` — a boolean can't express a *temporary* lock, only a permanent enable/disable state.
 - **Refresh tokens are hashed with SHA-256**, not bcrypt — they're already high-entropy random values, so bcrypt's deliberately slow KDF isn't needed (unlike user-chosen passwords, which are lower-entropy and benefit from that slowness).
 - **The `store.Store` interface is the seam for horizontal scaling.** Nothing above it knows whether counters live in a Go map or Redis — swapping is a config change (`REDIS_URL`), not a code change.
+- **TOTP shared secrets are sealed at rest with AES-256-GCM** (`totp_devices.secret_encrypted`, keyed by the same `RECOVERY_CODE_KEY`/JWT-secret derivation as recovery codes). Rows written before this column existed keep their plaintext `secret` and keep validating (lazy migration on read); the next enrollment or sudo-gated rotation re-writes them sealed and blanks the plaintext column. Rotating the encryption key (or `JWT_SECRET`) orphans existing sealed secrets — affected users must re-enroll TOTP, exactly like recovery codes.
 
 ## Known limitations
 

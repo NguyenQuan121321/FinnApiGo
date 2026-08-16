@@ -5,16 +5,20 @@ import "time"
 type TOTPDevice struct {
 	ID     uint   `gorm:"primaryKey"`
 	UserID uint   `gorm:"uniqueIndex;not null"`
-	// Secret is the active shared secret (plaintext — sealing is tracked as
-	// a known limitation; see the hardening notes).
+	// Secret is kept ONLY for rows written before encrypted storage existed
+	// (C7); reads fall back to it lazily and every write seals into
+	// SecretEncrypted instead, leaving this blank.
 	Secret string `gorm:"size:255;not null" json:"-"`
-	// PendingSecret stages a freshly generated secret during re-enrollment of
-	// an ACTIVE device: the old Secret keeps validating logins until
-	// VerifyEnable confirms the new one — re-enrollment never disables MFA.
-	PendingSecret string `gorm:"size:512" json:"-"`
-	Enabled       bool   `gorm:"not null;default:false"`
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// SecretEncrypted holds the AES-256-GCM sealed active shared secret.
+	SecretEncrypted string `gorm:"size:512" json:"-"`
+	// PendingSecretEncrypted stages the sealed fresh secret during
+	// re-enrollment of an ACTIVE device: the old secret keeps validating
+	// logins until VerifyEnable confirms the new one — re-enrollment never
+	// disables MFA.
+	PendingSecretEncrypted string `gorm:"size:512" json:"-"`
+	Enabled                bool   `gorm:"not null;default:false"`
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type RecoveryCode struct {

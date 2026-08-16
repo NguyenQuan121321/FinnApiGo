@@ -87,10 +87,13 @@ func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer s
 }
 
 // Enable starts (or restarts) TOTP enrollment: it generates a fresh shared
-// secret and returns the secret + the otpauth:// provisioning URI.
+// secret and returns the secret + the otpauth:// provisioning URI. The secret
+// is persisted ONLY as an AES-256-GCM sealed copy (C7) — the plaintext exists
+// in memory and in the API response for the user's authenticator, never at
+// rest.
 //
 // Re-enrolling an ACTIVE device (C6) requires a valid sudo token for this
-// user; the fresh secret is staged in PendingSecret and the device STAYS
+// user; the fresh secret is staged (sealed) as pending and the device STAYS
 // enabled on its old secret until VerifyEnable confirms the new one — a
 // stolen access token alone can neither rotate nor disable MFA. A device that
 // was never confirmed (disabled) rotates freely, matching first-time
@@ -106,21 +109,24 @@ func (s *TOTPService) Enable(ctx context.Context, userID uint, email, sudoToken 
 	if err != nil {
 		return "", "", fmt.Errorf("totp generate: %w", err)
 	}
+	sealed, err := s.enc.Encrypt(key.Secret())
+	if err != nil {
+		return "", "", fmt.Errorf("seal totp secret: %w", err)
+	}
 	var d *models.TOTPDevice
 	switch {
 	case old == nil:
-		d = &models.TOTPDevice{UserID: userID, Secret: key.Secret(), Enabled: false}
+		d = &models.TOTPDevice{UserID: userID, SecretEncrypted: sealed, Enabled: false}
 	case old.Enabled:
 		if err := s.verifySudoToken(sudoToken, userID); err != nil {
 			return "", "", err
 		}
-		old.PendingSecret = key.Secret()
+		old.PendingSecretEncrypted = sealed
 		d = old
 	default:
 		// Abandoned enrollment: the device was never confirmed, so rotating
-		// the secret outright is safe.
-		old.Secret = key.Secret()
-		old.PendingSecret = ""
+		// the secret outright is safe. This also wipes any legacy plaintext.
+		old.Secret, old.SecretEncrypted, old.PendingSecretEncrypted = "", sealed, ""
 		d = old
 	}
 	if err = s.repo.Upsert(ctx, d); err != nil {
@@ -147,11 +153,12 @@ func (s *TOTPService) verifySudoToken(token string, userID uint) error {
 // VerifyEnable confirms an enrollment: validates the provided 6-digit code
 // and, on success, activates the device and issues a fresh batch of recovery
 // codes. During a sudo-gated rotation of an ACTIVE device (C6) the code must
-// match the PendingSecret; the active Secret keeps serving logins until this
-// confirmation swaps them. The plaintext recovery codes are returned to the
-// caller; at rest only their SHA-256 hashes (for login verification) and an
-// AES-256-GCM sealed copy (for the TOTP-gated view endpoint) persist. Issuing
-// a fresh batch also replaces any codes left over from a previous enrollment.
+// match the pending secret; the active secret keeps serving logins until this
+// confirmation swaps them (the swap moves ciphertext — no re-sealing needed).
+// The plaintext recovery codes are returned to the caller; at rest only their
+// SHA-256 hashes (for login verification) and an AES-256-GCM sealed copy (for
+// the TOTP-gated view endpoint) persist. Issuing a fresh batch also replaces
+// any codes left over from a previous enrollment.
 func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string) ([]string, error) {
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return nil, err
@@ -164,22 +171,28 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 		s.recordFailure(ctx, userID, "no pending device")
 		return nil, ErrInvalidCode
 	}
-	confirming := d.PendingSecret != ""
+	confirming := d.PendingSecretEncrypted != ""
 	if d.Enabled && !confirming {
 		return nil, ErrInvalidInput
 	}
-	secret := d.Secret
+	secret := d.PendingSecretEncrypted
 	if confirming {
-		secret = d.PendingSecret
+		if secret, err = s.enc.Decrypt(secret); err != nil {
+			return nil, fmt.Errorf("open pending totp secret: %w", err)
+		}
+	} else if secret, err = s.openActiveSecret(d); err != nil {
+		return nil, err
 	}
 	if !totpValid(code, secret) {
 		s.recordFailure(ctx, userID, "bad enable code")
 		return nil, ErrInvalidCode
 	}
-	prevSecret := d.Secret
+	prevActive := d.SecretEncrypted
 	if confirming {
-		// Promote the pending secret; the device stays enabled throughout.
-		d.Secret, d.PendingSecret = d.PendingSecret, ""
+		// Promote the sealed pending secret; the device stays enabled
+		// throughout, and any legacy plaintext is wiped.
+		d.SecretEncrypted, d.PendingSecretEncrypted = d.PendingSecretEncrypted, ""
+		d.Secret = ""
 	}
 	d.Enabled = true
 	if err = s.repo.Upsert(ctx, d); err != nil {
@@ -190,7 +203,7 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 		// Roll back so the user can retry Enable -> VerifyEnable: a pending
 		// rotation returns to staged state, a fresh enrollment is deactivated.
 		if confirming {
-			d.Secret, d.PendingSecret = prevSecret, d.Secret
+			d.PendingSecretEncrypted, d.SecretEncrypted = d.SecretEncrypted, prevActive
 		} else {
 			d.Enabled = false
 		}
@@ -220,7 +233,11 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 
 	// ---- 6-digit TOTP fast path ----
 	if len(code) == 6 {
-		if !totpValid(code, d.Secret) {
+		secret, err := s.openActiveSecret(d)
+		if err != nil {
+			return err
+		}
+		if !totpValid(code, secret) {
 			s.recordFailure(ctx, userID, "bad totp code")
 			return ErrInvalidCode
 		}
@@ -280,7 +297,11 @@ func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code s
 		s.recordFailure(ctx, userID, "view codes: device not enabled")
 		return nil, ErrInvalidCode
 	}
-	if len(code) != 6 || !totpValid(code, d.Secret) {
+	secret, err := s.openActiveSecret(d)
+	if err != nil {
+		return nil, err
+	}
+	if len(code) != 6 || !totpValid(code, secret) {
 		s.recordFailure(ctx, userID, "view codes: bad totp code")
 		return nil, ErrInvalidCode
 	}
@@ -357,6 +378,20 @@ func (s *TOTPService) newRecoveryCodes(ctx context.Context, userID uint) ([]stri
 		}
 	}
 	return plain, s.repo.ReplaceRecoveryCodes(ctx, userID, rows)
+}
+
+// openActiveSecret returns the device's active secret, decrypting the sealed
+// copy; rows written before encrypted storage existed fall back to their
+// plaintext Secret (lazy migration on read — C7).
+func (s *TOTPService) openActiveSecret(d *models.TOTPDevice) (string, error) {
+	if d.SecretEncrypted == "" {
+		return d.Secret, nil
+	}
+	plain, err := s.enc.Decrypt(d.SecretEncrypted)
+	if err != nil {
+		return "", fmt.Errorf("open totp secret: %w", err)
+	}
+	return plain, nil
 }
 
 // replayGuard enforces that a 6-digit TOTP code is consumed at most once per

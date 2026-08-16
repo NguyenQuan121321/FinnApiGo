@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -93,8 +94,18 @@ func TestTOTPService_Enable_CreatesDevice(t *testing.T) {
 	if d.Enabled {
 		t.Fatal("device should be disabled until VerifyEnable confirms")
 	}
-	if d.Secret != secret {
-		t.Fatal("stored secret should match returned secret")
+	if d.Secret != "" {
+		t.Fatal("plaintext Secret must stay blank — the secret is sealed at rest (C7)")
+	}
+	if d.SecretEncrypted == "" {
+		t.Fatal("expected the sealed secret column to be populated")
+	}
+	plain, err := testEncryptor(t).Decrypt(d.SecretEncrypted)
+	if err != nil {
+		t.Fatalf("sealed secret must decrypt: %v", err)
+	}
+	if plain != secret {
+		t.Fatal("sealed secret should decrypt to the returned secret")
 	}
 }
 
@@ -731,6 +742,10 @@ func TestTOTPService_Enable_ActiveDeviceRequiresSudo_C6(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 	oldSecret, _ := enableAndVerify(t, svc, 1)
+	before, err := repo.FindByUserID(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if _, _, err := svc.Enable(context.Background(), 1, "user@example.com", ""); !errors.Is(err, ErrSudoRequired) {
 		t.Fatalf("bare enable on active device: expected ErrSudoRequired, got %v", err)
@@ -759,9 +774,12 @@ func TestTOTPService_Enable_ActiveDeviceRequiresSudo_C6(t *testing.T) {
 	if !d.Enabled {
 		t.Error("device must remain enabled after refused rotation")
 	}
-	if d.Secret != oldSecret || d.PendingSecret != "" {
-		t.Errorf("device secret must be untouched: secret-changed=%t pending=%q",
-			d.Secret != oldSecret, d.PendingSecret)
+	if d.SecretEncrypted != before.SecretEncrypted || d.PendingSecretEncrypted != "" {
+		t.Error("device secret must be untouched by refused rotation")
+	}
+	// And the untouched secret still validates logins.
+	if err := svc.Validate(context.Background(), 1, totpCode(t, oldSecret)); err != nil {
+		t.Fatalf("active secret must still validate: %v", err)
 	}
 }
 
@@ -793,11 +811,11 @@ func TestTOTPService_Enable_SudoRotationKeepsDeviceActive_C6(t *testing.T) {
 	if !d.Enabled {
 		t.Fatal("device must stay enabled during pending rotation")
 	}
-	if d.Secret != oldSecret {
-		t.Fatal("old secret must keep validating until confirmation")
+	if d.SecretEncrypted == "" || d.PendingSecretEncrypted == "" {
+		t.Fatal("both active and pending secrets must be staged (sealed)")
 	}
-	if d.PendingSecret != newSecret {
-		t.Fatal("new secret must be staged in PendingSecret")
+	if d.PendingSecretEncrypted == d.SecretEncrypted {
+		t.Fatal("pending secret must differ from the active one")
 	}
 	// While pending, validation still accepts the OLD secret's codes and
 	// rejects the new secret's codes.
@@ -816,8 +834,81 @@ func TestTOTPService_Enable_SudoRotationKeepsDeviceActive_C6(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Enabled || d.Secret != newSecret || d.PendingSecret != "" {
-		t.Fatalf("post-confirm state wrong: enabled=%t secret-rotated=%t pending=%q",
-			d.Enabled, d.Secret == newSecret, d.PendingSecret)
+	if !d.Enabled || d.PendingSecretEncrypted != "" {
+		t.Fatalf("post-confirm state wrong: enabled=%t pending=%q",
+			d.Enabled, d.PendingSecretEncrypted)
+	}
+	if err := svc.Validate(context.Background(), 1, totpCode(t, newSecret)); err != nil {
+		t.Fatalf("new secret must validate after confirmation: %v", err)
+	}
+}
+
+// ---------- C7: TOTP secret encrypted at rest ----------
+
+// TestTOTPService_SecretEncryptedAtRest_C7 — C7 regression: after enrollment
+// the device row must carry only the AES-256-GCM sealed secret (no plaintext
+// column contents, ciphertext must not embed the secret), login validation
+// still works via decrypt-on-read, and a legacy plaintext row (written before
+// encrypted storage existed) keeps validating — lazy migration on read.
+func TestTOTPService_SecretEncryptedAtRest_C7(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(t, repo, nil, nil)
+	secret, _ := enableAndVerify(t, svc, 1)
+
+	d, err := repo.FindByUserID(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Secret != "" {
+		t.Errorf("plaintext Secret must be blank after enrollment, got %q", d.Secret)
+	}
+	if d.SecretEncrypted == "" {
+		t.Fatal("SecretEncrypted must hold the sealed secret")
+	}
+	if strings.Contains(d.SecretEncrypted, secret) {
+		t.Error("ciphertext must not embed the plaintext secret")
+	}
+	// Decrypt-on-read keeps login validation working.
+	if err := svc.Validate(context.Background(), 1, totpCode(t, secret)); err != nil {
+		t.Fatalf("validate with sealed secret: %v", err)
+	}
+
+	// Legacy row with a plaintext secret (pre-encryption deployment) — a code
+	// generated from it must still validate (read falls back to Secret).
+	legacyKey, err := totp.Generate(totp.GenerateOpts{Issuer: "TestIssuer", AccountName: "legacy@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Upsert(context.Background(), &models.TOTPDevice{
+		UserID: 2, Secret: legacyKey.Secret(), Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Validate(context.Background(), 2, totpCode(t, legacyKey.Secret())); err != nil {
+		t.Fatalf("legacy plaintext secret must keep validating: %v", err)
+	}
+
+	// Sudo rotation stages the pending secret sealed too.
+	sudo, err := testJWTManager.Issue(1, "", "", jwt.TokenTypeSudo, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSecret, _, err := svc.Enable(context.Background(), 1, "user@example.com", sudo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err = repo.FindByUserID(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.PendingSecretEncrypted == "" || strings.Contains(d.PendingSecretEncrypted, newSecret) {
+		t.Errorf("pending secret must be sealed and not embed plaintext: set=%t", d.PendingSecretEncrypted != "")
+	}
+	// Confirmation promotes the sealed pending secret and stays usable.
+	if _, err := svc.VerifyEnable(context.Background(), 1, totpCode(t, newSecret)); err != nil {
+		t.Fatalf("confirm sealed pending rotation: %v", err)
+	}
+	if err := svc.Validate(context.Background(), 1, totpCode(t, newSecret)); err != nil {
+		t.Fatalf("validate after sealed rotation: %v", err)
 	}
 }
