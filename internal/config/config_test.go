@@ -56,6 +56,14 @@ func TestDBConfigDSN(t *testing.T) {
 	}
 }
 
+func TestDBConfigDSNWithTLS(t *testing.T) {
+	dsn := (DBConfig{Host: "db", Port: "3307", User: "app", Password: "secret", Name: "finn", TLS: "true"}).DSN()
+	want := "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=Local&tls=true"
+	if dsn != want {
+		t.Fatalf("DSN=%q want %q", dsn, want)
+	}
+}
+
 func TestEnvCSV(t *testing.T) {
 	tests := []struct {
 		name string

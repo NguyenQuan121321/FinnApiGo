@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
@@ -189,18 +190,7 @@ func requestLogger() gin.HandlerFunc {
 	}
 }
 
-// generateRequestID creates a short pseudo-unique request identifier.
-// In production this would use UUIDv4 or a snowflake ID.
+// generateRequestID creates a unique request identifier (UUIDv4).
 func generateRequestID() string {
-	const hex = "0123456789abcdef"
-	b := make([]byte, 16)
-	_ = b // placeholder — uses time-based for simplicity
-	now := time.Now().UnixNano()
-	for i := 0; i < 16; i++ {
-		b[i] = hex[(now>>uint(i*4))&0xf]
-		if i == 8 {
-			now = time.Now().UnixNano() >> 32
-		}
-	}
-	return string(b)
+	return uuid.New().String()
 }

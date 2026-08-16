@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -851,7 +852,11 @@ func (s *AuthService) recordFailedLogin(ctx context.Context, user *models.User, 
 		lockUntil = &t
 	}
 	if err := s.users.IncrementFailedAttempts(ctx, user, lockUntil); err != nil {
-		_ = err
+		// Log the error — lockout enforcement depends on this write succeeding.
+		// Do NOT return the error to the caller (login should still fail with
+		// ErrInvalidCredentials, not a 500), but the failure must be observable.
+		slog.Error("recordFailedLogin: increment failed attempts",
+			"user_id", user.ID, "err", err)
 	}
 	s.recordLoginFailIP(ctx, ip)
 	s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "bad password"))

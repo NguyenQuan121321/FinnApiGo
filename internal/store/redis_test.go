@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -120,5 +121,22 @@ func TestRedisStore_GetMissingReturnsFalse(t *testing.T) {
 
 	if _, ok := s.Get("nope"); ok {
 		t.Error("absent key must report absent")
+	}
+}
+
+// TestRedisStore_FailClosedOnOutage proves the store DENIES (not allows) when
+// Redis is unreachable: IncrBy returns MaxInt64 so every rate limiter reading
+// it rejects the request, and SetNX returns false so single-use guards block.
+func TestRedisStore_FailClosedOnOutage(t *testing.T) {
+	s, mr, cleanup := newMiniredisStore(t)
+	// Close only the redis side; cleanup still closes the client.
+	mr.Close()
+	defer cleanup()
+
+	if n := s.IncrBy("c", 1, time.Minute); n != math.MaxInt64 {
+		t.Errorf("IncrBy on dead redis = %d, want MaxInt64 (fail closed)", n)
+	}
+	if s.SetNX("k", "v", time.Minute) {
+		t.Error("SetNX on dead redis must return false (fail closed)")
 	}
 }

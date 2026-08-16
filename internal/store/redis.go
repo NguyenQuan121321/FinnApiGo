@@ -3,10 +3,23 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"math"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+// incrWithExpireScript atomically increments a counter and (re)applies its
+// TTL, closing the crash window that existed between a plain INCRBY and a
+// separate PEXPIRE.
+var incrWithExpireScript = redis.NewScript(`
+    local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+    if tonumber(ARGV[2]) > 0 then
+        redis.call('PEXPIRE', KEYS[1], ARGV[2])
+    end
+    return n
+`)
 
 // RedisStore is the multi-instance Store backend (§1.3 better-fix, §7).
 //
@@ -59,41 +72,44 @@ func (s *RedisStore) Get(key string) (any, bool) {
 }
 
 // Set writes value with ttl (<=0 = no expiry). Values are stored as strings;
-// callers that need structured data should serialize first.
+// callers that need structured data should serialize first. Write failures
+// are logged — the Store contract has no error return, so this is the only
+// way an operator learns Redis is down.
 func (s *RedisStore) Set(key string, value any, ttl time.Duration) {
 	str := toRedisValue(value)
-	if ttl <= 0 {
-		_ = s.client.Set(s.ctx, key, str, 0).Err()
-		return
+	if err := s.client.Set(s.ctx, key, str, ttl).Err(); err != nil {
+		slog.Error("store: redis set failed", "key", key, "err", err)
 	}
-	_ = s.client.Set(s.ctx, key, str, ttl).Err()
 }
 
 // SetNX writes only if the key is absent; returns whether it wrote. The NX flag
 // makes this atomic — the exact primitive single-use token (jti) enforcement
-// and fixed-window counters depend on.
+// and fixed-window counters depend on. Errors return false (fail CLOSED):
+// denying the write is always the safe outcome for a single-use guard.
 func (s *RedisStore) SetNX(key string, value any, ttl time.Duration) bool {
 	str := toRedisValue(value)
 	ok, err := s.client.SetNX(s.ctx, key, str, ttl).Result()
-	return err == nil && ok
+	if err != nil {
+		slog.Error("store: redis setnx failed", "key", key, "err", err)
+		return false
+	}
+	return ok
 }
 
 // IncrBy atomically adds delta to the numeric value at key (missing = 0) and
 // returns the new value. The TTL is refreshed on every call so the window is
-// sliding, matching InMemoryStore's behavior.
+// sliding, matching InMemoryStore's behavior; INCRBY+PEXPIRE run as one Lua
+// script so the counter never survives without its window.
 //
-// INCRBY is itself atomic; we follow it with PEXPIRE to (re)start the window.
-// There is a tiny gap between the two (a crash between them leaves the counter
-// without a TTL), which is acceptable for rate-limiting — the next IncrBy will
-// re-apply the TTL. For true atomicity a Lua script would be used; kept simple
-// here to stay dependency-light and match the in-memory semantics closely.
+// On Redis failure it returns math.MaxInt64 — fail CLOSED. That value exceeds
+// any configured threshold, so every rate limiter reading it DENIES the
+// request instead of failing open to unlimited traffic.
 func (s *RedisStore) IncrBy(key string, delta int64, ttl time.Duration) int64 {
-	n, err := s.client.IncrBy(s.ctx, key, delta).Result()
+	n, err := incrWithExpireScript.Run(s.ctx, s.client, []string{key},
+		delta, ttl.Milliseconds()).Int64()
 	if err != nil {
-		return 0
-	}
-	if ttl > 0 {
-		_ = s.client.PExpire(s.ctx, key, ttl).Err()
+		slog.Error("store: redis incrby failed", "key", key, "err", err)
+		return math.MaxInt64 // fail CLOSED — deny when Redis is unreachable
 	}
 	return n
 }

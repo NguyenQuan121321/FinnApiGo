@@ -80,8 +80,10 @@ func (rl *RateLimiter) Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := c.ClientIP()
 		if rl.shared != nil {
-			// Redis INCRBY is atomic across instances. A zero result signals a
-			// store failure, so retain local availability during a Redis outage.
+			// Redis INCRBY is atomic across instances. On a store failure the
+			// shared counter returns MaxInt64 (fail CLOSED), which lands here
+			// as a denial — a Redis outage must not fail open to unlimited
+			// traffic.
 			if n := rl.shared.IncrBy("rate:ip:"+ip, 1, rl.window); n > 0 {
 				if n > int64(rl.burst) {
 					response.Respond(c, 429, "too many requests, please slow down", nil)

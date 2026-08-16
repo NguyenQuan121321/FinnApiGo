@@ -45,13 +45,20 @@ type DBConfig struct {
 	Name         string
 	MaxIdleConns int
 	MaxOpenConns int
+	// TLS appends ?tls=... to the DSN: "true" (verify CA + hostname),
+	// "skip-verify", "preferred", or "" (disabled — plaintext, local dev only).
+	TLS string
 }
 
 // DSN builds a MySQL DSN string for GORM.
 func (d DBConfig) DSN() string {
 	// charset=utf8mb4 to fully support emoji / 4-byte UTF-8.
-	return d.User + ":" + d.Password + "@tcp(" + d.Host + ":" + d.Port + ")/" +
+	dsn := d.User + ":" + d.Password + "@tcp(" + d.Host + ":" + d.Port + ")/" +
 		d.Name + "?charset=utf8mb4&parseTime=True&loc=Local"
+	if d.TLS != "" {
+		dsn += "&tls=" + d.TLS
+	}
+	return dsn
 }
 
 type JWTConfig struct {
@@ -201,6 +208,7 @@ func Load() (*Config, error) {
 			Name:         env("DB_NAME", "finnapigo"),
 			MaxIdleConns: envInt("DB_MAX_IDLE_CONNS", 10),
 			MaxOpenConns: envInt("DB_MAX_OPEN_CONNS", 100),
+			TLS:          env("DB_TLS", ""),
 		},
 		JWT: JWTConfig{
 			Secret:        env("JWT_SECRET", ""),
