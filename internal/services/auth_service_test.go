@@ -1038,6 +1038,7 @@ func TestLogin_TOTPActive_ReturnsMFAPending(t *testing.T) {
 	}
 	if mfaPending == nil {
 		t.Fatal("mfaPending should not be nil for TOTP-active user")
+		return
 	}
 	if !mfaPending.MFARequired {
 		t.Error("MFARequired should be true")
@@ -1111,6 +1112,7 @@ func TestCompleteMFALogin_CorrectCode(t *testing.T) {
 	tokens.mu.Unlock()
 	if rt == nil {
 		t.Fatal("no refresh token record created")
+		return
 	}
 	if rt.IPAddress != "1.2.3.4" {
 		t.Errorf("rt IP = %q, want %q", rt.IPAddress, "1.2.3.4")

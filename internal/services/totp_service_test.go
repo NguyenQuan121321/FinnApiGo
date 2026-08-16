@@ -82,6 +82,7 @@ func TestTOTPService_Enable_CreatesDevice(t *testing.T) {
 	d, _ := repo.FindByUserID(context.Background(), 1)
 	if d == nil {
 		t.Fatal("expected device row to exist")
+		return
 	}
 	if d.Enabled {
 		t.Fatal("device should be disabled until VerifyEnable confirms")
