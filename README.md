@@ -212,6 +212,11 @@ A few decisions worth knowing if you're extending this:
 - **The `store.Store` interface is the seam for horizontal scaling.** Nothing above it knows whether counters live in a Go map or Redis — swapping is a config change (`REDIS_URL`), not a code change.
 - **TOTP shared secrets are sealed at rest with AES-256-GCM** (`totp_devices.secret_encrypted`, keyed by the same `RECOVERY_CODE_KEY`/JWT-secret derivation as recovery codes). Rows written before this column existed keep their plaintext `secret` and keep validating (lazy migration on read); the next enrollment or sudo-gated rotation re-writes them sealed and blanks the plaintext column. Rotating the encryption key (or `JWT_SECRET`) orphans existing sealed secrets — affected users must re-enroll TOTP, exactly like recovery codes.
 
+## Operational notes
+
+- **`GET /metrics` (Prometheus) is unauthenticated by design** so scrapers need no credentials. It exposes process/Go runtime metrics plus `finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`, `finnapigo_rate_limited_requests_total`, and `finnapigo_audit_buffer_depth`. **Never expose it publicly** — bind the server to an internal interface or restrict it at the load balancer; the payload reveals internals useful to an attacker.
+- **`PPROF_ADDR`** (optional) starts a `net/http/pprof` listener on a separate internal port (e.g. `localhost:6060`). Empty (default) = disabled. Never expose this port publicly.
+
 ## Known limitations
 
 - The per-IP token-bucket limiter (`internal/middleware/rate_limit.go`) stays in-memory even when Redis is configured — only the store-backed velocity/lockout counters are shared across instances today

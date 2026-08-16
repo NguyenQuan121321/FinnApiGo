@@ -138,6 +138,15 @@ func (w *AsyncAuditWriter) worker() {
 	}
 }
 
+// Buffered reports how many entries currently wait in the async buffer (0 in
+// sync mode) — the depth gauge for the Prometheus endpoint (P2).
+func (w *AsyncAuditWriter) Buffered() int {
+	if w.syncMode || w.buffer == nil {
+		return 0
+	}
+	return len(w.buffer)
+}
+
 // Close gracefully shuts down the worker by closing the channel and waiting
 // for remaining entries to be flushed.
 func (w *AsyncAuditWriter) Close() {

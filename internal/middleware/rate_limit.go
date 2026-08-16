@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/response"
 )
+
+// RateLimitedRequests counts every 429 the limiter issues (shared or local
+// path) — exported for the Prometheus endpoint (P2).
+var RateLimitedRequests atomic.Int64
 
 type CounterStore interface {
 	IncrBy(key string, delta int64, ttl time.Duration) int64
@@ -86,6 +91,7 @@ func (rl *RateLimiter) Handler() gin.HandlerFunc {
 			// denying all traffic (A1).
 			if n := rl.shared.IncrBy("rate:ip:"+ip, 1, rl.window); n > 0 {
 				if n > int64(rl.burst) {
+					RateLimitedRequests.Add(1)
 					response.Respond(c, 429, "too many requests, please slow down", nil)
 					c.Abort()
 					return
@@ -95,6 +101,7 @@ func (rl *RateLimiter) Handler() gin.HandlerFunc {
 			}
 		}
 		if !rl.get(ip).Allow() {
+			RateLimitedRequests.Add(1)
 			response.Respond(c, 429, "too many requests, please slow down", nil)
 			c.Abort()
 			return

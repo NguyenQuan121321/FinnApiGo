@@ -23,6 +23,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/metrics"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/repositories"
@@ -184,6 +185,7 @@ func run() error {
 		TrustedProxies:      cfg.Server.TrustedProxies,
 		HSTSSeconds:         cfg.Server.HSTSSeconds,
 		PwdVersion:          authSvc.CurrentPwdVersion,
+		Metrics:             metrics.Handler(func() float64 { return float64(auditRepo.Buffered()) }),
 	})
 
 	// --- HTTP server with graceful shutdown ---

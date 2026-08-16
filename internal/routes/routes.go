@@ -35,6 +35,9 @@ type Deps struct {
 	// HSTSSeconds enables Strict-Transport-Security on HTTPS responses when
 	// > 0 (A3). Ignored for plain-HTTP requests.
 	HSTSSeconds int
+	// Metrics is the Prometheus scrape handler (P2). Nil = /metrics not
+	// mounted. Deliberately unauthenticated: keep it internal-facing.
+	Metrics http.Handler
 	// PwdVersion backs AuthMiddleware's access-token revocation on
 	// credential change (A7); typically services.AuthService.CurrentPwdVersion.
 	// Nil disables the check.
@@ -68,6 +71,11 @@ func Register(deps Deps) *gin.Engine {
 			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, deps.MaxRequestBodyBytes)
 			c.Next()
 		})
+	}
+
+	// Prometheus scrape endpoint (P2) — see Deps.Metrics.
+	if deps.Metrics != nil {
+		r.GET("/metrics", gin.WrapH(deps.Metrics))
 	}
 
 	// health check — process liveness (no DB dependency).

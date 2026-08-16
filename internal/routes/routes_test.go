@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+
+	"github.com/gin-gonic/gin"
 	"io"
 	"log/slog"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/metrics"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/services"
 )
@@ -232,5 +235,52 @@ func TestRoutes_SecurityHeadersOnTokenBearingResponse_A3(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if got := w.Header().Get("Strict-Transport-Security"); got != "max-age=31536000" {
 		t.Errorf("Strict-Transport-Security = %q, want max-age=31536000", got)
+	}
+}
+
+// TestRoutes_MetricsAndHealthz_P2 — P2 gate: the Prometheus endpoint and the
+// liveness probe both respond 200 in an httptest; /metrics is mounted only
+// when a handler is provided.
+func TestRoutes_MetricsAndHealthz_P2(t *testing.T) {
+	build := func(withMetrics bool) *gin.Engine {
+		deps := Deps{
+			Auth: handlers.NewAuthHandler(nil, nil), MFA: handlers.NewMFAHandler(nil, nil, 0),
+			JWT:       jwt.NewJWTManager("test-secret", "test"),
+			RateLimit: middleware.NewRateLimiter(100, 100, time.Minute),
+		}
+		if withMetrics {
+			deps.Metrics = metrics.Handler(nil)
+		}
+		return Register(deps)
+	}
+
+	router := build(true)
+	for _, path := range []string{"/metrics", "/healthz"} {
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d, want 200", path, w.Code)
+		}
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := w.Body.String()
+	for _, want := range []string{
+		"finnapigo_store_errors_total",
+		"finnapigo_audit_entries_dropped_total",
+		"finnapigo_rate_limited_requests_total",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output missing %s", want)
+		}
+	}
+
+	// Without a handler wired the endpoint is absent (404), not a panic.
+	if w := httptest.NewRecorder(); func() int {
+		router2 := build(false)
+		router2.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		return w.Code
+	}() != http.StatusNotFound {
+		t.Errorf("nil Metrics must leave /metrics unmounted, got %d", w.Code)
 	}
 }
