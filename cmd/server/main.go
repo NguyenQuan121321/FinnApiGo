@@ -64,8 +64,11 @@ func run() error {
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
 	baseAuditRepo := repositories.NewAuditRepository(db)
+	// auditRepo buffers audit writes on a background worker; it is closed
+	// explicitly in the shutdown sequence (NOT deferred) so the flush is
+	// ordered before the DB pool close. Boot-failure returns below bypass the
+	// flush, but those paths have served no traffic yet.
 	auditRepo := services.NewAsyncAuditWriter(baseAuditRepo, baseAuditRepo, cfg.Audit)
-	defer auditRepo.Close()
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
 	totpRepo := repositories.NewTOTPRepository(db)
 	oauthIdentityRepo := repositories.NewOAuthIdentityRepository(db)
@@ -126,7 +129,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEncKey)
+	// Build the AES-256-GCM cipher ONCE — the key never changes at runtime, so
+	// the key schedule is computed here instead of per Encrypt/Decrypt call.
+	recoveryEnc, err := crypto.NewEncryptor(recoveryEncKey)
+	if err != nil {
+		return fmt.Errorf("recovery-code encryptor: %w", err)
+	}
+	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEnc)
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
@@ -203,7 +212,18 @@ func run() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	err = srv.Shutdown(ctx)
+
+	// Flush resources in dependency order: the async audit writer drains its
+	// buffer into the DB first, then the DB pool itself is closed. Closing in
+	// the reverse order would drop buffered audit rows.
+	log.Println("flushing resources...")
+	auditRepo.Close()
+	if sqlDB, derr := db.DB(); derr == nil {
+		_ = sqlDB.Close()
+	}
+
+	if err != nil {
 		return errors.Join(errors.New("graceful shutdown failed"), err)
 	}
 	log.Println("server stopped cleanly")

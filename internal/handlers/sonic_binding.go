@@ -37,9 +37,11 @@ var errBodyRequired = errors.New("request body is required")
 // bufPool recycles the byte slices used to read request bodies. The pool only
 // ever hands out small (1 KiB) slices, so all items are uniform-sized — which
 // is what makes sync.Pool effective. We pool the *[]byte (not the slice) so the
-// pool never retains a live reference that would defeat reuse.
+// pool never retains a live reference that would defeat reuse. Capacity is
+// maxTOTPBody+1: the extra byte lets io.ReadFull distinguish "exactly at the
+// limit" (allowed) from "over the limit" (rejected) without a second read.
 var bufPool = sync.Pool{
-	New: func() any { b := make([]byte, 0, maxTOTPBody); return &b },
+	New: func() any { b := make([]byte, 0, maxTOTPBody+1); return &b },
 }
 
 // acquireBuf / releaseBuf borrow and return a pooled byte slice. Callers must

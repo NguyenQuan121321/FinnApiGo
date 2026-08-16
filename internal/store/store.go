@@ -168,15 +168,31 @@ func (s *InMemoryStore) sweepLoop(interval time.Duration) {
 	}
 }
 
+// sweep drops expired keys in bounded batches so the mutex is held for a
+// capped number of iterations, not across the whole map. A full sweep of a
+// huge map while holding the global lock would stall every concurrent
+// Get/Set/IncrBy; with batching, live traffic interleaves between batches.
+// If the batch limit is hit, remaining expired keys are picked up on the next
+// tick (the sweeper runs far more often than keys expire).
 func (s *InMemoryStore) sweep() {
 	now := s.now()
+	const batchSize = 1000
+	var toDelete []string
+
 	s.mu.Lock()
 	for k, e := range s.data {
 		if e.expired(now) {
-			delete(s.data, k)
+			toDelete = append(toDelete, k)
+		}
+		if len(toDelete) >= batchSize {
+			break
 		}
 	}
+	for _, k := range toDelete {
+		delete(s.data, k)
+	}
 	s.mu.Unlock()
+	// If we hit batchSize, there may be more — the next tick will continue.
 }
 
 // Close stops the background sweeper. Safe to call multiple times.

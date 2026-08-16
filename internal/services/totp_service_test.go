@@ -15,15 +15,26 @@ import (
 	"github.com/finnapigo/finnapigo/internal/models"
 )
 
-// testEncKey is a fixed 32-byte AES-256 key for sealing recovery codes in
-// tests. The value is public test data — only its length matters.
+// testEncryptor builds the AES-256-GCM encryptor used for sealing recovery
+// codes in tests. The key is public test data — only its length matters.
+func testEncryptor(t *testing.T) *crypto.Encryptor {
+	t.Helper()
+	enc, err := crypto.NewEncryptor([]byte("test-recovery-encryption-key-32b"))
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	return enc
+}
+
+// testEncKey is a fixed 32-byte AES-256 key for decrypting recovery codes
+// sealed by tests via the package-level crypto.Decrypt wrapper.
 func testEncKey() []byte {
 	return []byte("test-recovery-encryption-key-32b")
 }
 
 // newTestTOTPService builds a TOTPService with sensible test defaults. Pass
 // nil for store/audits to disable those subsystems.
-func newTestTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, cfgOverrides ...config.AuthConfig) *TOTPService {
+func newTestTOTPService(t *testing.T, repo TOTPRepo, store StoreProvider, audits AuditRepo, cfgOverrides ...config.AuthConfig) *TOTPService {
 	cfg := config.AuthConfig{
 		TOTPMaxAttempts:   5,
 		TOTPAttemptWindow: 5 * time.Minute,
@@ -33,7 +44,7 @@ func newTestTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, cf
 	if len(cfgOverrides) > 0 {
 		cfg = cfgOverrides[0]
 	}
-	return NewTOTPService(repo, store, audits, "TestIssuer", cfg, testEncKey())
+	return NewTOTPService(repo, store, audits, "TestIssuer", cfg, testEncryptor(t))
 }
 
 // enableAndVerify is a test helper that runs Enable then VerifyEnable, returning
@@ -55,7 +66,7 @@ func enableAndVerify(t *testing.T, svc *TOTPService, userID uint) (string, []str
 
 func TestTOTPService_Enable_CreatesDevice(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	secret, uri, err := svc.Enable(context.Background(), 1, "user@example.com")
 	if err != nil {
@@ -81,7 +92,7 @@ func TestTOTPService_Enable_CreatesDevice(t *testing.T) {
 
 func TestTOTPService_Enable_RotatesExistingSecret(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	secret1, _, _ := svc.Enable(context.Background(), 1, "a@b.com")
 	secret2, _, err := svc.Enable(context.Background(), 1, "a@b.com")
@@ -102,7 +113,7 @@ func TestTOTPService_Enable_RotatesExistingSecret(t *testing.T) {
 func TestTOTPService_VerifyEnable_ValidCode(t *testing.T) {
 	repo := newMockTOTPRepo()
 	audit := &mockAuditRepo{}
-	svc := newTestTOTPService(repo, nil, audit)
+	svc := newTestTOTPService(t, repo, nil, audit)
 
 	secret, _, _ := svc.Enable(context.Background(), 1, "user@example.com")
 	codes, err := svc.VerifyEnable(context.Background(), 1, totpCode(t, secret))
@@ -129,7 +140,7 @@ func TestTOTPService_VerifyEnable_ValidCode(t *testing.T) {
 
 func TestTOTPService_VerifyEnable_BadCode(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 	_, err := svc.VerifyEnable(context.Background(), 1, "000000")
@@ -140,7 +151,7 @@ func TestTOTPService_VerifyEnable_BadCode(t *testing.T) {
 
 func TestTOTPService_VerifyEnable_AlreadyEnabled(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	secret, _, _ := svc.Enable(context.Background(), 1, "user@example.com")
 	_, _ = svc.VerifyEnable(context.Background(), 1, totpCode(t, secret))
@@ -153,7 +164,7 @@ func TestTOTPService_VerifyEnable_AlreadyEnabled(t *testing.T) {
 
 func TestTOTPService_VerifyEnable_NoDevice(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, err := svc.VerifyEnable(context.Background(), 99, "000000")
 	if !errors.Is(err, ErrInvalidCode) {
@@ -165,7 +176,7 @@ func TestTOTPService_VerifyEnable_NoDevice(t *testing.T) {
 
 func TestRecoveryCodes_SHA256_NotBcrypt(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, codes := enableAndVerify(t, svc, 1)
 
@@ -189,7 +200,7 @@ func TestTOTPService_Validate_ValidTOTPCode(t *testing.T) {
 	repo := newMockTOTPRepo()
 	store := newMockStore()
 	audit := &mockAuditRepo{}
-	svc := newTestTOTPService(repo, store, audit)
+	svc := newTestTOTPService(t, repo, store, audit)
 
 	secret, _ := enableAndVerify(t, svc, 1)
 
@@ -202,7 +213,7 @@ func TestTOTPService_Validate_ValidTOTPCode(t *testing.T) {
 func TestTOTPService_Validate_ReplayPrevention(t *testing.T) {
 	repo := newMockTOTPRepo()
 	store := newMockStore()
-	svc := newTestTOTPService(repo, store, nil)
+	svc := newTestTOTPService(t, repo, store, nil)
 
 	secret, _ := enableAndVerify(t, svc, 1)
 
@@ -221,7 +232,7 @@ func TestTOTPService_Validate_ReplayPrevention(t *testing.T) {
 
 func TestTOTPService_Validate_BadTOTPCode(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _ = enableAndVerify(t, svc, 1)
 
@@ -232,7 +243,7 @@ func TestTOTPService_Validate_BadTOTPCode(t *testing.T) {
 
 func TestTOTPService_Validate_NoDevice(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	if err := svc.Validate(context.Background(), 99, "123456"); err == nil {
 		t.Fatal("should fail when no device exists")
@@ -241,7 +252,7 @@ func TestTOTPService_Validate_NoDevice(t *testing.T) {
 
 func TestTOTPService_Validate_DeviceDisabled(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 	// Device is disabled (never verified).
@@ -255,7 +266,7 @@ func TestTOTPService_Validate_DeviceDisabled(t *testing.T) {
 
 func TestTOTPService_Validate_ValidRecoveryCode(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, codes := enableAndVerify(t, svc, 1)
 	if len(codes) == 0 {
@@ -276,7 +287,7 @@ func TestTOTPService_Validate_ValidRecoveryCode(t *testing.T) {
 
 func TestTOTPService_Validate_UsedRecoveryCode(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, codes := enableAndVerify(t, svc, 1)
 
@@ -290,7 +301,7 @@ func TestTOTPService_Validate_UsedRecoveryCode(t *testing.T) {
 
 func TestTOTPService_Validate_InvalidRecoveryCode(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _ = enableAndVerify(t, svc, 1)
 
@@ -310,7 +321,7 @@ func TestTOTPService_BruteForce_RateLimits(t *testing.T) {
 		RecoveryCodeCount: 1,
 		RecoveryCodeBytes: 16,
 	}
-	svc := newTestTOTPService(repo, store, nil, cfg)
+	svc := newTestTOTPService(t, repo, store, nil, cfg)
 
 	secret, _ := enableAndVerify(t, svc, 1)
 
@@ -338,7 +349,7 @@ func TestTOTPService_BruteForce_RateLimits(t *testing.T) {
 
 func TestTOTPService_BruteForce_NoStore_NoOp(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _ = enableAndVerify(t, svc, 1)
 
@@ -373,7 +384,7 @@ func TestIsTOTPError(t *testing.T) {
 func TestTOTPService_ViewRecoveryCodes_ValidTOTP(t *testing.T) {
 	repo := newMockTOTPRepo()
 	audit := &mockAuditRepo{}
-	svc := newTestTOTPService(repo, nil, audit)
+	svc := newTestTOTPService(t, repo, nil, audit)
 
 	secret, issued := enableAndVerify(t, svc, 1)
 
@@ -396,7 +407,7 @@ func TestTOTPService_ViewRecoveryCodes_ValidTOTP(t *testing.T) {
 
 func TestTOTPService_ViewRecoveryCodes_BadCode(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _ = enableAndVerify(t, svc, 1)
 
@@ -408,7 +419,7 @@ func TestTOTPService_ViewRecoveryCodes_BadCode(t *testing.T) {
 
 func TestTOTPService_ViewRecoveryCodes_RecoveryCodeNotAllowed(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, codes := enableAndVerify(t, svc, 1)
 
@@ -422,7 +433,7 @@ func TestTOTPService_ViewRecoveryCodes_RecoveryCodeNotAllowed(t *testing.T) {
 func TestTOTPService_ViewRecoveryCodes_ReplayRejected(t *testing.T) {
 	repo := newMockTOTPRepo()
 	store := newMockStore()
-	svc := newTestTOTPService(repo, store, nil)
+	svc := newTestTOTPService(t, repo, store, nil)
 
 	secret, _ := enableAndVerify(t, svc, 1)
 
@@ -437,7 +448,7 @@ func TestTOTPService_ViewRecoveryCodes_ReplayRejected(t *testing.T) {
 
 func TestTOTPService_ViewRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 
@@ -449,7 +460,7 @@ func TestTOTPService_ViewRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 func TestTOTPService_ViewRecoveryCodes_ExcludesUsedCodes(t *testing.T) {
 	repo := newMockTOTPRepo()
 	store := newMockStore()
-	svc := newTestTOTPService(repo, store, nil)
+	svc := newTestTOTPService(t, repo, store, nil)
 
 	secret, codes := enableAndVerify(t, svc, 1)
 	// Burn one recovery code at login.
@@ -473,7 +484,7 @@ func TestTOTPService_ViewRecoveryCodes_ExcludesUsedCodes(t *testing.T) {
 
 func TestTOTPService_ViewRecoveryCodes_SkipsLegacyUnencryptedRows(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	secret, _ := enableAndVerify(t, svc, 1)
 	// Simulate rows written before the encrypted column existed: hashes only.
@@ -497,7 +508,7 @@ func TestTOTPService_ViewRecoveryCodes_SkipsLegacyUnencryptedRows(t *testing.T) 
 func TestTOTPService_RegenerateRecoveryCodes_ReplacesSet(t *testing.T) {
 	repo := newMockTOTPRepo()
 	store := newMockStore()
-	svc := newTestTOTPService(repo, store, nil)
+	svc := newTestTOTPService(t, repo, store, nil)
 
 	_, oldCodes := enableAndVerify(t, svc, 1)
 
@@ -526,7 +537,7 @@ func TestTOTPService_RegenerateRecoveryCodes_ReplacesSet(t *testing.T) {
 func TestTOTPService_RegenerateRecoveryCodes_EncryptedAtRest(t *testing.T) {
 	repo := newMockTOTPRepo()
 	audit := &mockAuditRepo{}
-	svc := newTestTOTPService(repo, nil, audit)
+	svc := newTestTOTPService(t, repo, nil, audit)
 
 	_, _ = enableAndVerify(t, svc, 1)
 	newCodes, err := svc.RegenerateRecoveryCodes(context.Background(), 1)
@@ -560,7 +571,7 @@ func TestTOTPService_RegenerateRecoveryCodes_EncryptedAtRest(t *testing.T) {
 
 func TestTOTPService_RegenerateRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 
@@ -571,7 +582,7 @@ func TestTOTPService_RegenerateRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 
 func TestTOTPService_RegenerateRecoveryCodes_NewSetViewable(t *testing.T) {
 	repo := newMockTOTPRepo()
-	svc := newTestTOTPService(repo, nil, nil)
+	svc := newTestTOTPService(t, repo, nil, nil)
 
 	secret, _ := enableAndVerify(t, svc, 1)
 	newCodes, err := svc.RegenerateRecoveryCodes(context.Background(), 1)
@@ -598,7 +609,7 @@ func TestTOTPService_RegenerateRecoveryCodes_NewSetViewable(t *testing.T) {
 func TestTOTPService_Audit_OnFailure(t *testing.T) {
 	repo := newMockTOTPRepo()
 	audit := &mockAuditRepo{}
-	svc := newTestTOTPService(repo, nil, audit)
+	svc := newTestTOTPService(t, repo, nil, audit)
 
 	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
 	_ = svc.Validate(context.Background(), 1, "000000")
@@ -613,7 +624,7 @@ func TestTOTPService_Audit_OnFailure(t *testing.T) {
 func TestTOTPService_ConcurrentValidates_NoRace(t *testing.T) {
 	repo := newMockTOTPRepo()
 	store := newMockStore()
-	svc := newTestTOTPService(repo, store, nil)
+	svc := newTestTOTPService(t, repo, store, nil)
 
 	secret, _ := enableAndVerify(t, svc, 1)
 

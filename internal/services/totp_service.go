@@ -48,11 +48,12 @@ type TOTPService struct {
 	audits AuditRepo
 	issuer string
 	cfg    config.AuthConfig
-	// encKey seals the re-viewable copy of each recovery code (AES-256-GCM).
+	// enc seals the re-viewable copy of each recovery code (AES-256-GCM).
 	// The SHA-256 hash remains the only thing the login-verification path
 	// touches; the sealed copy is decrypted solely for the TOTP-gated view
-	// endpoint.
-	encKey []byte
+	// endpoint. Built once at startup so the AES key schedule is not
+	// re-derived on every seal/open call.
+	enc *crypto.Encryptor
 }
 
 // NewTOTPService constructs the service. store may be nil (replay protection
@@ -60,9 +61,9 @@ type TOTPService struct {
 // writes are skipped). cfg drives recovery-code entropy/count and the
 // brute-force window; when zero-valued the fields default to safe values so
 // callers that only care about the core flow (e.g. legacy tests) still work.
-// encKey must be a 32-byte AES-256 key; it seals the displayable recovery-code
-// copies (see cmd/server wiring for how it is sourced).
-func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer string, cfg config.AuthConfig, encKey []byte) *TOTPService {
+// enc seals the displayable recovery-code copies with AES-256-GCM (see
+// cmd/server wiring for how the key is sourced).
+func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor) *TOTPService {
 	if cfg.TOTPMaxAttempts <= 0 {
 		cfg.TOTPMaxAttempts = 5
 	}
@@ -75,7 +76,7 @@ func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer
 	if cfg.RecoveryCodeBytes <= 0 {
 		cfg.RecoveryCodeBytes = 16
 	}
-	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, encKey: encKey}
+	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, enc: enc}
 }
 
 // Enable starts (or restarts) TOTP enrollment: it generates a fresh shared
@@ -241,7 +242,7 @@ func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code s
 			// not re-displayed; regenerating replaces the whole set.
 			continue
 		}
-		plain, err := crypto.Decrypt(s.encKey, rows[i].CodeEncrypted)
+		plain, err := s.enc.Decrypt(rows[i].CodeEncrypted)
 		if err != nil {
 			// Key rotated or row corrupted — same remedy as above.
 			continue
@@ -288,7 +289,7 @@ func (s *TOTPService) newRecoveryCodes(ctx context.Context, userID uint) ([]stri
 			return nil, err
 		}
 		plain[i] = hex.EncodeToString(b)
-		sealed, err := crypto.Encrypt(s.encKey, plain[i])
+		sealed, err := s.enc.Encrypt(plain[i])
 		if err != nil {
 			return nil, fmt.Errorf("seal recovery code: %w", err)
 		}

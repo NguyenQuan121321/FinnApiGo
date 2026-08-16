@@ -250,6 +250,27 @@ func TestTOTPHandlers_BodySizeGuard(t *testing.T) {
 	}
 }
 
+// TestTOTPHandlers_BodyExactlyAtLimit pins the off-by-one: a body of exactly
+// maxTOTPBody bytes must NOT be rejected as oversized (only > the cap is).
+// It fails validation later (code exceeds max=128), which still proves the
+// size guard let it through.
+func TestTOTPHandlers_BodyExactlyAtLimit(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
+
+	body := `{"code":"` + strings.Repeat("A", maxTOTPBody-len(`{"code":""}`)) + `"}`
+	if len(body) != maxTOTPBody {
+		t.Fatalf("test setup: body is %d bytes, want %d", len(body), maxTOTPBody)
+	}
+	w := serve(t, h.ValidateTOTP, body, &uid)
+	if w.Code == http.StatusRequestEntityTooLarge {
+		t.Fatalf("body exactly at the limit must not be 413: %s", w.Body.String())
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 from validation, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
 func TestTOTPHandlers_EmptyBody(t *testing.T) {
 	uid := uint(1)
 	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
