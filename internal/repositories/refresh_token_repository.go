@@ -99,8 +99,16 @@ func (r *RefreshTokenRepository) TouchLastActive(ctx context.Context, id uint) e
 }
 
 // PurgeExpired removes revoked/expired rows — call from a periodic cleanup.
+// The old single OR-predicate delete could not use either index and ran as
+// one unbounded transaction; the job now issues two indexed, LIMIT-batched
+// delete streams (expired first, then revoked) so a large backlog never
+// holds long locks (P1).
 func (r *RefreshTokenRepository) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
-	res := r.db.WithContext(ctx).Where("expires_at < ? OR revoked = ?", before, true).
-		Delete(&models.RefreshToken{})
-	return res.RowsAffected, res.Error
+	db := r.db.WithContext(ctx)
+	expired, err := batchedDelete(db, &models.RefreshToken{}, "expires_at < ?", before)
+	if err != nil {
+		return expired, err
+	}
+	revoked, err := batchedDelete(db, &models.RefreshToken{}, "revoked = ?", true)
+	return expired + revoked, err
 }

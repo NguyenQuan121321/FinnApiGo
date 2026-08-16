@@ -14,7 +14,8 @@ type UsedToken struct {
 	JTI       string    `gorm:"size:64;uniqueIndex;not null" json:"jti"`
 	TokenType string    `gorm:"size:20;not null" json:"tokenType"`
 	UserID    uint      `gorm:"index" json:"userId"`
-	ExpiresAt time.Time `gorm:"not null" json:"expiresAt"`
+	// ExpiresAt is indexed for the purge job's batched deletes (P1).
+	ExpiresAt time.Time `gorm:"not null;index" json:"expiresAt"`
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`
 }
 

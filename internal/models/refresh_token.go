@@ -13,8 +13,10 @@ type RefreshToken struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	UserID    uint      `gorm:"index;not null" json:"userId"`
 	TokenHash string    `gorm:"size:64;uniqueIndex;not null" json:"-"` // sha256 hex = 64 chars
-	ExpiresAt time.Time `gorm:"not null" json:"expiresAt"`
-	Revoked   bool      `gorm:"not null;default:false" json:"revoked"`
+	// ExpiresAt/Revoked carry the indexes backing the batched purge job's
+	// split predicates (P1) — no table scan over live sessions.
+	ExpiresAt time.Time `gorm:"not null;index" json:"expiresAt"`
+	Revoked   bool      `gorm:"not null;default:false;index" json:"revoked"`
 
 	// ---- Device/IP metadata for session management (§4) ----
 	// Nullable so existing rows are unaffected by the migration.

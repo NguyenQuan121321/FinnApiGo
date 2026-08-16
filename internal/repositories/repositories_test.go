@@ -5,13 +5,20 @@ package repositories
 // deliberately covered with fakes in services tests, not forced through SQLite.
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/finnapigo/finnapigo/internal/models"
 )
@@ -354,5 +361,85 @@ func TestUserRepository_IncrementFailedAttempts_Atomic_C3(t *testing.T) {
 	}
 	if got.FailedLoginAttempts != 2 {
 		t.Fatalf("parallel failures must both persist: attempts=%d, want 2", got.FailedLoginAttempts)
+	}
+}
+
+// TestPurgeExpired_Behavior_P1 — P1: the split, batched purge removes
+// exactly the expired + revoked rows and leaves active sessions alone.
+func TestPurgeExpired_Behavior_P1(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+	rows := []*models.RefreshToken{}
+	for i := 0; i < 5; i++ {
+		rows = append(rows, &models.RefreshToken{UserID: u.ID, TokenHash: fmt.Sprintf("exp-%d", i), ExpiresAt: past})
+	}
+	for i := 0; i < 3; i++ {
+		rows = append(rows, &models.RefreshToken{UserID: u.ID, TokenHash: fmt.Sprintf("rev-%d", i), ExpiresAt: future, Revoked: true})
+	}
+	for i := 0; i < 2; i++ {
+		rows = append(rows, &models.RefreshToken{UserID: u.ID, TokenHash: fmt.Sprintf("live-%d", i), ExpiresAt: future})
+	}
+	for _, r := range rows {
+		if err := db.Create(r).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prev := purgeBatchSize
+	purgeBatchSize = 2
+	defer func() { purgeBatchSize = prev }()
+
+	repo := NewRefreshTokenRepository(db)
+	n, err := repo.PurgeExpired(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 8 {
+		t.Fatalf("purged %d rows, want 8 (5 expired + 3 revoked)", n)
+	}
+	var remaining int64
+	db.Model(&models.RefreshToken{}).Count(&remaining)
+	if remaining != 2 {
+		t.Fatalf("remaining rows = %d, want 2 (active sessions survive)", remaining)
+	}
+}
+
+// TestPurgeExpired_BatchedSQLShape_P1 — P1: against the PRODUCTION dialect
+// (MySQL, DryRun so nothing executes), each purge statement must be a
+// single-predicate DELETE capped with LIMIT — the OR-combined full-scan
+// delete is gone. (GORM's SQLite test dialect silently drops DELETE..LIMIT,
+// which is why shape is asserted here under the MySQL dialect.)
+func TestPurgeExpired_BatchedSQLShape_P1(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rawDB.Close() }()
+	var buf bytes.Buffer
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: rawDB, SkipInitializeWithVersion: true}), &gorm.Config{
+		DryRun: true,
+		Logger: gormlogger.New(log.New(&buf, "\n", 0), gormlogger.Config{LogLevel: gormlogger.Info}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := NewRefreshTokenRepository(db)
+	if _, err := repo.PurgeExpired(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sqlLog := buf.String()
+	deletes := strings.Count(sqlLog, "DELETE")
+	if deletes != 2 {
+		t.Fatalf("expected one DELETE per predicate stream (2), got %d:\n%s", deletes, sqlLog)
+	}
+	if !strings.Contains(sqlLog, "LIMIT") {
+		t.Fatalf("purge DELETEs must carry LIMIT under the MySQL dialect:\n%s", sqlLog)
+	}
+	if strings.Contains(sqlLog, " OR ") {
+		t.Fatalf("purge must not use an OR predicate (defeats the indexes):\n%s", sqlLog)
 	}
 }
