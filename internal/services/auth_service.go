@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -614,6 +615,10 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
 		return err
 	}
+	// A7 — kill outstanding ACCESS tokens too (refresh tokens die below).
+	if err := s.bumpPwdVersion(ctx, user.ID); err != nil {
+		return err
+	}
 	if err := s.tokens.RevokeAllForUser(ctx, user.ID); err != nil {
 		return err
 	}
@@ -651,6 +656,10 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 	}
 	// C10 — knowing the old password proves ownership: clear lockout state.
 	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
+		return err
+	}
+	// A7 — kill outstanding ACCESS tokens too (refresh tokens die below).
+	if err := s.bumpPwdVersion(ctx, user.ID); err != nil {
 		return err
 	}
 	if err := s.tokens.RevokeAllForUser(ctx, user.ID); err != nil {
@@ -705,6 +714,10 @@ func (s *AuthService) SetPassword(ctx context.Context, userID uint, newPassword,
 		return err
 	}
 	if err := s.users.UpdatePassword(ctx, user, hashed); err != nil {
+		return err
+	}
+	// A7 — a first credential invalidates pre-credential access tokens.
+	if err := s.bumpPwdVersion(ctx, user.ID); err != nil {
 		return err
 	}
 	s.audits.Record(ctx, &models.AuditLog{
@@ -762,9 +775,11 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 // issueTokenPair mints an access JWT + opaque refresh token (hash stored).
 // The caller's ip/ua are stamped onto the new refresh-token row so it doubles
 // as a session/device record (location is resolved via the geo resolver).
+// The access token embeds the user's password version so the next credential
+// change kills it (A7).
 func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, error) {
-	access, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		jwt.TokenTypeAccess, s.jwtCfg.AccessTTL)
+	access, err := s.jwt.IssueAccess(user.ID, user.Role, user.Email,
+		s.jwtCfg.AccessTTL, user.PwdVersion)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -909,6 +924,59 @@ func (s *AuthService) recordLoginFailIP(ctx context.Context, ip string) {
 	if s.store != nil && ip != "" {
 		_ = s.store.IncrBy("loginfail:"+ip, 1, time.Hour)
 	}
+}
+
+// pwdVerCacheTTL bounds how long AuthMiddleware sees a stale password
+// version after a credential change (A7). 60s keeps the per-request cost at
+// one store hit; the exposure window for a revoked-but-still-accepted access
+// token is this TTL, and at most AccessTTL when the store is unavailable.
+const pwdVerCacheTTL = 60 * time.Second
+
+// bumpPwdVersion advances the credential counter and drops its cached value
+// so AuthMiddleware sees the new version immediately instead of after the
+// cache TTL (A7).
+func (s *AuthService) bumpPwdVersion(ctx context.Context, userID uint) error {
+	if err := s.users.BumpPwdVersion(ctx, userID); err != nil {
+		return err
+	}
+	if s.store != nil {
+		s.store.Delete(fmt.Sprintf("pwdver:%d", userID))
+	}
+	return nil
+}
+
+// CurrentPwdVersion returns the user's live credential version for
+// AuthMiddleware (A7): store-cached for pwdVerCacheTTL, DB on cache miss.
+// A store failure falls through to the DB; when both fail the error is
+// returned and callers must decide (the middleware then fails OPEN — the
+// remaining bound is AccessTTL, the documented worst case).
+func (s *AuthService) CurrentPwdVersion(ctx context.Context, userID uint) (int64, error) {
+	key := fmt.Sprintf("pwdver:%d", userID)
+	if s.store != nil {
+		if v, ok := s.store.Get(key); ok {
+			switch n := v.(type) {
+			case int64:
+				return n, nil
+			case int:
+				return int64(n), nil
+			case string:
+				if parsed, err := strconv.ParseInt(n, 10, 64); err == nil {
+					return parsed, nil
+				}
+			}
+		}
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	if user == nil {
+		return 0, nil
+	}
+	if s.store != nil {
+		s.store.Set(key, user.PwdVersion, pwdVerCacheTTL)
+	}
+	return user.PwdVersion, nil
 }
 
 // markTokenUsed uses SetNX on the store to atomically check-and-mark a JWT

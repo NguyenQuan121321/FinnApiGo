@@ -101,6 +101,15 @@ func (r *UserRepository) ResetFailedAttempts(ctx context.Context, user *models.U
 	}).Error
 }
 
+// BumpPwdVersion increments the credential-version counter in SQL (atomic —
+// concurrent changes must both land). Access tokens carrying an older
+// version are rejected afterwards (A7).
+func (r *UserRepository) BumpPwdVersion(ctx context.Context, userID uint) error {
+	return r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ?", userID).
+		Update("pwd_version", gorm.Expr("pwd_version + 1")).Error
+}
+
 func (r *UserRepository) SetEmailVerified(ctx context.Context, user *models.User, verified bool) error {
 	user.IsEmailVerified = verified
 	return r.db.WithContext(ctx).Model(user).Update("is_email_verified", verified).Error

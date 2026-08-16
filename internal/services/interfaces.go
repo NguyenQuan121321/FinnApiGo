@@ -25,6 +25,9 @@ type UserRepo interface {
 	IncrementFailedAttempts(ctx context.Context, user *models.User, lockUntil *time.Time) error
 	ResetFailedAttempts(ctx context.Context, user *models.User) error
 	SetEmailVerified(ctx context.Context, user *models.User, verified bool) error
+	// BumpPwdVersion atomically increments users.pwd_version — called on
+	// every credential change so outstanding access tokens die (A7).
+	BumpPwdVersion(ctx context.Context, userID uint) error
 }
 
 // RefreshTokenRepo abstracts persistence for refresh tokens. Each token row

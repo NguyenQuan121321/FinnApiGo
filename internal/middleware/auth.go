@@ -3,6 +3,7 @@
 package middleware
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 
@@ -41,10 +42,21 @@ func denyAuth(c *gin.Context, msg string) {
 	c.Abort()
 }
 
+// VersionSource returns the live password-version counter for a user (A7).
+// Wire AuthService.CurrentPwdVersion in production; nil disables the check
+// (tests / degraded deployments).
+type VersionSource func(ctx context.Context, userID uint) (int64, error)
+
 // AuthMiddleware verifies the Bearer JWT from the Authorization header.
 // On success it stores user_id / role / email into the Gin context for
 // downstream handlers. On failure it short-circuits with 401.
-func AuthMiddleware(jwtMgr *jwt.JWTManager) gin.HandlerFunc {
+//
+// A7 — when a VersionSource is wired, access tokens whose embedded pwdver
+// falls behind the live counter (the credential changed) are rejected. If the
+// version cannot be LOADED (store + DB both unreachable) the request is
+// allowed through with a warning: the residual exposure is bounded by the
+// access TTL, the documented worst case.
+func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
@@ -65,6 +77,16 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager) gin.HandlerFunc {
 		if claims.Type != jwt.TokenTypeAccess {
 			denyAuth(c, "invalid token type")
 			return
+		}
+		if pwdVersion != nil {
+			current, err := pwdVersion(c.Request.Context(), claims.UserID)
+			if err != nil {
+				slog.Warn("auth: password version unavailable — failing open (bounded by access TTL)",
+					"user_id", claims.UserID, "err", err)
+			} else if claims.PwdVer < current {
+				denyAuth(c, "credentials changed, please sign in again")
+				return
+			}
 		}
 		c.Set(CtxUserID, claims.UserID)
 		c.Set(CtxRole, claims.Role)

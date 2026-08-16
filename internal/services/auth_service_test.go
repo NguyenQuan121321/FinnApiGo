@@ -1519,3 +1519,77 @@ func TestConsoleNotifier_RefusesInReleaseMode_A8(t *testing.T) {
 		t.Fatalf("debug mode must allow delivery: %v", err)
 	}
 }
+
+// TestCredentialChange_RevokesAccessTokensViaPwdVer_A7 — A7: password
+// change bumps users.pwd_version; access tokens minted afterwards carry the
+// new version while pre-change tokens keep the old one (and are therefore
+// rejected by AuthMiddleware, covered in the middleware tests).
+func TestCredentialChange_RevokesAccessTokensViaPwdVer_A7(t *testing.T) {
+	svc, users, _, _, notify, _ := buildAuthService(t,
+		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute},
+		config.RateLimitConfig{}, nil)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "heidi", Email: "heidi@example.com", Password: "Password1", FullName: "H",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := users.FindByEmail(context.Background(), "heidi@example.com")
+	mgr := jwt.NewJWTManager("test-secret", "test-issuer")
+
+	// Pre-change token carries pwdver=0; the live version starts at 0.
+	pair, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "heidi@example.com", Password: "Password1",
+	}, "ip", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := mgr.Verify(pair.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.PwdVer != 0 {
+		t.Fatalf("pre-change token pwdver = %d, want 0", claims.PwdVer)
+	}
+
+	// Change the password: the version bumps to 1.
+	if err := svc.ChangePassword(context.Background(), ChangePasswordInput{
+		UserID: u.ID, OldPassword: "Password1", NewPassword: "NewPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+	live, err := svc.CurrentPwdVersion(context.Background(), u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live != 1 {
+		t.Fatalf("pwd_version after change = %d, want 1", live)
+	}
+
+	// A fresh login carries the new version.
+	pair2, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "heidi@example.com", Password: "NewPassword1",
+	}, "ip", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims2, err := mgr.Verify(pair2.AccessToken); err != nil || claims2.PwdVer != 1 {
+		t.Fatalf("post-change token pwdver = %d err=%v, want 1", claims2.PwdVer, err)
+	}
+
+	// Password reset bumps again.
+	if err := svc.ForgotPassword(context.Background(), "heidi@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "ResetPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+	live, err = svc.CurrentPwdVersion(context.Background(), u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live != 2 {
+		t.Fatalf("pwd_version after reset = %d, want 2", live)
+	}
+}

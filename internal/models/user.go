@@ -28,8 +28,13 @@ type User struct {
 	IsEmailVerified     bool       `gorm:"not null;default:false"      json:"isEmailVerified"`
 	FailedLoginAttempts int        `gorm:"not null;default:0"          json:"-"`
 	LockedUntil         *time.Time `json:"-"` // nil = not locked
-	CreatedAt           time.Time  `json:"createdAt"`
-	UpdatedAt           time.Time  `json:"updatedAt"`
+	// PwdVersion increments on every credential change (reset / change /
+	// first set). Access tokens embed the version at issue time and are
+	// rejected once it falls behind (A7) — revoking existing access tokens
+	// without a server-side session list.
+	PwdVersion int64     `gorm:"not null;default:0" json:"-"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
 func (User) TableName() string { return "users" }

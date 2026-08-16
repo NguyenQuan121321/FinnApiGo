@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"context"
+	"errors"
+
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -18,7 +21,7 @@ import (
 func setupAuthRouter(jwtMgr *jwt.JWTManager) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
-	r.Use(AuthMiddleware(jwtMgr))
+	r.Use(AuthMiddleware(jwtMgr, nil))
 	r.GET("/protected", func(c *gin.Context) {
 		userID, _ := c.Get(CtxUserID)
 		role, _ := c.Get(CtxRole)
@@ -158,7 +161,7 @@ func TestAuthMiddleware_DenialsAreLogged_A4(t *testing.T) {
 	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
 	r := gin.New()
 	r.Use(func(c *gin.Context) { c.Set("request_id", "rid-a4-test"); c.Next() })
-	r.GET("/p", AuthMiddleware(jwtMgr), func(c *gin.Context) { c.Status(200) })
+	r.GET("/p", AuthMiddleware(jwtMgr, nil), func(c *gin.Context) { c.Status(200) })
 
 	req := httptest.NewRequest(http.MethodGet, "/p", nil)
 	req.Header.Set("Authorization", "Bearer not-a-jwt")
@@ -177,5 +180,46 @@ func TestAuthMiddleware_DenialsAreLogged_A4(t *testing.T) {
 	}
 	if !strings.Contains(out, "rid=rid-a4-test") {
 		t.Error("denial log must carry the request id")
+	}
+}
+
+// TestAuthMiddleware_StalePwdVersionRejected_A7 — A7: an access token whose
+// pwdver claim falls behind the live counter (the credential changed since
+// issue) must be rejected; equal versions pass, and a version-source error
+// fails OPEN (bounded by the access TTL, the documented worst case).
+func TestAuthMiddleware_StalePwdVersionRejected_A7(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	stale, err := jwtMgr.IssueAccess(7, "user", "u@e.com", time.Minute, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := jwtMgr.IssueAccess(7, "user", "u@e.com", time.Minute, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var live int64 = 1
+	src := func(ctx context.Context, userID uint) (int64, error) { return live, nil }
+
+	do := func(token string, ver VersionSource) int {
+		r := gin.New()
+		r.GET("/p", AuthMiddleware(jwtMgr, ver), func(c *gin.Context) { c.Status(200) })
+		req := httptest.NewRequest(http.MethodGet, "/p", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	if got := do(stale, src); got != 401 {
+		t.Errorf("stale pwdver token: status=%d, want 401", got)
+	}
+	if got := do(fresh, src); got != 200 {
+		t.Errorf("current pwdver token: status=%d, want 200", got)
+	}
+	// Source failing → fail open (AccessTTL bound).
+	failSrc := func(ctx context.Context, userID uint) (int64, error) { return 0, errors.New("db down") }
+	if got := do(stale, failSrc); got != 200 {
+		t.Errorf("version source error must fail open: status=%d, want 200", got)
 	}
 }

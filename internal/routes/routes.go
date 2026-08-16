@@ -35,6 +35,10 @@ type Deps struct {
 	// HSTSSeconds enables Strict-Transport-Security on HTTPS responses when
 	// > 0 (A3). Ignored for plain-HTTP requests.
 	HSTSSeconds int
+	// PwdVersion backs AuthMiddleware's access-token revocation on
+	// credential change (A7); typically services.AuthService.CurrentPwdVersion.
+	// Nil disables the check.
+	PwdVersion middleware.VersionSource
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -114,7 +118,7 @@ func Register(deps Deps) *gin.Engine {
 
 	// ---- Authenticated core-auth endpoints ----
 	authed := auth.Group("")
-	authed.Use(middleware.AuthMiddleware(deps.JWT))
+	authed.Use(middleware.AuthMiddleware(deps.JWT, deps.PwdVersion))
 	authed.POST("/logout", deps.Auth.Logout)
 	authed.POST("/logout-all", deps.Auth.LogoutAll)
 	authed.POST("/change-password", deps.Auth.ChangePassword)

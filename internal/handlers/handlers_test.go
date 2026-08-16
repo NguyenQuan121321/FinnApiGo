@@ -174,7 +174,7 @@ func TestSetPassword_RequiresAccessToken(t *testing.T) {
 	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
 	h := NewAuthHandler(fakeAuthService{}, nil)
 	r := gin.New()
-	r.POST("/set-password", middleware.AuthMiddleware(jwtMgr), h.SetPassword)
+	r.POST("/set-password", middleware.AuthMiddleware(jwtMgr, nil), h.SetPassword)
 
 	do := func(authHeader string) int {
 		w := httptest.NewRecorder()

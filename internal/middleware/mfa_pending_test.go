@@ -98,7 +98,7 @@ func TestAuthMiddleware_RejectsMFAPendingToken(t *testing.T) {
 	tok, _ := jwtMgr.Issue(42, "", "", jwt.TokenTypeMFAPending, 5*time.Minute)
 
 	r := gin.New()
-	r.GET("/me", AuthMiddleware(jwtMgr), func(c *gin.Context) {
+	r.GET("/me", AuthMiddleware(jwtMgr, nil), func(c *gin.Context) {
 		t.Error("handler should not be reached with mfa_pending token")
 		c.JSON(200, nil)
 	})

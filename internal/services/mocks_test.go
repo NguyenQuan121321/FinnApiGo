@@ -136,6 +136,15 @@ func (m *mockUserRepo) SetEmailVerified(ctx context.Context, user *models.User, 
 	return nil
 }
 
+func (m *mockUserRepo) BumpPwdVersion(ctx context.Context, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if u, ok := m.users[userID]; ok {
+		u.PwdVersion++
+	}
+	return nil
+}
+
 // ---- mock refresh token repo ----
 
 type mockTokenRepo struct {
