@@ -55,7 +55,7 @@ func (fakeAuthService) CompleteMFALogin(context.Context, services.CompleteMFALog
 
 type fakeTOTPService struct{ err error }
 
-func (f fakeTOTPService) Enable(context.Context, uint, string) (string, string, error) {
+func (f fakeTOTPService) Enable(context.Context, uint, string, string) (string, string, error) {
 	return "secret", "otpauth://test", f.err
 }
 func (f fakeTOTPService) VerifyEnable(context.Context, uint, string) ([]string, error) {

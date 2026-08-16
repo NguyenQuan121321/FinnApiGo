@@ -11,6 +11,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/store"
@@ -56,6 +57,9 @@ type TOTPService struct {
 	// endpoint. Built once at startup so the AES key schedule is not
 	// re-derived on every seal/open call.
 	enc *crypto.Encryptor
+	// jwtMgr verifies the sudo token required to rotate an ACTIVE device
+	// (C6). Nil fails closed — sudo can never be proven without it.
+	jwtMgr *jwt.JWTManager
 }
 
 // NewTOTPService constructs the service. store may be nil (replay protection
@@ -64,8 +68,9 @@ type TOTPService struct {
 // brute-force window; when zero-valued the fields default to safe values so
 // callers that only care about the core flow (e.g. legacy tests) still work.
 // enc seals the displayable recovery-code copies with AES-256-GCM (see
-// cmd/server wiring for how the key is sourced).
-func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor) *TOTPService {
+// cmd/server wiring for how the key is sourced). jwtMgr verifies sudo tokens
+// for re-enrollment of active devices.
+func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor, jwtMgr *jwt.JWTManager) *TOTPService {
 	if cfg.TOTPMaxAttempts <= 0 {
 		cfg.TOTPMaxAttempts = 5
 	}
@@ -78,32 +83,45 @@ func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer s
 	if cfg.RecoveryCodeBytes <= 0 {
 		cfg.RecoveryCodeBytes = 16
 	}
-	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, enc: enc}
+	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, enc: enc, jwtMgr: jwtMgr}
 }
 
 // Enable starts (or restarts) TOTP enrollment: it generates a fresh shared
-// secret and returns the secret + the otpauth:// provisioning URI. The device
-// is left disabled until VerifyEnable confirms the user can read it.
-func (s *TOTPService) Enable(ctx context.Context, userID uint, email string) (string, string, error) {
+// secret and returns the secret + the otpauth:// provisioning URI.
+//
+// Re-enrolling an ACTIVE device (C6) requires a valid sudo token for this
+// user; the fresh secret is staged in PendingSecret and the device STAYS
+// enabled on its old secret until VerifyEnable confirms the new one — a
+// stolen access token alone can neither rotate nor disable MFA. A device that
+// was never confirmed (disabled) rotates freely, matching first-time
+// enrollment.
+func (s *TOTPService) Enable(ctx context.Context, userID uint, email, sudoToken string) (string, string, error) {
+	old, err := s.repo.FindByUserID(ctx, userID)
+	if err != nil {
+		return "", "", err
+	}
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer: s.issuer, AccountName: email,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("totp generate: %w", err)
 	}
-	old, err := s.repo.FindByUserID(ctx, userID)
-	if err != nil {
-		return "", "", err
-	}
 	var d *models.TOTPDevice
-	if old != nil {
-		// Rotate the secret on every enable; the device stays disabled until
-		// the new secret is confirmed via VerifyEnable.
-		old.Secret = key.Secret()
-		old.Enabled = false
-		d = old
-	} else {
+	switch {
+	case old == nil:
 		d = &models.TOTPDevice{UserID: userID, Secret: key.Secret(), Enabled: false}
+	case old.Enabled:
+		if err := s.verifySudoToken(sudoToken, userID); err != nil {
+			return "", "", err
+		}
+		old.PendingSecret = key.Secret()
+		d = old
+	default:
+		// Abandoned enrollment: the device was never confirmed, so rotating
+		// the secret outright is safe.
+		old.Secret = key.Secret()
+		old.PendingSecret = ""
+		d = old
 	}
 	if err = s.repo.Upsert(ctx, d); err != nil {
 		return "", "", err
@@ -111,13 +129,29 @@ func (s *TOTPService) Enable(ctx context.Context, userID uint, email string) (st
 	return key.Secret(), key.URL(), nil
 }
 
+// verifySudoToken proves the caller holds a sudo JWT bound to this user —
+// issued only after a current TOTP proof (see ViewRecoveryCodes). A missing
+// manager or token, a bad signature/type/owner, or an absent expiry all
+// refuse; sudo is never proven by default (fail closed).
+func (s *TOTPService) verifySudoToken(token string, userID uint) error {
+	if s.jwtMgr == nil || token == "" {
+		return ErrSudoRequired
+	}
+	claims, err := s.jwtMgr.Verify(token)
+	if err != nil || claims.Type != jwt.TokenTypeSudo || claims.UserID != userID || claims.ExpiresAt == nil {
+		return ErrSudoRequired
+	}
+	return nil
+}
+
 // VerifyEnable confirms an enrollment: validates the provided 6-digit code
-// against the pending secret and, on success, activates the device and issues
-// a fresh batch of recovery codes. The plaintext recovery codes are returned
-// to the caller; at rest only their SHA-256 hashes (for login verification)
-// and an AES-256-GCM sealed copy (for the TOTP-gated view endpoint) persist.
-// Issuing a fresh batch also replaces any codes left over from a previous
-// enrollment.
+// and, on success, activates the device and issues a fresh batch of recovery
+// codes. During a sudo-gated rotation of an ACTIVE device (C6) the code must
+// match the PendingSecret; the active Secret keeps serving logins until this
+// confirmation swaps them. The plaintext recovery codes are returned to the
+// caller; at rest only their SHA-256 hashes (for login verification) and an
+// AES-256-GCM sealed copy (for the TOTP-gated view endpoint) persist. Issuing
+// a fresh batch also replaces any codes left over from a previous enrollment.
 func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string) ([]string, error) {
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return nil, err
@@ -130,12 +164,22 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 		s.recordFailure(ctx, userID, "no pending device")
 		return nil, ErrInvalidCode
 	}
-	if d.Enabled {
+	confirming := d.PendingSecret != ""
+	if d.Enabled && !confirming {
 		return nil, ErrInvalidInput
 	}
-	if !totpValid(code, d.Secret) {
+	secret := d.Secret
+	if confirming {
+		secret = d.PendingSecret
+	}
+	if !totpValid(code, secret) {
 		s.recordFailure(ctx, userID, "bad enable code")
 		return nil, ErrInvalidCode
+	}
+	prevSecret := d.Secret
+	if confirming {
+		// Promote the pending secret; the device stays enabled throughout.
+		d.Secret, d.PendingSecret = d.PendingSecret, ""
 	}
 	d.Enabled = true
 	if err = s.repo.Upsert(ctx, d); err != nil {
@@ -143,8 +187,13 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 	}
 	codes, err := s.newRecoveryCodes(ctx, userID)
 	if err != nil {
-		// Roll back activation so the user can retry Enable -> VerifyEnable.
-		d.Enabled = false
+		// Roll back so the user can retry Enable -> VerifyEnable: a pending
+		// rotation returns to staged state, a fresh enrollment is deactivated.
+		if confirming {
+			d.Secret, d.PendingSecret = prevSecret, d.Secret
+		} else {
+			d.Enabled = false
+		}
 		_ = s.repo.Upsert(ctx, d)
 		return nil, fmt.Errorf("generate recovery codes: %w", err)
 	}

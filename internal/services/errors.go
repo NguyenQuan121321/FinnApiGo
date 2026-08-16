@@ -19,6 +19,9 @@ var (
 	ErrAccountLocked    = errors.New("account is temporarily locked due to repeated failed attempts")
 	ErrAccountDisabled  = errors.New("account is disabled")
 	ErrEmailNotVerified = errors.New("email is not verified")
+	// rotating an ACTIVE TOTP device requires a sudo token (minted only after
+	// a current TOTP proof) — a bare access token must not touch MFA.
+	ErrSudoRequired = errors.New("sudo verification required")
 
 	// 400 — adaptive CAPTCHA (§3): presented when too many failures from an IP
 	// make a CAPTCHA mandatory and the request omitted/failed one.

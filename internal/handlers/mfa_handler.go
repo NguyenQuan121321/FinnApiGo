@@ -15,7 +15,9 @@ import (
 
 // TOTPService is the MFA mechanism exposed under /api/v1/auth/mfa.
 type TOTPService interface {
-	Enable(context.Context, uint, string) (string, string, error)
+	// Enable starts enrollment. sudoToken (X-Sudo-Token) is only required —
+	// and enforced in the service — when rotating an already-ACTIVE device.
+	Enable(context.Context, uint, string, string) (string, string, error)
 	VerifyEnable(context.Context, uint, string) ([]string, error)
 	Validate(context.Context, uint, string) error
 	// ViewRecoveryCodes re-displays the saved codes after a current TOTP code.
@@ -53,7 +55,9 @@ func (h *MFAHandler) EnableTOTP(c *gin.Context) {
 	if e, ok := email.(string); ok && e != "" {
 		account = e
 	}
-	secret, uri, err := h.totp.Enable(c.Request.Context(), uid, account)
+	// Re-enrolling an active device demands sudo; the header is forwarded and
+	// the service enforces it (a bare access token is not enough, C6).
+	secret, uri, err := h.totp.Enable(c.Request.Context(), uid, account, c.GetHeader(middleware.SudoHeader))
 	if err != nil {
 		respondError(c, err)
 		return

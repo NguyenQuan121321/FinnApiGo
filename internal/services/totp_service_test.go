@@ -13,6 +13,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/store"
 )
@@ -34,6 +35,10 @@ func testEncKey() []byte {
 	return []byte("test-recovery-encryption-key-32b")
 }
 
+// testJWTManager signs/verifies the sudo tokens used in TOTP service tests
+// (C6). The secret is public test data.
+var testJWTManager = jwt.NewJWTManager("test-secret", "test-issuer")
+
 // newTestTOTPService builds a TOTPService with sensible test defaults. Pass
 // nil for store/audits to disable those subsystems.
 func newTestTOTPService(t *testing.T, repo TOTPRepo, kv store.Store, audits AuditRepo, cfgOverrides ...config.AuthConfig) *TOTPService {
@@ -46,14 +51,14 @@ func newTestTOTPService(t *testing.T, repo TOTPRepo, kv store.Store, audits Audi
 	if len(cfgOverrides) > 0 {
 		cfg = cfgOverrides[0]
 	}
-	return NewTOTPService(repo, kv, audits, "TestIssuer", cfg, testEncryptor(t))
+	return NewTOTPService(repo, kv, audits, "TestIssuer", cfg, testEncryptor(t), testJWTManager)
 }
 
 // enableAndVerify is a test helper that runs Enable then VerifyEnable, returning
 // the secret and recovery codes. Panics on failure (test-only).
 func enableAndVerify(t *testing.T, svc *TOTPService, userID uint) (string, []string) {
 	t.Helper()
-	secret, _, err := svc.Enable(context.Background(), userID, "user@example.com")
+	secret, _, err := svc.Enable(context.Background(), userID, "user@example.com", "")
 	if err != nil {
 		t.Fatalf("Enable: %v", err)
 	}
@@ -70,7 +75,7 @@ func TestTOTPService_Enable_CreatesDevice(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 
-	secret, uri, err := svc.Enable(context.Background(), 1, "user@example.com")
+	secret, uri, err := svc.Enable(context.Background(), 1, "user@example.com", "")
 	if err != nil {
 		t.Fatalf("Enable failed: %v", err)
 	}
@@ -97,8 +102,8 @@ func TestTOTPService_Enable_RotatesExistingSecret(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 
-	secret1, _, _ := svc.Enable(context.Background(), 1, "a@b.com")
-	secret2, _, err := svc.Enable(context.Background(), 1, "a@b.com")
+	secret1, _, _ := svc.Enable(context.Background(), 1, "a@b.com", "")
+	secret2, _, err := svc.Enable(context.Background(), 1, "a@b.com", "")
 	if err != nil {
 		t.Fatalf("second Enable failed: %v", err)
 	}
@@ -118,7 +123,7 @@ func TestTOTPService_VerifyEnable_ValidCode(t *testing.T) {
 	audit := &mockAuditRepo{}
 	svc := newTestTOTPService(t, repo, nil, audit)
 
-	secret, _, _ := svc.Enable(context.Background(), 1, "user@example.com")
+	secret, _, _ := svc.Enable(context.Background(), 1, "user@example.com", "")
 	codes, err := svc.VerifyEnable(context.Background(), 1, totpCode(t, secret))
 	if err != nil {
 		t.Fatalf("VerifyEnable failed: %v", err)
@@ -145,7 +150,7 @@ func TestTOTPService_VerifyEnable_BadCode(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 
-	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
+	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com", "")
 	_, err := svc.VerifyEnable(context.Background(), 1, "000000")
 	if !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode, got %v", err)
@@ -156,7 +161,7 @@ func TestTOTPService_VerifyEnable_AlreadyEnabled(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 
-	secret, _, _ := svc.Enable(context.Background(), 1, "user@example.com")
+	secret, _, _ := svc.Enable(context.Background(), 1, "user@example.com", "")
 	_, _ = svc.VerifyEnable(context.Background(), 1, totpCode(t, secret))
 	_, err := svc.VerifyEnable(context.Background(), 1, totpCode(t, secret))
 	if !errors.Is(err, ErrInvalidInput) {
@@ -257,7 +262,7 @@ func TestTOTPService_Validate_DeviceDisabled(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 
-	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
+	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com", "")
 	// Device is disabled (never verified).
 
 	if err := svc.Validate(context.Background(), 1, "123456"); err == nil {
@@ -453,7 +458,7 @@ func TestTOTPService_ViewRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 
-	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
+	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com", "")
 
 	if _, err := svc.ViewRecoveryCodes(context.Background(), 1, "123456"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for unverified device, got %v", err)
@@ -576,7 +581,7 @@ func TestTOTPService_RegenerateRecoveryCodes_DeviceNotEnabled(t *testing.T) {
 	repo := newMockTOTPRepo()
 	svc := newTestTOTPService(t, repo, nil, nil)
 
-	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
+	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com", "")
 
 	if _, err := svc.RegenerateRecoveryCodes(context.Background(), 1); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for unverified device, got %v", err)
@@ -614,7 +619,7 @@ func TestTOTPService_Audit_OnFailure(t *testing.T) {
 	audit := &mockAuditRepo{}
 	svc := newTestTOTPService(t, repo, nil, audit)
 
-	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com")
+	_, _, _ = svc.Enable(context.Background(), 1, "user@example.com", "")
 	_ = svc.Validate(context.Background(), 1, "000000")
 
 	if audit.count() == 0 {
@@ -713,5 +718,106 @@ func TestTOTPService_Validate_ConcurrentSameRecoveryCode_C2(t *testing.T) {
 
 	if got := successes.Load(); got != 1 {
 		t.Fatalf("exactly one concurrent recovery-code use must succeed, got %d/2", got)
+	}
+}
+
+// ---------- C6: re-enrollment of an active device ----------
+
+// TestTOTPService_Enable_ActiveDeviceRequiresSudo_C6 — C6 regression: Enable
+// on an ENABLED device must refuse without a valid sudo token bound to the
+// same user, and must leave the active device (secret + enabled) untouched —
+// a stolen access token alone must not rotate or disable MFA.
+func TestTOTPService_Enable_ActiveDeviceRequiresSudo_C6(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(t, repo, nil, nil)
+	oldSecret, _ := enableAndVerify(t, svc, 1)
+
+	if _, _, err := svc.Enable(context.Background(), 1, "user@example.com", ""); !errors.Is(err, ErrSudoRequired) {
+		t.Fatalf("bare enable on active device: expected ErrSudoRequired, got %v", err)
+	}
+	// A sudo token minted for ANOTHER user must be refused too.
+	foreign, err := testJWTManager.Issue(2, "", "", jwt.TokenTypeSudo, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Enable(context.Background(), 1, "user@example.com", foreign); !errors.Is(err, ErrSudoRequired) {
+		t.Fatalf("foreign sudo token: expected ErrSudoRequired, got %v", err)
+	}
+	// An access token presented as sudo must be refused as well.
+	access, err := testJWTManager.Issue(1, "user", "user@example.com", jwt.TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Enable(context.Background(), 1, "user@example.com", access); !errors.Is(err, ErrSudoRequired) {
+		t.Fatalf("access token as sudo: expected ErrSudoRequired, got %v", err)
+	}
+
+	d, err := repo.FindByUserID(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Enabled {
+		t.Error("device must remain enabled after refused rotation")
+	}
+	if d.Secret != oldSecret || d.PendingSecret != "" {
+		t.Errorf("device secret must be untouched: secret-changed=%t pending=%q",
+			d.Secret != oldSecret, d.PendingSecret)
+	}
+}
+
+// TestTOTPService_Enable_SudoRotationKeepsDeviceActive_C6 — with a valid sudo
+// token the rotation stages the new secret as PENDING: logins keep validating
+// against the old secret until VerifyEnable confirms the new one, so MFA is
+// never disabled by re-enrollment.
+func TestTOTPService_Enable_SudoRotationKeepsDeviceActive_C6(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(t, repo, nil, nil)
+	oldSecret, _ := enableAndVerify(t, svc, 1)
+
+	sudo, err := testJWTManager.Issue(1, "", "", jwt.TokenTypeSudo, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newSecret, _, err := svc.Enable(context.Background(), 1, "user@example.com", sudo)
+	if err != nil {
+		t.Fatalf("sudo-gated enable: %v", err)
+	}
+	if newSecret == oldSecret {
+		t.Fatal("rotation must produce a new secret")
+	}
+
+	d, err := repo.FindByUserID(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Enabled {
+		t.Fatal("device must stay enabled during pending rotation")
+	}
+	if d.Secret != oldSecret {
+		t.Fatal("old secret must keep validating until confirmation")
+	}
+	if d.PendingSecret != newSecret {
+		t.Fatal("new secret must be staged in PendingSecret")
+	}
+	// While pending, validation still accepts the OLD secret's codes and
+	// rejects the new secret's codes.
+	if err := svc.Validate(context.Background(), 1, totpCode(t, oldSecret)); err != nil {
+		t.Fatalf("old secret must still validate during pending rotation: %v", err)
+	}
+
+	codes, err := svc.VerifyEnable(context.Background(), 1, totpCode(t, newSecret))
+	if err != nil {
+		t.Fatalf("confirm pending rotation: %v", err)
+	}
+	if len(codes) == 0 {
+		t.Fatal("confirmation must issue recovery codes")
+	}
+	d, err = repo.FindByUserID(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Enabled || d.Secret != newSecret || d.PendingSecret != "" {
+		t.Fatalf("post-confirm state wrong: enabled=%t secret-rotated=%t pending=%q",
+			d.Enabled, d.Secret == newSecret, d.PendingSecret)
 	}
 }
