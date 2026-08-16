@@ -5,7 +5,7 @@ info:
 
 http:
   method: POST
-  url: http://localhost:8081/api/v1/auth/mfa/totp/recovery-codes/regenerate
+  url: "{{baseUrl}}/api/v1/auth/mfa/totp/recovery-codes/regenerate"
   headers:
     - name: X-Sudo-Token
       value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjI2NDQsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJuZ3V5ZW5ob2FuZ2FuaHF1YW4xM0BnbWFpbC5jb20iLCJ0eXBlIjoic3VkbyIsImlzcyI6ImZpbm5hcGlnbyIsInN1YiI6IjI2NDQiLCJleHAiOjE3ODY4MjY4MzEsIm5iZiI6MTc4NjgyNTkzMSwiaWF0IjoxNzg2ODI1OTMxfQ.HoWRC3MegAMHd2nzNEMNhMQCkrBy664pn9-Bn_n84is

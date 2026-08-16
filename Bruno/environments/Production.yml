@@ -1,0 +1,5 @@
+name: Production
+variables:
+  - name: baseUrl
+    value: https://finnapigo.onrender.com
+    description: ""

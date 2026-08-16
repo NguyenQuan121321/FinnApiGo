@@ -5,7 +5,7 @@ info:
 
 http:
   method: POST
-  url: http://localhost:8081/api/v1/auth/mfa/totp/verify
+  url: "{{baseUrl}}/api/v1/auth/mfa/totp/verify"
   body:
     type: json
     data: '{ "code": "674096" }'

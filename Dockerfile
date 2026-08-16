@@ -1,5 +1,5 @@
 # Multi-stage build for FinnApiGo.
-FROM golang:1.23-alpine AS builder
+FROM golang:1.25-alpine AS builder
 WORKDIR /src
 
 # Cache deps first.
