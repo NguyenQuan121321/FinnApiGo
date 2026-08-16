@@ -19,17 +19,18 @@ import (
 // knobs are tuned short for test speed.
 func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier) {
 	tokens := newMockTokenRepo()
-	svc, users, audit, notify := newTestAuthServiceWithTokens(tokens)
+	svc, users, audit, notify, _ := newTestAuthServiceWithTokens(tokens)
 	return svc, users, tokens, audit, notify
 }
 
 // newTestAuthServiceWithTokens is newTestAuthService with a caller-supplied
 // RefreshTokenRepo, for concurrency tests that must control the read→revoke
-// race window deterministically.
-func newTestAuthServiceWithTokens(tokens RefreshTokenRepo) (*AuthService, *mockUserRepo, *mockAuditRepo, *mockNotifier) {
+// race window deterministically. It also returns the mock store so tests can
+// flush it (single-use durability, C8).
+func newTestAuthServiceWithTokens(tokens RefreshTokenRepo) (*AuthService, *mockUserRepo, *mockAuditRepo, *mockNotifier, *mockStore) {
 	users := newMockUserRepo()
 	usedTokens := newMockUsedTokenRepo()
-	store := newMockStore()
+	kv := newMockStore()
 	audit := &mockAuditRepo{}
 	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
 	notify := &mockNotifier{}
@@ -56,8 +57,8 @@ func newTestAuthServiceWithTokens(tokens RefreshTokenRepo) (*AuthService, *mockU
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
-	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil)
-	return svc, users, audit, notify
+	svc := NewAuthService(users, tokens, usedTokens, audit, kv, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil)
+	return svc, users, audit, notify, kv
 }
 
 // ----- Register -----
@@ -338,7 +339,7 @@ func (b *barrierTokenRepo) FindByHash(ctx context.Context, hash string) (*models
 func TestRefresh_ConcurrentDoubleRefresh_ExactlyOneSuccess_C1(t *testing.T) {
 	inner := newMockTokenRepo()
 	tokens := &barrierTokenRepo{mockTokenRepo: inner, racers: 8, released: make(chan struct{})}
-	svc, _, audit, _ := newTestAuthServiceWithTokens(tokens)
+	svc, _, audit, _, _ := newTestAuthServiceWithTokens(tokens)
 	if _, err := svc.Register(context.Background(), RegisterInput{
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
 	}); err != nil {
@@ -1241,3 +1242,60 @@ type mockGeoResolver struct {
 }
 
 func (m mockGeoResolver) Resolve(_ context.Context, _ string) string { return m.loc }
+
+// TestResetPassword_SingleUse_SurvivesStoreFlush_C8 — C8 regression: the
+// volatile store alone must not decide single-use. After a successful reset,
+// flushing the store (Redis restart / eviction) must NOT revive the token —
+// the durable used_tokens row rejects the replay.
+func TestResetPassword_SingleUse_SurvivesStoreFlush_C8(t *testing.T) {
+	svc, users, _, notify, kv := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ForgotPassword(context.Background(), "alice@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	in := ResetPasswordInput{Token: notify.lastReset, NewPassword: "NewPassword1"}
+	if err := svc.ResetPassword(context.Background(), in, "ip"); err != nil {
+		t.Fatalf("first reset failed: %v", err)
+	}
+
+	// Simulate a store flush — every jti marker gone.
+	kv.mu.Lock()
+	kv.data = map[string]any{}
+	kv.mu.Unlock()
+
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "AttackerPassword1",
+	}, "evil-ip"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("replay after store flush must be rejected, got %v", err)
+	}
+	u, _ := users.FindByEmail(context.Background(), "alice@example.com")
+	if !hash.CheckPassword(u.Password, "NewPassword1") {
+		t.Error("victim's password must be unchanged by the rejected replay")
+	}
+}
+
+// TestVerifyEmail_SingleUse_SurvivesStoreFlush_C8 — same durability property
+// for the verify-email token.
+func TestVerifyEmail_SingleUse_SurvivesStoreFlush_C8(t *testing.T) {
+	svc, _, _, notify, kv := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "bob", Email: "bob@example.com", Password: "Password1", FullName: "Bob",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: notify.lastVerify}); err != nil {
+		t.Fatalf("first verify failed: %v", err)
+	}
+
+	kv.mu.Lock()
+	kv.data = map[string]any{}
+	kv.mu.Unlock()
+
+	if err := svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: notify.lastVerify}); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("verify-email replay after store flush must be rejected, got %v", err)
+	}
+}

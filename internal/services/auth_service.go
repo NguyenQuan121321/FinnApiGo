@@ -575,8 +575,9 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 		return ErrUserNotFound
 	}
 
-	// §1.8 — single-use enforcement: check-and-mark the jti atomically.
-	if !s.markTokenUsed(claims.ID) {
+	// §1.8 — single-use enforcement: check-and-mark the jti atomically, with
+	// the durable used_tokens table backstopping a store flush (C8).
+	if !s.consumeSingleUseToken(ctx, claims.ID) {
 		return ErrInvalidToken
 	}
 	if s.usedTokens != nil {
@@ -718,8 +719,8 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 		return ErrUserNotFound
 	}
 
-	// §1.8 — single-use enforcement.
-	if !s.markTokenUsed(claims.ID) {
+	// §1.8 — single-use enforcement (store + durable backstop, C8).
+	if !s.consumeSingleUseToken(ctx, claims.ID) {
 		return ErrInvalidToken
 	}
 	if s.usedTokens != nil {
@@ -883,6 +884,26 @@ func (s *AuthService) markTokenUsed(jti string) bool {
 	}
 	key := "jti:" + jti
 	return s.store.SetNX(key, "used", 24*time.Hour)
+}
+
+// consumeSingleUseToken enforces one-time use of a jti across BOTH guards:
+// the volatile store (fast, shared) and the durable used_tokens table. A
+// store MISS is not proof of freshness — a Redis flush/eviction would revive
+// consumed tokens — so the DB replay check runs on every miss and fails
+// CLOSED (a token whose history cannot be verified is rejected, C8). With no
+// store wired at all, the durable table alone decides.
+func (s *AuthService) consumeSingleUseToken(ctx context.Context, jti string) bool {
+	if !s.markTokenUsed(jti) {
+		return false
+	}
+	if s.usedTokens == nil {
+		return true // no durable guard wired (tests) — store decision stands
+	}
+	used, err := s.usedTokens.IsUsed(ctx, jti)
+	if err != nil {
+		return false // cannot prove freshness — fail closed
+	}
+	return !used
 }
 
 // validatePassword enforces a basic complexity policy (length + classes + cap).
