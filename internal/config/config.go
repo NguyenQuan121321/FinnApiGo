@@ -35,6 +35,10 @@ type ServerConfig struct {
 	// Set this to your load balancer / Cloudflare / Nginx egress CIDRs in
 	// production so the app resolves the real client IP for session metadata.
 	TrustedProxies []string
+	// PProfAddr (env PPROF_ADDR) starts a net/http/pprof listener on this
+	// address when non-empty (P3). Empty (default) = disabled. Bind to an
+	// internal address — pprof must never be publicly reachable.
+	PProfAddr string
 	// HSTSSeconds (env HSTS_SECONDS) enables the Strict-Transport-Security
 	// header on HTTPS responses when > 0 (A3). 0 (default) sends no HSTS —
 	// correct for plain-HTTP dev setups behind no TLS terminator.
@@ -203,6 +207,7 @@ func Load() (*Config, error) {
 			Port:           env("SERVER_PORT", "8080"),
 			GinMode:        env("GIN_MODE", "debug"),
 			TrustedProxies: envCSV("TRUSTED_PROXIES"),
+			PProfAddr:      env("PPROF_ADDR", ""),
 			HSTSSeconds:    envInt("HSTS_SECONDS", 0),
 		},
 		DB: DBConfig{

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -168,6 +169,9 @@ func run() error {
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
 	defer rateLimiter.Close()
 
+	// P3 — optional pprof listener on a separate internal port.
+	defer startPProf(cfg.Server.PProfAddr)()
+
 	// --- TOTP concurrency limiter (caps CPU-bound validations) ---
 	totpCluster := middleware.NewConcurrencyLimiter(cfg.Security.TOTPMaxConcurrent)
 
@@ -278,5 +282,36 @@ func startCleanup(
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			slog.Info("cleanup: purged expired used tokens", "count", n)
 		}
+	}
+}
+
+// startPProf serves net/http/pprof on a separate listener gated by
+// PPROF_ADDR (P3); empty address = disabled. It uses a private mux so the
+// pprof handlers are never reachable through the main API engine, and must
+// be bound to an internal address — pprof leaks runtime internals.
+func startPProf(addr string) func() {
+	if addr == "" {
+		return func() {}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{
+		Addr: addr, Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second, // gosec G112 — bound slow clients
+	}
+	go func() {
+		slog.Info("pprof: debug server listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("pprof: debug server failed", "addr", addr, "err", err)
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
 	}
 }
