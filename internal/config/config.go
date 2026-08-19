@@ -62,9 +62,13 @@ type DBConfig struct {
 
 // DSN builds a MySQL DSN string for GORM.
 func (d DBConfig) DSN() string {
-	// charset=utf8mb4 to fully support emoji / 4-byte UTF-8.
+	// charset=utf8mb4 to fully support emoji / 4-byte UTF-8. loc=UTC (R3):
+	// with parseTime=True the driver converts DATETIME values to time.Time in
+	// this location, so every DB round-trip normalizes to UTC regardless of
+	// the host's local timezone (parseTime paths audited: this DSN is the only
+	// one in the codebase; internal/database consumes it verbatim).
 	dsn := d.User + ":" + d.Password + "@tcp(" + d.Host + ":" + d.Port + ")/" +
-		d.Name + "?charset=utf8mb4&parseTime=True&loc=Local"
+		d.Name + "?charset=utf8mb4&parseTime=True&loc=UTC"
 	if d.TLS != "" {
 		dsn += "&tls=" + d.TLS
 	}

@@ -50,14 +50,14 @@ func TestLoad(t *testing.T) {
 
 func TestDBConfigDSN(t *testing.T) {
 	dsn := (DBConfig{Host: "db", Port: "3307", User: "app", Password: "secret", Name: "finn"}).DSN()
-	if dsn != "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=Local" {
+	if dsn != "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=UTC" {
 		t.Fatalf("DSN=%q", dsn)
 	}
 }
 
 func TestDBConfigDSNWithTLS(t *testing.T) {
 	dsn := (DBConfig{Host: "db", Port: "3307", User: "app", Password: "secret", Name: "finn", TLS: "true"}).DSN()
-	want := "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=Local&tls=true"
+	want := "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=UTC&tls=true"
 	if dsn != want {
 		t.Fatalf("DSN=%q want %q", dsn, want)
 	}
@@ -155,5 +155,17 @@ func TestLoad_DBTLSValidation_R2(t *testing.T) {
 	t.Setenv("DB_TLS", "bogus")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DB_TLS") {
 		t.Fatalf("DB_TLS=bogus must fail with a clear error, got %v", err)
+	}
+}
+
+// TestDBConfigDSN_LocUTC_R3 — R3: the DSN must pin loc=UTC so every parsed
+// DATETIME is normalized to UTC regardless of the host's local timezone.
+func TestDBConfigDSN_LocUTC_R3(t *testing.T) {
+	dsn := (DBConfig{Host: "db", Port: "3306", User: "u", Password: "p", Name: "n"}).DSN()
+	if !strings.Contains(dsn, "loc=UTC") {
+		t.Fatalf("DSN must carry loc=UTC: %q", dsn)
+	}
+	if strings.Contains(dsn, "loc=Local") {
+		t.Fatalf("DSN must not use loc=Local: %q", dsn)
 	}
 }
