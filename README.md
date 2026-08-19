@@ -215,6 +215,7 @@ A few decisions worth knowing if you're extending this:
 ## Operational notes
 
 - **`GET /metrics` (Prometheus) is unauthenticated by design** so scrapers need no credentials. It exposes process/Go runtime metrics plus `finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`, `finnapigo_rate_limited_requests_total`, and `finnapigo_audit_buffer_depth`. **Never expose it publicly** — bind the server to an internal interface or restrict it at the load balancer; the payload reveals internals useful to an attacker.
+- **Audit retention (R4).** `audit_logs` rows contain PII (email addresses, client IPs, usernames) and are kept **forever by default**. Set `AUDIT_RETENTION_DAYS` (e.g. `90`) to have the cleanup job batch-delete older rows every 15 minutes. Consider your jurisdiction's requirements before enabling: retention supports both "keep evidence long" and "minimize PII" postures — pick one deliberately.
 - **`PPROF_ADDR`** (optional) starts a `net/http/pprof` listener on a separate internal port (e.g. `localhost:6060`). Empty (default) = disabled. Never expose this port publicly.
 
 ## Known limitations

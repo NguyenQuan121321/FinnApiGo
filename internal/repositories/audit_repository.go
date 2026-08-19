@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -47,4 +48,11 @@ func (r *AuditRepository) BatchInsert(ctx context.Context, entries []*models.Aud
 		return 0
 	}
 	return len(entries)
+}
+
+// PurgeOlderThan removes audit rows created before the cutoff, in
+// LIMIT-batched statements (P1 discipline) — audit retention execution for
+// AUDIT_RETENTION_DAYS (R4). Returns the rows removed.
+func (r *AuditRepository) PurgeOlderThan(ctx context.Context, before time.Time) (int64, error) {
+	return batchedDelete(r.db.WithContext(ctx), &models.AuditLog{}, "created_at < ?", before)
 }

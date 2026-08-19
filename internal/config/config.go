@@ -200,6 +200,11 @@ type AuditConfig struct {
 	BufferSize int
 	// FlushBatch is how many rows the worker inserts per DB round-trip.
 	FlushBatch int
+	// RetentionDays caps how long audit rows are kept (env
+	// AUDIT_RETENTION_DAYS): the cleanup job batch-deletes older rows. 0
+	// (default) keeps audit history forever. Audit rows contain PII (email,
+	// IP) — see the README retention note before enabling.
+	RetentionDays int
 }
 
 // Load reads .env (if present) and environment variables, applying sane defaults
@@ -290,8 +295,9 @@ func Load() (*Config, error) {
 			RedirectURL:  l.env("GOOGLE_REDIRECT_URL", ""),
 		},
 		Audit: AuditConfig{
-			BufferSize: l.envInt("AUDIT_BUFFER_SIZE", 1024),
-			FlushBatch: l.envInt("AUDIT_FLUSH_BATCH", 64),
+			BufferSize:    l.envInt("AUDIT_BUFFER_SIZE", 1024),
+			FlushBatch:    l.envInt("AUDIT_FLUSH_BATCH", 64),
+			RetentionDays: l.envInt("AUDIT_RETENTION_DAYS", 0),
 		},
 	}
 

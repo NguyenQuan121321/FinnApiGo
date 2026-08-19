@@ -202,8 +202,8 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Run token/used-token cleanup in the background.
-	go startCleanup(tokenRepo, usedTokenRepo)
+	// Run token/used-token/audit-retention cleanup in the background.
+	go startCleanup(tokenRepo, usedTokenRepo, baseAuditRepo, cfg.Audit.RetentionDays)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -265,11 +265,14 @@ func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 	return sum[:], nil
 }
 
-// startCleanup periodically purges expired refresh tokens and used-token
-// rows. Failures are logged but never fatal.
+// startCleanup periodically purges expired refresh tokens, used-token rows,
+// and — when auditRetentionDays > 0 — audit rows older than the retention
+// window (R4). Failures are logged but never fatal.
 func startCleanup(
 	tokenRepo *repositories.RefreshTokenRepository,
 	usedTokenRepo *repositories.UsedTokenRepository,
+	auditRepo *repositories.AuditRepository,
+	auditRetentionDays int,
 ) {
 	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
@@ -281,6 +284,14 @@ func startCleanup(
 		}
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			slog.Info("cleanup: purged expired used tokens", "count", n)
+		}
+		if auditRetentionDays > 0 {
+			cutoff := now.AddDate(0, 0, -auditRetentionDays)
+			if n, err := auditRepo.PurgeOlderThan(ctx, cutoff); err == nil && n > 0 {
+				slog.Info("cleanup: purged audit rows past retention", "days", auditRetentionDays, "count", n)
+			} else if err != nil {
+				slog.Error("cleanup: audit retention purge failed", "err", err)
+			}
 		}
 	}
 }

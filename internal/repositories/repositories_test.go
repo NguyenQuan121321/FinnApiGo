@@ -443,3 +443,41 @@ func TestPurgeExpired_BatchedSQLShape_P1(t *testing.T) {
 		t.Fatalf("purge must not use an OR predicate (defeats the indexes):\n%s", sqlLog)
 	}
 }
+
+// TestAuditRepository_PurgeOlderThan_R4 — R4: the retention purge removes
+// only rows older than the cutoff (batched, P1 discipline) and leaves recent
+// audit history intact.
+func TestAuditRepository_PurgeOlderThan_R4(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	repo := NewAuditRepository(db)
+
+	old := time.Now().Add(-91 * 24 * time.Hour)
+	for i := 0; i < 3; i++ {
+		if err := db.Create(&models.AuditLog{Event: "old_login", CreatedAt: old}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := db.Create(&models.AuditLog{Event: "fresh_login", CreatedAt: time.Now()}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prev := purgeBatchSize
+	purgeBatchSize = 2
+	defer func() { purgeBatchSize = prev }()
+
+	n, err := repo.PurgeOlderThan(ctx, time.Now().Add(-90*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("purged %d rows, want 3", n)
+	}
+	var remaining int64
+	db.Model(&models.AuditLog{}).Count(&remaining)
+	if remaining != 2 {
+		t.Fatalf("remaining = %d, want 2 (recent rows survive)", remaining)
+	}
+}
