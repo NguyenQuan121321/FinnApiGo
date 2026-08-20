@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/repositories"
 )
 
 // ---- In-memory mock repositories for unit tests ----
@@ -135,6 +136,15 @@ func (m *mockUserRepo) SetEmailVerified(ctx context.Context, user *models.User, 
 	return nil
 }
 
+func (m *mockUserRepo) BumpPwdVersion(ctx context.Context, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if u, ok := m.users[userID]; ok {
+		u.PwdVersion++
+	}
+	return nil
+}
+
 // ---- mock refresh token repo ----
 
 type mockTokenRepo struct {
@@ -172,13 +182,18 @@ func (m *mockTokenRepo) FindByHash(ctx context.Context, hash string) (*models.Re
 	return nil, nil
 }
 
+// Revoke mirrors the GORM repository's compare-and-set: revoking an
+// already-revoked (or unknown) row reports repositories.ErrTokenAlreadyRevoked
+// so the service's reuse-detection path is exercised identically to production.
 func (m *mockTokenRepo) Revoke(ctx context.Context, rt *models.RefreshToken) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if row, ok := m.rows[rt.ID]; ok {
-		row.Revoked = true
-		rt.Revoked = true
+	row, ok := m.rows[rt.ID]
+	if !ok || row.Revoked {
+		return repositories.ErrTokenAlreadyRevoked
 	}
+	row.Revoked = true
+	rt.Revoked = true
 	return nil
 }
 
@@ -248,72 +263,6 @@ func (m *mockTokenRepo) PurgeExpired(ctx context.Context, before time.Time) (int
 	return 0, nil
 }
 
-// ---- mock OTP repo ----
-
-type mockOtpRepo struct {
-	mu     sync.Mutex
-	rows   []*models.OtpCode
-	nextID uint
-}
-
-func newMockOtpRepo() *mockOtpRepo { return &mockOtpRepo{} }
-
-func (m *mockOtpRepo) Create(ctx context.Context, o *models.OtpCode) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.nextID++
-	o.ID = m.nextID
-	o.CreatedAt = time.Now()
-	m.rows = append(m.rows, o)
-	return nil
-}
-
-func (m *mockOtpRepo) FindLatestActive(ctx context.Context, userID uint, purpose string) (*models.OtpCode, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var latest *models.OtpCode
-	for _, o := range m.rows {
-		if o.UserID == userID && o.Purpose == purpose && !o.IsUsed && time.Now().Before(o.ExpiresAt) {
-			if latest == nil || o.CreatedAt.After(latest.CreatedAt) {
-				c := *o
-				latest = &c
-			}
-		}
-	}
-	return latest, nil
-}
-
-func (m *mockOtpRepo) Update(ctx context.Context, o *models.OtpCode) error { return nil }
-
-func (m *mockOtpRepo) MarkUsed(ctx context.Context, o *models.OtpCode) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, row := range m.rows {
-		if row.ID == o.ID {
-			row.IsUsed = true
-			o.IsUsed = true
-		}
-	}
-	return nil
-}
-
-func (m *mockOtpRepo) IncrementAttempts(ctx context.Context, o *models.OtpCode) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, row := range m.rows {
-		if row.ID == o.ID {
-			row.AttemptCount++
-			o.AttemptCount = row.AttemptCount
-			return row.AttemptCount, nil
-		}
-	}
-	return 0, nil
-}
-
-func (m *mockOtpRepo) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
-	return 0, nil
-}
-
 // ---- mock used-token repo (§1.8) ----
 
 type mockUsedTokenRepo struct {
@@ -376,30 +325,20 @@ func (m *mockAuditRepo) count() int {
 // ---- mock notifier (captures last sent values) ----
 
 type mockNotifier struct {
-	mu             sync.Mutex
-	lastOTPCode    string
-	lastOTPPurpose string
-	lastReset      string
-	lastVerify     string
-	verifySendErr  error
+	mu            sync.Mutex
+	lastReset     string
+	lastVerify    string
+	verifySendErr error
 }
 
-func (n *mockNotifier) SendOTP(to, code, purpose string) error {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	n.lastOTPCode = code
-	n.lastOTPPurpose = purpose
-	return nil
-}
-
-func (n *mockNotifier) SendPasswordReset(to, resetToken string) error {
+func (n *mockNotifier) SendPasswordReset(ctx context.Context, to, resetToken string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.lastReset = resetToken
 	return nil
 }
 
-func (n *mockNotifier) SendEmailVerification(to, verifyToken string) error {
+func (n *mockNotifier) SendEmailVerification(ctx context.Context, to, verifyToken string) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.verifySendErr != nil {
@@ -446,6 +385,12 @@ func (m *mockStore) Get(key string) (any, bool) {
 	defer m.mu.Unlock()
 	v, ok := m.data[key]
 	return v, ok
+}
+
+func (m *mockStore) Set(key string, value any, ttl time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data[key] = value
 }
 
 func (m *mockStore) Delete(key string) {
@@ -541,18 +486,24 @@ func (m *mockTOTPRepo) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]
 	return out, nil
 }
 
+// MarkRecoveryCodeUsed mirrors the GORM repository's compare-and-set on
+// used_at IS NULL: the second of two concurrent marks reports
+// repositories.ErrRecoveryCodeUsed.
 func (m *mockTOTPRepo) MarkRecoveryCodeUsed(ctx context.Context, c *models.RecoveryCode) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
-	c.UsedAt = &now
 	for i := range m.codes[c.UserID] {
 		if m.codes[c.UserID][i].ID == c.ID {
+			if m.codes[c.UserID][i].UsedAt != nil {
+				return repositories.ErrRecoveryCodeUsed
+			}
 			m.codes[c.UserID][i].UsedAt = &now
-			break
+			c.UsedAt = &now
+			return nil
 		}
 	}
-	return nil
+	return repositories.ErrRecoveryCodeUsed
 }
 
 // ---- mock TOTP validator (for MFA login tests) ----

@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	jwtv5 "github.com/golang-jwt/jwt/v5"
+
 	"github.com/finnapigo/finnapigo/internal/hash"
 )
 
@@ -85,19 +87,56 @@ func TestHashToken_DeterministicAndOpaque(t *testing.T) {
 	}
 }
 
-func TestGenerateNumericOTP_Length(t *testing.T) {
-	for _, n := range []int{4, 6, 8} {
-		code, err := hash.GenerateNumericOTP(n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(code) != n {
-			t.Errorf("length %d: got %d", n, len(code))
-		}
-		for _, c := range code {
-			if c < '0' || c > '9' {
-				t.Errorf("non-digit in OTP: %q", code)
-			}
-		}
+// TestJWT_Verify_RejectsWrongIssuer_C5 — C5 regression: the configured issuer
+// is enforced. A token signed with the same secret but a different iss must be
+// rejected (prevents cross-environment token confusion).
+func TestJWT_Verify_RejectsWrongIssuer_C5(t *testing.T) {
+	signer := NewJWTManager("secret", "issuer-a")
+	verifier := NewJWTManager("secret", "issuer-b")
+	tok, err := signer.Issue(1, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(tok); err == nil {
+		t.Error("token with wrong iss must be rejected")
+	}
+}
+
+// TestJWT_Verify_RejectsMissingExp_C5 — C5 regression: exp is required. A
+// structurally valid, correctly signed token without an expiry claim must be
+// rejected instead of living forever.
+func TestJWT_Verify_RejectsMissingExp_C5(t *testing.T) {
+	mgr := NewJWTManager("secret", "issuer")
+	claims := Claims{UserID: 1, Type: TokenTypeAccess, RegisteredClaims: jwtv5.RegisteredClaims{Issuer: "issuer"}}
+	tok, err := jwtv5.NewWithClaims(jwtv5.SigningMethodHS256, claims).SignedString([]byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Verify(tok); err == nil {
+		t.Error("token without exp must be rejected")
+	}
+}
+
+// TestJWT_Verify_RejectsNonHS256Alg_C5 — C5 regression: only HS256 is
+// accepted. The old keyfunc accepted the whole HMAC family, so an HS384 token
+// signed with the same secret verified successfully.
+func TestJWT_Verify_RejectsNonHS256Alg_C5(t *testing.T) {
+	mgr := NewJWTManager("secret", "issuer")
+	claims := Claims{UserID: 1, Type: TokenTypeAccess, RegisteredClaims: jwtv5.RegisteredClaims{
+		Issuer: "issuer", ExpiresAt: jwtv5.NewNumericDate(time.Now().Add(time.Minute)),
+	}}
+	tok, err := jwtv5.NewWithClaims(jwtv5.SigningMethodHS384, claims).SignedString([]byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Verify(tok); err == nil {
+		t.Error("HS384-signed token must be rejected (only HS256 allowed)")
+	}
+	tokNone, err := jwtv5.NewWithClaims(jwtv5.SigningMethodNone, claims).SignedString(jwtv5.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Verify(tokNone); err == nil {
+		t.Error("alg=none token must be rejected")
 	}
 }

@@ -3,11 +3,12 @@ package routes
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
@@ -31,6 +32,16 @@ type Deps struct {
 	// X-Real-IP, so c.ClientIP() resolves the real client IP securely behind a
 	// reverse proxy (Cloudflare/Nginx). Empty trusts no one (RemoteAddr only).
 	TrustedProxies []string
+	// HSTSSeconds enables Strict-Transport-Security on HTTPS responses when
+	// > 0 (A3). Ignored for plain-HTTP requests.
+	HSTSSeconds int
+	// Metrics is the Prometheus scrape handler (P2). Nil = /metrics not
+	// mounted. Deliberately unauthenticated: keep it internal-facing.
+	Metrics http.Handler
+	// PwdVersion backs AuthMiddleware's access-token revocation on
+	// credential change (A7); typically services.AuthService.CurrentPwdVersion.
+	// Nil disables the check.
+	PwdVersion middleware.VersionSource
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -48,6 +59,10 @@ func Register(deps Deps) *gin.Engine {
 	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
+	// A3 — baseline security headers on every response: nosniff, no-referrer,
+	// Cache-Control: no-store (this is an auth API — nothing is cacheable),
+	// and HSTS on HTTPS responses when configured.
+	r.Use(middleware.SecurityHeaders(deps.HSTSSeconds))
 	// §5 — global body-size limit. Applied here (before any route group) so it
 	// covers every endpoint. Must be in Register, not after, because Gin
 	// middlewares registered via Use apply only to routes defined afterwards.
@@ -56,6 +71,11 @@ func Register(deps Deps) *gin.Engine {
 			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, deps.MaxRequestBodyBytes)
 			c.Next()
 		})
+	}
+
+	// Prometheus scrape endpoint (P2) — see Deps.Metrics.
+	if deps.Metrics != nil {
+		r.GET("/metrics", gin.WrapH(deps.Metrics))
 	}
 
 	// health check — process liveness (no DB dependency).
@@ -89,10 +109,13 @@ func Register(deps Deps) *gin.Engine {
 	// ---- Public core-auth endpoints (no auth middleware) ----
 	auth.POST("/register", deps.RateLimit.Handler(), deps.Auth.Register)
 	auth.POST("/login", deps.RateLimit.Handler(), deps.Auth.Login)
-	auth.POST("/refresh-token", deps.Auth.Refresh)
+	// A5 — refresh/reset/verify are unauthenticated token-consumption
+	// endpoints: without the limiter they are free brute-force / replay
+	// surfaces (single-use guards reject, but the requests still cost CPU).
+	auth.POST("/refresh-token", deps.RateLimit.Handler(), deps.Auth.Refresh)
 	auth.POST("/forgot-password", deps.RateLimit.Handler(), deps.Auth.ForgotPassword)
-	auth.POST("/reset-password", deps.Auth.ResetPassword)
-	auth.POST("/verify-email", deps.Auth.VerifyEmail)
+	auth.POST("/reset-password", deps.RateLimit.Handler(), deps.Auth.ResetPassword)
+	auth.POST("/verify-email", deps.RateLimit.Handler(), deps.Auth.VerifyEmail)
 	auth.POST("/resend-verification", deps.RateLimit.Handler(), deps.Auth.ResendVerifyEmail)
 
 	// ---- Google OAuth 2.0 / OpenID Connect ----
@@ -103,7 +126,7 @@ func Register(deps Deps) *gin.Engine {
 
 	// ---- Authenticated core-auth endpoints ----
 	authed := auth.Group("")
-	authed.Use(middleware.AuthMiddleware(deps.JWT))
+	authed.Use(middleware.AuthMiddleware(deps.JWT, deps.PwdVersion))
 	authed.POST("/logout", deps.Auth.Logout)
 	authed.POST("/logout-all", deps.Auth.LogoutAll)
 	authed.POST("/change-password", deps.Auth.ChangePassword)
@@ -134,10 +157,8 @@ func Register(deps Deps) *gin.Engine {
 		mfaPending.POST("/login-verify", deps.RateLimit.Handler(), deps.Auth.CompleteMFALogin)
 	}
 
-	// ---- MFA sub-group (authenticated) ----
+	// ---- MFA sub-group (authenticated; TOTP is the only MFA mechanism) ----
 	mfa := authed.Group("/mfa")
-	mfa.POST("/send-otp", deps.RateLimit.Handler(), deps.MFA.SendOTP)
-	mfa.POST("/verify-otp", deps.MFA.VerifyOTP)
 
 	// ---- TOTP endpoints (rate-limited + concurrency-gated) ----
 	// The concurrency limiter (deps.TOTPCluster) is installed BEFORE the
@@ -167,7 +188,7 @@ func Register(deps Deps) *gin.Engine {
 
 // requestLogger is a minimal access log (§4 — token redaction). It logs
 // method, path, status, latency, and request-ID but NEVER logs the
-// Authorization header, refreshToken, token, password, or otp code fields.
+// Authorization header, refreshToken, token, password, or code fields.
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
@@ -181,28 +202,23 @@ func requestLogger() gin.HandlerFunc {
 
 		c.Next()
 
-		// Log after request completes — safe fields only.
+		// Log after request completes — safe fields only. client_ip is set
+		// after Next() so middlewares that ran earlier (auth denials in
+		// particular) read the same resolution via c.ClientIP() themselves.
 		status := c.Writer.Status()
 		latency := time.Since(start)
-		log.Printf("[%s] %s %d %v rid=%s",
-			c.Request.Method, c.Request.URL.Path,
-			status, latency, requestID,
+		slog.Info("request",
+			"method", c.Request.Method,
+			"path", c.Request.URL.Path,
+			"status", status,
+			"latency_ms", latency.Milliseconds(),
+			"client_ip", c.ClientIP(),
+			"rid", requestID,
 		)
 	}
 }
 
-// generateRequestID creates a short pseudo-unique request identifier.
-// In production this would use UUIDv4 or a snowflake ID.
+// generateRequestID creates a unique request identifier (UUIDv4).
 func generateRequestID() string {
-	const hex = "0123456789abcdef"
-	b := make([]byte, 16)
-	_ = b // placeholder — uses time-based for simplicity
-	now := time.Now().UnixNano()
-	for i := 0; i < 16; i++ {
-		b[i] = hex[(now>>uint(i*4))&0xf]
-		if i == 8 {
-			now = time.Now().UnixNano() >> 32
-		}
-	}
-	return string(b)
+	return uuid.New().String()
 }

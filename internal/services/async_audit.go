@@ -2,12 +2,24 @@ package services
 
 import (
 	"context"
-	"log"
+	"log/slog"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/models"
 )
+
+// maxAuditDetail matches the audit_logs.detail column size (500). Longer
+// values are truncated at the writer so a chatty Detail can never make the
+// whole batch INSERT fail (A6).
+const maxAuditDetail = 500
+
+// AuditDroppedEntries counts audit entries lost despite best-effort delivery:
+// buffer overflows AND batch-insert failures (A6). Exposed for metrics — a
+// climbing counter means audit coverage is degrading.
+var AuditDroppedEntries atomic.Int64
 
 // BatchInserter defines the bulk write method needed by the async worker.
 type BatchInserter interface {
@@ -53,8 +65,11 @@ func NewAsyncAuditWriter(repo AuditRepo, inserter BatchInserter, cfg config.Audi
 }
 
 // Record queues the audit log for asynchronous insertion. If the buffer is full,
-// the entry is dropped to prevent blocking the request, and a warning is logged.
+// the entry is dropped to prevent blocking the request; the drop is counted in
+// AuditDroppedEntries and logged (A6). Detail is truncated to the column size
+// here — the single choke point both modes flow through.
 func (w *AsyncAuditWriter) Record(ctx context.Context, entry *models.AuditLog) {
+	truncateDetail(entry)
 	if w.syncMode {
 		w.repo.Record(ctx, entry)
 		return
@@ -63,8 +78,23 @@ func (w *AsyncAuditWriter) Record(ctx context.Context, entry *models.AuditLog) {
 	select {
 	case w.buffer <- entry:
 	default:
-		log.Printf("audit: buffer full, dropping audit log entry for event=%s", entry.Event)
+		AuditDroppedEntries.Add(1)
+		slog.Error("audit buffer full, dropping entry", "event", entry.Event)
 	}
+}
+
+// truncateDetail caps entry.Detail at the audit_logs.detail column size,
+// backing off to the last rune boundary so the value stays valid UTF-8 (a
+// mid-rune cut would make MySQL reject the whole INSERT).
+func truncateDetail(entry *models.AuditLog) {
+	if len(entry.Detail) <= maxAuditDetail {
+		return
+	}
+	d := entry.Detail[:maxAuditDetail]
+	for len(d) > 0 && !utf8.ValidString(d) {
+		d = d[:len(d)-1]
+	}
+	entry.Detail = d
 }
 
 // worker reads from the buffer and batch-inserts when flushBatch is reached
@@ -77,7 +107,14 @@ func (w *AsyncAuditWriter) worker() {
 
 	flush := func() {
 		if len(batch) > 0 {
-			w.inserter.BatchInsert(context.Background(), batch)
+			n := w.inserter.BatchInsert(context.Background(), batch)
+			if lost := len(batch) - n; lost > 0 {
+				// A6 — partial/failed inserts must be visible, not silent
+				// gaps in the audit trail.
+				AuditDroppedEntries.Add(int64(lost))
+				slog.Error("audit batch insert lost entries",
+					"attempted", len(batch), "inserted", n, "lost", lost)
+			}
 			batch = nil
 		}
 	}
@@ -99,6 +136,15 @@ func (w *AsyncAuditWriter) worker() {
 			flush()
 		}
 	}
+}
+
+// Buffered reports how many entries currently wait in the async buffer (0 in
+// sync mode) — the depth gauge for the Prometheus endpoint (P2).
+func (w *AsyncAuditWriter) Buffered() int {
+	if w.syncMode || w.buffer == nil {
+		return 0
+	}
+	return len(w.buffer)
 }
 
 // Close gracefully shuts down the worker by closing the channel and waiting

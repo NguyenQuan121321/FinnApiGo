@@ -19,6 +19,23 @@ http:
         "password": "Password123"
       }
 
+runtime:
+  scripts:
+    - type: after-response
+      code: |-
+        if (res.getStatus() === 200) {
+          const data = res.getBody().data;
+          if (data.accessToken) {
+            bru.setVar("accessToken", data.accessToken);
+          }
+          if (data.refreshToken) {
+            bru.setVar("refreshToken", data.refreshToken);
+          }
+          if (data.mfaRequired && data.mfaToken) {
+            bru.setVar("mfaToken", data.mfaToken);
+          }
+        }
+
 settings:
   encodeUrl: true
   timeout: 0

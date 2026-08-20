@@ -15,6 +15,7 @@ import (
 	"golang.org/x/oauth2/google"
 
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/store"
 )
 
 // ---- Google OAuth types ----
@@ -104,7 +105,7 @@ const (
 type OAuthService struct {
 	users       UserRepo
 	oauthIdents OAuthIdentityRepo
-	store       StoreProvider
+	store       store.Store
 	issuer      TokenIssuer
 	idVerifier  GoogleIDTokenVerifier
 	client      GoogleOAuthClient // nil = feature disabled
@@ -116,7 +117,7 @@ type OAuthService struct {
 func NewOAuthService(
 	users UserRepo,
 	oauthIdents OAuthIdentityRepo,
-	store StoreProvider,
+	store store.Store,
 	issuer TokenIssuer,
 	idVerifier GoogleIDTokenVerifier,
 	client GoogleOAuthClient,
@@ -128,7 +129,7 @@ func NewOAuthService(
 }
 
 // GenerateState creates a cryptographically random state string and stores it
-// in the StoreProvider with a 10-minute TTL. The caller must pass this state
+// in the store.Store with a 10-minute TTL. The caller must pass this state
 // to AuthorizationURL and later to HandleCallback for validation.
 func (s *OAuthService) GenerateState(ctx context.Context) (string, error) {
 	b := make([]byte, oauthStateBytes)
@@ -192,7 +193,7 @@ func (s *OAuthService) HandleCallback(ctx context.Context, code, state, ip, ua s
 	// ---- 2. Exchange authorization code for tokens ----
 	token, err := s.client.Exchange(ctx, code)
 	if err != nil {
-		return TokenPair{}, UserProfile{}, nil, fmt.Errorf("%w: %v", ErrOAuthCodeExchangeFailed, err)
+		return TokenPair{}, UserProfile{}, nil, fmt.Errorf("%w: %w", ErrOAuthCodeExchangeFailed, err)
 	}
 
 	// ---- 3. Extract & verify the ID token (JWKS signature + audience) ----

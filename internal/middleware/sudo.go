@@ -50,9 +50,15 @@ func SudoMiddleware(jwtMgr *jwt.JWTManager) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if claims.ExpiresAt != nil {
-			c.Set(CtxSudoUntil, claims.ExpiresAt.UTC())
+		if claims.ExpiresAt == nil {
+			// Verify already rejects exp-less tokens (WithExpirationRequired);
+			// this is defense in depth so a sudo proof can never be
+			// indefinitely valid even if Verify is ever relaxed.
+			response.Respond(c, http.StatusForbidden, "sudo verification required", nil)
+			c.Abort()
+			return
 		}
+		c.Set(CtxSudoUntil, claims.ExpiresAt.UTC())
 		c.Next()
 	}
 }

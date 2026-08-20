@@ -15,7 +15,7 @@ http:
       }
   auth:
     type: bearer
-    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjIsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJ0ZXN0MUBleGFtcGxlLmNvbSIsInR5cGUiOiJhY2Nlc3MiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIyIiwiZXhwIjoxNzg1NTk2NDEzLCJuYmYiOjE3ODU1OTU1MTMsImlhdCI6MTc4NTU5NTUxM30.3spMnAXMj6iFMFH2OFvI-FVSEcDEnOiJi_3AZ41t7Pg
+    token: "{{accessToken}}"
 
 settings:
   encodeUrl: true

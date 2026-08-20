@@ -10,8 +10,6 @@ const (
 	AuditEventPasswordChanged          = "password_changed"
 	AuditEventPasswordReset            = "password_reset"
 	AuditEventPasswordSet              = "password_set" // first password established (OAuth-only account)
-	AuditEventOTPSent                  = "otp_sent"
-	AuditEventOTPVerified              = "otp_verified"
 	AuditEventRefreshToken             = "refresh_token"
 	AuditEventTokenReuse               = "token_reuse"
 	AuditEventVerifyResendBlocked      = "verify_resend_blocked" // §7.6.3 — anti-automation event
@@ -22,6 +20,7 @@ const (
 	AuditEventRecoveryCodesViewed      = "recovery_codes_viewed"      // user re-viewed saved codes (grants sudo)
 	AuditEventRecoveryCodesRegenerated = "recovery_codes_regenerated" // old set invalidated, new set issued
 	AuditEventSessionRevoked           = "session_revoked"            // user revoked a single device/session
+	AuditEventVerifyEmailSendFailed    = "verify_email_send_failed"   // account persisted but the verification email did not (C11)
 )
 
 // AuditLog records security-relevant actions for compliance / forensics.

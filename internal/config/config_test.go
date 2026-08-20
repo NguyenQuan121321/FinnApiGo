@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,11 +19,9 @@ func TestLoad(t *testing.T) {
 				t.Fatalf("unexpected config: %+v", c)
 			}
 		}},
-		{name: "malformed duration falls back", env: map[string]string{"JWT_SECRET": "test-secret", "ACCESS_TOKEN_TTL": "notaduration"}, assert: func(t *testing.T, c *Config) {
-			if c.JWT.AccessTTL != 15*time.Minute {
-				t.Fatalf("AccessTTL=%v", c.JWT.AccessTTL)
-			}
-		}},
+		// R2 — an explicitly invalid value is a configuration error now;
+		// this case pinned the old silent-fallback behavior the fix removes.
+		{name: "malformed duration fails boot", env: map[string]string{"JWT_SECRET": "test-secret", "ACCESS_TOKEN_TTL": "notaduration"}, wantErr: true},
 		{name: "optional defaults", env: map[string]string{"JWT_SECRET": "test-secret"}, assert: func(t *testing.T, c *Config) {
 			if c.RateLimit.RPS != 5 || c.Server.Port != "8080" {
 				t.Fatalf("unexpected defaults: %+v", c)
@@ -51,8 +50,16 @@ func TestLoad(t *testing.T) {
 
 func TestDBConfigDSN(t *testing.T) {
 	dsn := (DBConfig{Host: "db", Port: "3307", User: "app", Password: "secret", Name: "finn"}).DSN()
-	if dsn != "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=Local" {
+	if dsn != "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=UTC" {
 		t.Fatalf("DSN=%q", dsn)
+	}
+}
+
+func TestDBConfigDSNWithTLS(t *testing.T) {
+	dsn := (DBConfig{Host: "db", Port: "3307", User: "app", Password: "secret", Name: "finn", TLS: "true"}).DSN()
+	want := "app:secret@tcp(db:3307)/finn?charset=utf8mb4&parseTime=True&loc=UTC&tls=true"
+	if dsn != want {
+		t.Fatalf("DSN=%q want %q", dsn, want)
 	}
 }
 
@@ -71,7 +78,7 @@ func TestEnvCSV(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("TEST_CSV_PROXY", tc.env)
-			got := envCSV("TEST_CSV_PROXY")
+			got := (&loader{}).envCSV("TEST_CSV_PROXY")
 			if len(got) != len(tc.want) {
 				t.Fatalf("len=%d want=%d", len(got), len(tc.want))
 			}
@@ -103,5 +110,84 @@ func TestLoad_TrustedProxies(t *testing.T) {
 	}
 	if len(cfg.Server.TrustedProxies) != 2 || cfg.Server.TrustedProxies[0] != "10.0.0.1" {
 		t.Fatalf("TrustedProxies=%v", cfg.Server.TrustedProxies)
+	}
+}
+
+// TestLoad_FailFastInvalidValues_R2 — R2 regression: explicitly set but
+// unparseable numeric/duration/bool env values must fail the boot with an
+// error naming the variable, never silently fall back to a default (which
+// would e.g. disable a rate limiter on a typo).
+func TestLoad_FailFastInvalidValues_R2(t *testing.T) {
+	cases := []struct{ key, value string }{
+		{"RATE_LIMIT_RPS", "abc"},           // float
+		{"HSTS_SECONDS", "notanint"},        // int
+		{"AUDIT_BUFFER_SIZE", "1.5"},        // int
+		{"ACCESS_TOKEN_TTL", "nope"},        // duration
+		{"LOGIN_WINDOW", "tomorrow"},        // duration
+		{"REQUIRE_EMAIL_VERIFIED", "maybe"}, // bool
+	}
+	for _, tc := range cases {
+		t.Run(tc.key, func(t *testing.T) {
+			t.Setenv("JWT_SECRET", "test-secret")
+			t.Setenv(tc.key, tc.value)
+			cfg, err := Load()
+			if err == nil {
+				t.Fatalf("%s=%s must fail boot, got cfg %+v", tc.key, tc.value, cfg)
+			}
+			if !strings.Contains(err.Error(), tc.key) {
+				t.Fatalf("error must name the offending variable %s: %v", tc.key, err)
+			}
+		})
+	}
+}
+
+// TestLoad_DBTLSValidation_R2 — R2: DB_TLS only accepts the go-sql-driver
+// parameter values; anything else fails the boot instead of landing in the
+// DSN verbatim.
+func TestLoad_DBTLSValidation_R2(t *testing.T) {
+	for _, valid := range []string{"", "true", "skip-verify", "preferred"} {
+		t.Setenv("JWT_SECRET", "test-secret")
+		t.Setenv("DB_TLS", valid)
+		if _, err := Load(); err != nil {
+			t.Fatalf("DB_TLS=%q must be accepted: %v", valid, err)
+		}
+	}
+	t.Setenv("DB_TLS", "bogus")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "DB_TLS") {
+		t.Fatalf("DB_TLS=bogus must fail with a clear error, got %v", err)
+	}
+}
+
+// TestDBConfigDSN_LocUTC_R3 — R3: the DSN must pin loc=UTC so every parsed
+// DATETIME is normalized to UTC regardless of the host's local timezone.
+func TestDBConfigDSN_LocUTC_R3(t *testing.T) {
+	dsn := (DBConfig{Host: "db", Port: "3306", User: "u", Password: "p", Name: "n"}).DSN()
+	if !strings.Contains(dsn, "loc=UTC") {
+		t.Fatalf("DSN must carry loc=UTC: %q", dsn)
+	}
+	if strings.Contains(dsn, "loc=Local") {
+		t.Fatalf("DSN must not use loc=Local: %q", dsn)
+	}
+}
+
+// TestLoad_MigrateAutoDefaultOff_R1 — R1: AutoMigrate at boot must be
+// opt-in; the default (unset) posture is "schema comes from migrations".
+func TestLoad_MigrateAutoDefaultOff_R1(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("MIGRATE_AUTO", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DB.MigrateAuto {
+		t.Fatal("MIGRATE_AUTO must default to false")
+	}
+	t.Setenv("MIGRATE_AUTO", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DB.MigrateAuto {
+		t.Fatal("MIGRATE_AUTO=true must enable the dev escape hatch")
 	}
 }

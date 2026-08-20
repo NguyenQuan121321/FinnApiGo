@@ -6,12 +6,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/hash"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/repositories"
+	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
@@ -44,15 +48,19 @@ const totpReplayTTL = 120 * time.Second
 //   - Replay protection uses a single atomic SetNX per validation.
 type TOTPService struct {
 	repo   TOTPRepo
-	store  StoreProvider
+	store  store.Store
 	audits AuditRepo
 	issuer string
 	cfg    config.AuthConfig
-	// encKey seals the re-viewable copy of each recovery code (AES-256-GCM).
+	// enc seals the re-viewable copy of each recovery code (AES-256-GCM).
 	// The SHA-256 hash remains the only thing the login-verification path
 	// touches; the sealed copy is decrypted solely for the TOTP-gated view
-	// endpoint.
-	encKey []byte
+	// endpoint. Built once at startup so the AES key schedule is not
+	// re-derived on every seal/open call.
+	enc *crypto.Encryptor
+	// jwtMgr verifies the sudo token required to rotate an ACTIVE device
+	// (C6). Nil fails closed — sudo can never be proven without it.
+	jwtMgr *jwt.JWTManager
 }
 
 // NewTOTPService constructs the service. store may be nil (replay protection
@@ -60,9 +68,10 @@ type TOTPService struct {
 // writes are skipped). cfg drives recovery-code entropy/count and the
 // brute-force window; when zero-valued the fields default to safe values so
 // callers that only care about the core flow (e.g. legacy tests) still work.
-// encKey must be a 32-byte AES-256 key; it seals the displayable recovery-code
-// copies (see cmd/server wiring for how it is sourced).
-func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer string, cfg config.AuthConfig, encKey []byte) *TOTPService {
+// enc seals the displayable recovery-code copies with AES-256-GCM (see
+// cmd/server wiring for how the key is sourced). jwtMgr verifies sudo tokens
+// for re-enrollment of active devices.
+func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor, jwtMgr *jwt.JWTManager) *TOTPService {
 	if cfg.TOTPMaxAttempts <= 0 {
 		cfg.TOTPMaxAttempts = 5
 	}
@@ -75,32 +84,51 @@ func NewTOTPService(repo TOTPRepo, store StoreProvider, audits AuditRepo, issuer
 	if cfg.RecoveryCodeBytes <= 0 {
 		cfg.RecoveryCodeBytes = 16
 	}
-	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, encKey: encKey}
+	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, enc: enc, jwtMgr: jwtMgr}
 }
 
 // Enable starts (or restarts) TOTP enrollment: it generates a fresh shared
-// secret and returns the secret + the otpauth:// provisioning URI. The device
-// is left disabled until VerifyEnable confirms the user can read it.
-func (s *TOTPService) Enable(ctx context.Context, userID uint, email string) (string, string, error) {
+// secret and returns the secret + the otpauth:// provisioning URI. The secret
+// is persisted ONLY as an AES-256-GCM sealed copy (C7) — the plaintext exists
+// in memory and in the API response for the user's authenticator, never at
+// rest.
+//
+// Re-enrolling an ACTIVE device (C6) requires a valid sudo token for this
+// user; the fresh secret is staged (sealed) as pending and the device STAYS
+// enabled on its old secret until VerifyEnable confirms the new one — a
+// stolen access token alone can neither rotate nor disable MFA. A device that
+// was never confirmed (disabled) rotates freely, matching first-time
+// enrollment.
+func (s *TOTPService) Enable(ctx context.Context, userID uint, email, sudoToken string) (string, string, error) {
+	old, err := s.repo.FindByUserID(ctx, userID)
+	if err != nil {
+		return "", "", err
+	}
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer: s.issuer, AccountName: email,
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("totp generate: %w", err)
 	}
-	old, err := s.repo.FindByUserID(ctx, userID)
+	sealed, err := s.enc.Encrypt(key.Secret())
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("seal totp secret: %w", err)
 	}
 	var d *models.TOTPDevice
-	if old != nil {
-		// Rotate the secret on every enable; the device stays disabled until
-		// the new secret is confirmed via VerifyEnable.
-		old.Secret = key.Secret()
-		old.Enabled = false
+	switch {
+	case old == nil:
+		d = &models.TOTPDevice{UserID: userID, SecretEncrypted: sealed, Enabled: false}
+	case old.Enabled:
+		if err := s.verifySudoToken(sudoToken, userID); err != nil {
+			return "", "", err
+		}
+		old.PendingSecretEncrypted = sealed
 		d = old
-	} else {
-		d = &models.TOTPDevice{UserID: userID, Secret: key.Secret(), Enabled: false}
+	default:
+		// Abandoned enrollment: the device was never confirmed, so rotating
+		// the secret outright is safe. This also wipes any legacy plaintext.
+		old.Secret, old.SecretEncrypted, old.PendingSecretEncrypted = "", sealed, ""
+		d = old
 	}
 	if err = s.repo.Upsert(ctx, d); err != nil {
 		return "", "", err
@@ -108,13 +136,30 @@ func (s *TOTPService) Enable(ctx context.Context, userID uint, email string) (st
 	return key.Secret(), key.URL(), nil
 }
 
+// verifySudoToken proves the caller holds a sudo JWT bound to this user —
+// issued only after a current TOTP proof (see ViewRecoveryCodes). A missing
+// manager or token, a bad signature/type/owner, or an absent expiry all
+// refuse; sudo is never proven by default (fail closed).
+func (s *TOTPService) verifySudoToken(token string, userID uint) error {
+	if s.jwtMgr == nil || token == "" {
+		return ErrSudoRequired
+	}
+	claims, err := s.jwtMgr.Verify(token)
+	if err != nil || claims.Type != jwt.TokenTypeSudo || claims.UserID != userID || claims.ExpiresAt == nil {
+		return ErrSudoRequired
+	}
+	return nil
+}
+
 // VerifyEnable confirms an enrollment: validates the provided 6-digit code
-// against the pending secret and, on success, activates the device and issues
-// a fresh batch of recovery codes. The plaintext recovery codes are returned
-// to the caller; at rest only their SHA-256 hashes (for login verification)
-// and an AES-256-GCM sealed copy (for the TOTP-gated view endpoint) persist.
-// Issuing a fresh batch also replaces any codes left over from a previous
-// enrollment.
+// and, on success, activates the device and issues a fresh batch of recovery
+// codes. During a sudo-gated rotation of an ACTIVE device (C6) the code must
+// match the pending secret; the active secret keeps serving logins until this
+// confirmation swaps them (the swap moves ciphertext — no re-sealing needed).
+// The plaintext recovery codes are returned to the caller; at rest only their
+// SHA-256 hashes (for login verification) and an AES-256-GCM sealed copy (for
+// the TOTP-gated view endpoint) persist. Issuing a fresh batch also replaces
+// any codes left over from a previous enrollment.
 func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string) ([]string, error) {
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return nil, err
@@ -125,14 +170,30 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 	}
 	if d == nil {
 		s.recordFailure(ctx, userID, "no pending device")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
-	if d.Enabled {
+	confirming := d.PendingSecretEncrypted != ""
+	if d.Enabled && !confirming {
 		return nil, ErrInvalidInput
 	}
-	if !totpValid(code, d.Secret) {
+	secret := d.PendingSecretEncrypted
+	if confirming {
+		if secret, err = s.enc.Decrypt(secret); err != nil {
+			return nil, fmt.Errorf("open pending totp secret: %w", err)
+		}
+	} else if secret, err = s.openActiveSecret(d); err != nil {
+		return nil, err
+	}
+	if !totpValid(code, secret) {
 		s.recordFailure(ctx, userID, "bad enable code")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
+	}
+	prevActive := d.SecretEncrypted
+	if confirming {
+		// Promote the sealed pending secret; the device stays enabled
+		// throughout, and any legacy plaintext is wiped.
+		d.SecretEncrypted, d.PendingSecretEncrypted = d.PendingSecretEncrypted, ""
+		d.Secret = ""
 	}
 	d.Enabled = true
 	if err = s.repo.Upsert(ctx, d); err != nil {
@@ -140,8 +201,13 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 	}
 	codes, err := s.newRecoveryCodes(ctx, userID)
 	if err != nil {
-		// Roll back activation so the user can retry Enable -> VerifyEnable.
-		d.Enabled = false
+		// Roll back so the user can retry Enable -> VerifyEnable: a pending
+		// rotation returns to staged state, a fresh enrollment is deactivated.
+		if confirming {
+			d.PendingSecretEncrypted, d.SecretEncrypted = d.SecretEncrypted, prevActive
+		} else {
+			d.Enabled = false
+		}
 		_ = s.repo.Upsert(ctx, d)
 		return nil, fmt.Errorf("generate recovery codes: %w", err)
 	}
@@ -163,14 +229,18 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 	}
 	if d == nil || !d.Enabled {
 		s.recordFailure(ctx, userID, "device not enabled")
-		return ErrInvalidOTP
+		return ErrInvalidCode
 	}
 
 	// ---- 6-digit TOTP fast path ----
 	if len(code) == 6 {
-		if !totpValid(code, d.Secret) {
+		secret, err := s.openActiveSecret(d)
+		if err != nil {
+			return err
+		}
+		if !totpValid(code, secret) {
 			s.recordFailure(ctx, userID, "bad totp code")
-			return ErrInvalidOTP
+			return ErrInvalidCode
 		}
 		// Replay protection: a code may only be used once within its validity
 		// window. SetNX is atomic, so concurrent identical submissions collide
@@ -179,7 +249,7 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 			// Same code reused within the window — treat as a failed
 			// attempt so repeat offenders hit the brute-force cap.
 			s.recordFailure(ctx, userID, "totp replay")
-			return ErrInvalidOTP
+			return ErrInvalidCode
 		}
 		s.recordSuccess(ctx, userID, models.AuditEventTOTPValidated, "totp validated")
 		return nil
@@ -194,6 +264,12 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 	for i := range codes {
 		if hash.ConstantTimeCompare(codes[i].CodeHash, want) {
 			if err := s.repo.MarkRecoveryCodeUsed(ctx, &codes[i]); err != nil {
+				if errors.Is(err, repositories.ErrRecoveryCodeUsed) {
+					// A concurrent request consumed the code between our read
+					// and the mark — same outcome as any failed attempt.
+					s.recordFailure(ctx, userID, "recovery code replay")
+					return ErrInvalidCode
+				}
 				return err
 			}
 			s.recordSuccess(ctx, userID, models.AuditEventRecoveryCodeUsed, "recovery code used")
@@ -201,7 +277,7 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 		}
 	}
 	s.recordFailure(ctx, userID, "bad recovery code")
-	return ErrInvalidOTP
+	return ErrInvalidCode
 }
 
 // ViewRecoveryCodes re-displays the user's saved (unused) recovery codes.
@@ -220,15 +296,19 @@ func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code s
 	}
 	if d == nil || !d.Enabled {
 		s.recordFailure(ctx, userID, "view codes: device not enabled")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
-	if len(code) != 6 || !totpValid(code, d.Secret) {
+	secret, err := s.openActiveSecret(d)
+	if err != nil {
+		return nil, err
+	}
+	if len(code) != 6 || !totpValid(code, secret) {
 		s.recordFailure(ctx, userID, "view codes: bad totp code")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	if !s.replayGuard(ctx, userID, code) {
 		s.recordFailure(ctx, userID, "view codes: totp replay")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	rows, err := s.repo.ActiveRecoveryCodes(ctx, userID)
 	if err != nil {
@@ -241,7 +321,7 @@ func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code s
 			// not re-displayed; regenerating replaces the whole set.
 			continue
 		}
-		plain, err := crypto.Decrypt(s.encKey, rows[i].CodeEncrypted)
+		plain, err := s.enc.Decrypt(rows[i].CodeEncrypted)
 		if err != nil {
 			// Key rotated or row corrupted — same remedy as above.
 			continue
@@ -264,7 +344,7 @@ func (s *TOTPService) RegenerateRecoveryCodes(ctx context.Context, userID uint) 
 	}
 	if d == nil || !d.Enabled {
 		s.recordFailure(ctx, userID, "regenerate codes: device not enabled")
-		return nil, ErrInvalidOTP
+		return nil, ErrInvalidCode
 	}
 	codes, err := s.newRecoveryCodes(ctx, userID)
 	if err != nil {
@@ -288,7 +368,7 @@ func (s *TOTPService) newRecoveryCodes(ctx context.Context, userID uint) ([]stri
 			return nil, err
 		}
 		plain[i] = hex.EncodeToString(b)
-		sealed, err := crypto.Encrypt(s.encKey, plain[i])
+		sealed, err := s.enc.Encrypt(plain[i])
 		if err != nil {
 			return nil, fmt.Errorf("seal recovery code: %w", err)
 		}
@@ -299,6 +379,20 @@ func (s *TOTPService) newRecoveryCodes(ctx context.Context, userID uint) ([]stri
 		}
 	}
 	return plain, s.repo.ReplaceRecoveryCodes(ctx, userID, rows)
+}
+
+// openActiveSecret returns the device's active secret, decrypting the sealed
+// copy; rows written before encrypted storage existed fall back to their
+// plaintext Secret (lazy migration on read — C7).
+func (s *TOTPService) openActiveSecret(d *models.TOTPDevice) (string, error) {
+	if d.SecretEncrypted == "" {
+		return d.Secret, nil
+	}
+	plain, err := s.enc.Decrypt(d.SecretEncrypted)
+	if err != nil {
+		return "", fmt.Errorf("open totp secret: %w", err)
+	}
+	return plain, nil
 }
 
 // replayGuard enforces that a 6-digit TOTP code is consumed at most once per
@@ -314,17 +408,17 @@ func (s *TOTPService) replayGuard(ctx context.Context, userID uint, code string)
 	return s.store.SetNX(key, "1", totpReplayTTL)
 }
 
-// guardBruteForce enforces the per-user failed-attempt cap. It increments a
-// counter in the shared store (so it holds across instances) and rejects with
-// ErrRateLimited once the cap is exceeded. The cap backstops the per-IP rate
-// limiter: an attacker rotating IPs to bypass it is still throttled per
-// account. A nil store disables the check (single-instance dev / legacy tests).
+// guardBruteForce enforces the per-user failed-attempt cap by READING the
+// current count — it never increments: successes must not feed the window
+// (C9); only recordFailure does. The cap backstops the per-IP rate limiter:
+// an attacker rotating IPs to bypass it is still throttled per account.
+// A nil store disables the check (single-instance dev / legacy tests).
 func (s *TOTPService) guardBruteForce(ctx context.Context, userID uint) error {
 	if s.store == nil {
 		return nil
 	}
 	key := fmt.Sprintf("totp:fail:%d", userID)
-	if n := s.store.IncrBy(key, 1, s.cfg.TOTPAttemptWindow); n > int64(s.cfg.TOTPMaxAttempts) {
+	if storeCounterValue(s.store, key) >= int64(s.cfg.TOTPMaxAttempts) {
 		s.recordFailure(ctx, userID, "brute-force lockout")
 		return ErrRateLimited
 	}
@@ -332,8 +426,13 @@ func (s *TOTPService) guardBruteForce(ctx context.Context, userID uint) error {
 }
 
 // recordSuccess fires-and-forgets a successful audit entry (best-effort,
-// never blocks — the underlying AuditRepo is the async writer).
+// never blocks — the underlying AuditRepo is the async writer). A success
+// also clears the per-user brute-force window (C9): having proven possession
+// of the factor, earlier failures should not linger toward the cap.
 func (s *TOTPService) recordSuccess(ctx context.Context, userID uint, event, detail string) {
+	if s.store != nil {
+		s.store.Delete(fmt.Sprintf("totp:fail:%d", userID))
+	}
 	if s.audits == nil {
 		return
 	}
@@ -344,9 +443,13 @@ func (s *TOTPService) recordSuccess(ctx context.Context, userID uint, event, det
 	})
 }
 
-// recordFailure fires-and-forgets a failed attempt. Wrapped in a defer/recover
-// because audit logging must NEVER break the auth flow.
+// recordFailure fires-and-forgets a failed attempt — and this is the ONLY
+// place the per-user brute-force counter grows (C9: failures only). Wrapped
+// in a defer/recover because audit logging must NEVER break the auth flow.
 func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail string) {
+	if s.store != nil {
+		s.store.IncrBy(fmt.Sprintf("totp:fail:%d", userID), 1, s.cfg.TOTPAttemptWindow)
+	}
 	if s.audits == nil {
 		return
 	}
@@ -358,10 +461,29 @@ func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail str
 	})
 }
 
+// storeCounterValue reads a counter written by IncrBy WITHOUT incrementing
+// it. Redis hands counters back as strings; the in-memory store keeps int64.
+func storeCounterValue(s store.Store, key string) int64 {
+	v, ok := s.Get(key)
+	if !ok {
+		return 0
+	}
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case string:
+		c, _ := strconv.ParseInt(n, 10, 64)
+		return c
+	}
+	return 0
+}
+
 // IsTOTPError reports whether err is one of the TOTP-related sentinel errors,
 // so callers (e.g. handlers) can branch without importing the sentinels.
 func IsTOTPError(err error) bool {
-	return errors.Is(err, ErrInvalidOTP) || errors.Is(err, ErrRateLimited)
+	return errors.Is(err, ErrInvalidCode) || errors.Is(err, ErrRateLimited)
 }
 
 // totpValid validates a 6-digit code against the secret with a ±1 step skew to

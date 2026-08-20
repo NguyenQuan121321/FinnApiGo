@@ -26,44 +26,17 @@ const nonceLen = 12
 // ErrInvalidKey is returned when the key is not exactly KeyLen bytes.
 var ErrInvalidKey = errors.New("crypto: key must be 32 bytes (AES-256)")
 
-// Encrypt seals plaintext with AES-256-GCM under key and returns
-// base64(nonce ‖ ciphertext+tag). Use hash.GenerateRandomBytes-derived keys;
-// never a user-supplied password.
-func Encrypt(key []byte, plaintext string) (string, error) {
-	gcm, err := newGCM(key)
-	if err != nil {
-		return "", err
-	}
-	nonce, err := hash.GenerateRandomBytes(nonceLen)
-	if err != nil {
-		return "", fmt.Errorf("crypto: generate nonce: %w", err)
-	}
-	sealed := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(sealed), nil
+// Encryptor seals and opens payloads with AES-256-GCM under one fixed key.
+// The key schedule (aes.NewCipher + cipher.NewGCM) is computed once in
+// NewEncryptor and reused by every call — the app's key never changes at
+// runtime, so re-deriving it per Encrypt/Decrypt call is pure waste. Construct
+// one Encryptor at startup and inject it wherever sealing is needed.
+type Encryptor struct {
+	gcm cipher.AEAD
 }
 
-// Decrypt opens a value produced by Encrypt. GCM authentication means any
-// tampering (wrong key, truncated/corrupted payload) fails here.
-func Decrypt(key []byte, encoded string) (string, error) {
-	gcm, err := newGCM(key)
-	if err != nil {
-		return "", err
-	}
-	raw, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", fmt.Errorf("crypto: decode payload: %w", err)
-	}
-	if len(raw) < nonceLen+gcm.Overhead() {
-		return "", errors.New("crypto: payload too short")
-	}
-	plain, err := gcm.Open(nil, raw[:nonceLen], raw[nonceLen:], nil)
-	if err != nil {
-		return "", fmt.Errorf("crypto: decrypt: %w", err)
-	}
-	return string(plain), nil
-}
-
-func newGCM(key []byte) (cipher.AEAD, error) {
+// NewEncryptor validates the key and pre-computes the GCM cipher block.
+func NewEncryptor(key []byte) (*Encryptor, error) {
 	if len(key) != KeyLen {
 		return nil, ErrInvalidKey
 	}
@@ -71,5 +44,59 @@ func newGCM(key []byte) (cipher.AEAD, error) {
 	if err != nil {
 		return nil, fmt.Errorf("crypto: init cipher: %w", err)
 	}
-	return cipher.NewGCM(block)
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: init gcm: %w", err)
+	}
+	return &Encryptor{gcm: gcm}, nil
+}
+
+// Encrypt seals plaintext and returns base64(nonce ‖ ciphertext+tag). Use
+// hash.GenerateRandomBytes-derived keys; never a user-supplied password.
+func (e *Encryptor) Encrypt(plaintext string) (string, error) {
+	nonce, err := hash.GenerateRandomBytes(nonceLen)
+	if err != nil {
+		return "", fmt.Errorf("crypto: generate nonce: %w", err)
+	}
+	sealed := e.gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(sealed), nil
+}
+
+// Decrypt opens a value produced by Encrypt. GCM authentication means any
+// tampering (wrong key, truncated/corrupted payload) fails here.
+func (e *Encryptor) Decrypt(encoded string) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("crypto: decode payload: %w", err)
+	}
+	if len(raw) < nonceLen+e.gcm.Overhead() {
+		return "", errors.New("crypto: payload too short")
+	}
+	plain, err := e.gcm.Open(nil, raw[:nonceLen], raw[nonceLen:], nil)
+	if err != nil {
+		return "", fmt.Errorf("crypto: decrypt: %w", err)
+	}
+	return string(plain), nil
+}
+
+// Encrypt seals plaintext with AES-256-GCM under key and returns
+// base64(nonce ‖ ciphertext+tag). It is a convenience wrapper for callers
+// without a long-lived Encryptor; the hot path should use NewEncryptor once
+// and reuse the instance to avoid the per-call key schedule.
+func Encrypt(key []byte, plaintext string) (string, error) {
+	e, err := NewEncryptor(key)
+	if err != nil {
+		return "", err
+	}
+	return e.Encrypt(plaintext)
+}
+
+// Decrypt opens a value produced by Encrypt. GCM authentication means any
+// tampering (wrong key, truncated/corrupted payload) fails here.
+func Decrypt(key []byte, encoded string) (string, error) {
+	e, err := NewEncryptor(key)
+	if err != nil {
+		return "", err
+	}
+	return e.Decrypt(encoded)
 }

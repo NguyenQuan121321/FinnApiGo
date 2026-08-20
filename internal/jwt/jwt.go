@@ -26,6 +26,10 @@ type Claims struct {
 	Role   string `json:"role,omitempty"`
 	Email  string `json:"email,omitempty"`
 	Type   string `json:"type"`
+	// PwdVer (access tokens only) is the user's password-version counter at
+	// issue time; AuthMiddleware rejects the token once the live version is
+	// higher (credential changed — A7).
+	PwdVer int64 `json:"pwdver,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -45,8 +49,28 @@ func NewJWTManager(secret, issuer string) *JWTManager {
 // For reset and verify-email tokens a jti (UUID) is embedded so single-use
 // enforcement can track consumption (§1.8).
 func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.Duration) (string, error) {
+	claims := m.baseClaims(userID, role, email, tokenType, ttl)
+	// §1.8 — single-use tokens get a unique jti so replay is detectable.
+	switch tokenType {
+	case TokenTypeReset, TokenTypeEmailVerify:
+		claims.ID = uuid.New().String()
+	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+}
+
+// IssueAccess issues an ACCESS token embedding the user's current password
+// version (A7). Callers must pass the live users.pwd_version so the next
+// credential change invalidates the token.
+func (m *JWTManager) IssueAccess(userID uint, role, email string, ttl time.Duration, pwdVer int64) (string, error) {
+	claims := m.baseClaims(userID, role, email, TokenTypeAccess, ttl)
+	claims.PwdVer = pwdVer
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+}
+
+// baseClaims assembles the registered + custom claims shared by every token.
+func (m *JWTManager) baseClaims(userID uint, role, email, tokenType string, ttl time.Duration) *Claims {
 	now := time.Now()
-	claims := Claims{
+	return &Claims{
 		UserID: userID,
 		Role:   role,
 		Email:  email,
@@ -59,18 +83,13 @@ func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.
 			NotBefore: jwt.NewNumericDate(now),
 		},
 	}
-	// §1.8 — single-use tokens get a unique jti so replay is detectable.
-	switch tokenType {
-	case TokenTypeReset, TokenTypeEmailVerify:
-		claims.ID = uuid.New().String()
-	}
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return tok.SignedString(m.secret)
 }
 
-// Verify validates the signature, expiry, and issuer. On success it returns the
-// typed claims. Callers must additionally check claims.Type matches the
-// expected purpose (Verify does not assume a single type).
+// Verify validates the signature, expiry, and issuer. exp is REQUIRED (a
+// token without one never verifies) and the only accepted algorithm is
+// HS256 — the keyfunc additionally rejects the non-HMAC families. On success
+// it returns the typed claims. Callers must additionally check claims.Type
+// matches the expected purpose (Verify does not assume a single type).
 func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
 	claims := &Claims{}
 	tok, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
@@ -78,7 +97,11 @@ func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
 			return nil, ErrUnexpectedSigningMethod
 		}
 		return m.secret, nil
-	})
+	},
+		jwt.WithIssuer(m.issuer),
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{"HS256"}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
 	}

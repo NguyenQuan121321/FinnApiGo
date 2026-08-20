@@ -10,19 +10,14 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/middleware"
-	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/response"
-	"github.com/finnapigo/finnapigo/internal/services"
 )
 
-// MFAHandler exposes the OTP endpoints under /api/v1/auth/mfa.
-type MFAService interface {
-	SendOTP(context.Context, services.OTPSendInput, string) error
-	VerifyOTP(context.Context, services.OTPVerifyInput, string) error
-}
-
+// TOTPService is the MFA mechanism exposed under /api/v1/auth/mfa.
 type TOTPService interface {
-	Enable(context.Context, uint, string) (string, string, error)
+	// Enable starts enrollment. sudoToken (X-Sudo-Token) is only required —
+	// and enforced in the service — when rotating an already-ACTIVE device.
+	Enable(context.Context, uint, string, string) (string, string, error)
 	VerifyEnable(context.Context, uint, string) ([]string, error)
 	Validate(context.Context, uint, string) error
 	// ViewRecoveryCodes re-displays the saved codes after a current TOTP code.
@@ -32,8 +27,8 @@ type TOTPService interface {
 	RegenerateRecoveryCodes(context.Context, uint) ([]string, error)
 }
 
+// MFAHandler exposes the TOTP endpoints under /api/v1/auth/mfa.
 type MFAHandler struct {
-	svc     MFAService
 	totp    TOTPService
 	jwtMgr  *jwt.JWTManager
 	sudoTTL time.Duration
@@ -42,8 +37,8 @@ type MFAHandler struct {
 // NewMFAHandler constructs the handler. jwtMgr mints the sudo token returned
 // by ViewRecoveryCodes; when nil no token is issued (degraded mode for tests
 // that don't exercise sudo). sudoTTL <= 0 falls back to 15 minutes.
-func NewMFAHandler(svc MFAService, totp TOTPService, jwtMgr *jwt.JWTManager, sudoTTL time.Duration) *MFAHandler {
-	return &MFAHandler{svc: svc, totp: totp, jwtMgr: jwtMgr, sudoTTL: sudoTTL}
+func NewMFAHandler(totp TOTPService, jwtMgr *jwt.JWTManager, sudoTTL time.Duration) *MFAHandler {
+	return &MFAHandler{totp: totp, jwtMgr: jwtMgr, sudoTTL: sudoTTL}
 }
 
 func (h *MFAHandler) EnableTOTP(c *gin.Context) {
@@ -60,7 +55,9 @@ func (h *MFAHandler) EnableTOTP(c *gin.Context) {
 	if e, ok := email.(string); ok && e != "" {
 		account = e
 	}
-	secret, uri, err := h.totp.Enable(c.Request.Context(), uid, account)
+	// Re-enrolling an active device demands sudo; the header is forwarded and
+	// the service enforces it (a bare access token is not enough, C6).
+	secret, uri, err := h.totp.Enable(c.Request.Context(), uid, account, c.GetHeader(middleware.SudoHeader))
 	if err != nil {
 		respondError(c, err)
 		return
@@ -175,62 +172,4 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
-}
-
-func (h *MFAHandler) SendOTP(c *gin.Context) {
-	uid, ok := ctxUserID(c)
-	if !ok {
-		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
-		return
-	}
-	var req OTPSendRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
-		return
-	}
-	// Default purpose to login if omitted-ish — but binding requires it; here
-	// we just sanity-check it's one of the known purposes.
-	if !isValidPurpose(req.Purpose) {
-		response.Respond(c, http.StatusBadRequest, "invalid purpose", nil)
-		return
-	}
-	if err := h.svc.SendOTP(c.Request.Context(), services.OTPSendInput{
-		UserID: uid, Purpose: req.Purpose,
-	}, clientIP(c)); err != nil {
-		respondError(c, err)
-		return
-	}
-	response.Respond(c, http.StatusOK, "OTP sent", nil)
-}
-
-func (h *MFAHandler) VerifyOTP(c *gin.Context) {
-	uid, ok := ctxUserID(c)
-	if !ok {
-		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
-		return
-	}
-	var req OTPVerifyRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
-		return
-	}
-	if !isValidPurpose(req.Purpose) {
-		response.Respond(c, http.StatusBadRequest, "invalid purpose", nil)
-		return
-	}
-	if err := h.svc.VerifyOTP(c.Request.Context(), services.OTPVerifyInput{
-		UserID: uid, Code: req.Code, Purpose: req.Purpose,
-	}, clientIP(c)); err != nil {
-		respondError(c, err)
-		return
-	}
-	response.Respond(c, http.StatusOK, "OTP verified", nil)
-}
-
-func isValidPurpose(p string) bool {
-	switch p {
-	case models.OTPPurposeLogin, models.OTPPurposeVerifyEmail, models.OTPPurposeResetPassword:
-		return true
-	}
-	return false
 }

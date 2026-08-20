@@ -6,7 +6,6 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -38,7 +37,7 @@ func CheckPassword(hash, plain string) bool {
 }
 
 // HashToken returns the SHA-256 hex digest of an arbitrary secret token.
-// Used for refresh tokens and OTP codes — we store only the hash so the DB
+// Used for refresh tokens — we store only the hash so the DB
 // never holds a usable credential.
 func HashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
@@ -62,24 +61,6 @@ func GenerateRandomBytes(n int) ([]byte, error) {
 		return nil, err
 	}
 	return b, nil
-}
-
-// GenerateNumericOTP returns a zero-padded numeric one-time code of the given
-// length using crypto/rand (NOT math/rand — must be unpredictable).
-func GenerateNumericOTP(length int) (string, error) {
-	if length <= 0 {
-		return "", fmt.Errorf("otp length must be positive")
-	}
-	const digits = "0123456789"
-	out := make([]byte, length)
-	for i := range out {
-		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(digits))))
-		if err != nil {
-			return "", err
-		}
-		out[i] = digits[idx.Int64()]
-	}
-	return string(out), nil
 }
 
 // GenerateOpaqueToken returns a 32-byte (256-bit) hex random string used as

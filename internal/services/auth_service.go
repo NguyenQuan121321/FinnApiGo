@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/repositories"
+	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/go-sql-driver/mysql"
 	"gorm.io/gorm"
 )
@@ -40,7 +44,7 @@ type AuthService struct {
 	tokens        RefreshTokenRepo
 	usedTokens    UsedTokenRepo
 	audits        AuditRepo
-	store         StoreProvider
+	store         store.Store
 	jwt           *jwt.JWTManager
 	cfg           config.AuthConfig
 	rlCfg         config.RateLimitConfig // §2/§3 velocity + adaptive-captcha knobs
@@ -52,15 +56,6 @@ type AuthService struct {
 	totpValidator TOTPValidator   // nil-safe — MFA completion unavailable when nil
 }
 
-// StoreProvider abstracts the key-value store for per-account/per-IP counters
-// and single-use token tracking. Injected via config — InMemoryStore by default,
-// RedisStore for multi-instance so counters are shared.
-type StoreProvider interface {
-	SetNX(key string, value any, ttl time.Duration) bool
-	IncrBy(key string, delta int64, ttl time.Duration) int64
-	Get(key string) (any, bool)
-}
-
 // NewAuthService constructs the service. Repos are interfaces so mocks can be
 // passed in tests. store may be nil (some features will be no-ops). rlCfg drives
 // the §2/§3 velocity limiters and adaptive CAPTCHA; captcha may be nil.
@@ -70,7 +65,7 @@ func NewAuthService(
 	tokens RefreshTokenRepo,
 	usedTokens UsedTokenRepo,
 	audits AuditRepo,
-	store StoreProvider,
+	store store.Store,
 	jwt *jwt.JWTManager,
 	authCfg config.AuthConfig,
 	rlCfg config.RateLimitConfig,
@@ -166,8 +161,19 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 	if err != nil {
 		return UserProfile{}, err
 	}
-	if err := s.notify.SendEmailVerification(user.Email, verifyToken); err != nil {
-		return UserProfile{}, fmt.Errorf("register: send verification email: %w", err)
+	// C11 — the user row is already committed; a failed email delivery must
+	// not turn the registration into a 500 (a client retry then collides with
+	// ErrEmailExists). Degrade to success + error log + audit; the
+	// resend-verification endpoint is the recovery path.
+	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
+		slog.Error("register: verification email delivery failed",
+			"user_id", user.ID, "email", user.Email, "err", err)
+		uid := user.ID
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID: &uid, Email: user.Email,
+			Event: models.AuditEventVerifyEmailSendFailed, Success: false,
+			Detail: err.Error(), IPAddress: in.IP,
+		})
 	}
 	return FromUser(user), nil
 }
@@ -182,12 +188,12 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 
 	// §3 — per-account login velocity limit: throttle repeated attempts against
-	// one email even when spread across many IPs. Uses the store so the limit
-	// is shared across instances.
+	// one email even when spread across many IPs. C9: only FAILED attempts
+	// count — this check reads the counter without incrementing, failures grow
+	// it, and a successful login clears it (the owner typing the correct
+	// password must not be throttled by their own earlier typos).
 	if s.store != nil && email != "" && s.rlCfg.LoginPerAccountMax > 0 {
-		key := "login:acct:" + email
-		count := s.store.IncrBy(key, 1, s.rlCfg.LoginWindow)
-		if count > int64(s.rlCfg.LoginPerAccountMax) {
+		if storeCounterValue(s.store, "login:acct:"+email) >= int64(s.rlCfg.LoginPerAccountMax) {
 			return TokenPair{}, UserProfile{}, nil, ErrRateLimited
 		}
 	}
@@ -216,6 +222,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	if user == nil {
 		hash.CheckPassword(dummyHash, in.Password)
 		s.recordLoginFailIP(ctx, ip)
+		s.recordLoginFailAccount(email)
 		s.audits.Record(ctx, loginFailedEvent(nil, email, ip, "unknown user"))
 		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
@@ -245,6 +252,11 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	// success: reset counter
 	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
 		return TokenPair{}, UserProfile{}, nil, err
+	}
+	// C9 — clear the per-account velocity counter too: the owner proving the
+	// correct password must not stay throttled by their own earlier typos.
+	if s.store != nil {
+		s.store.Delete("login:acct:" + email)
 	}
 
 	return s.CheckMFAOrIssueTokens(ctx, user, ip, ua, "")
@@ -344,7 +356,9 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken, ip string) error
 	if rt == nil || rt.Revoked {
 		return nil
 	}
-	if err := s.tokens.Revoke(ctx, rt); err != nil {
+	// A concurrent revocation (rotation race) also leaves the session dead —
+	// Logout's contract is idempotent, so that outcome is still success here.
+	if err := s.tokens.Revoke(ctx, rt); err != nil && !errors.Is(err, repositories.ErrTokenAlreadyRevoked) {
 		return err
 	}
 	uid := rt.UserID
@@ -412,8 +426,18 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 	}
 
 	// Rotate: revoke the old, issue a new pair (carrying the caller's device
-	// metadata so the "sessions" list reflects the rotating device).
+	// metadata so the "sessions" list reflects the rotating device). Revoke is
+	// a compare-and-set — losing the race means a concurrent request already
+	// consumed this token, which is reuse by definition (C1).
 	if err := s.tokens.Revoke(ctx, rt); err != nil {
+		if errors.Is(err, repositories.ErrTokenAlreadyRevoked) {
+			_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
+			s.audits.Record(ctx, &models.AuditLog{
+				UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
+				IPAddress: ip, Success: false, Detail: "concurrent refresh lost revoke race",
+			})
+			return TokenPair{}, ErrInvalidToken
+		}
 		return TokenPair{}, err
 	}
 	pair, err := s.issueTokenPair(ctx, user, ip, ua)
@@ -445,7 +469,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 	if err != nil {
 		return err
 	}
-	if err := s.notify.SendPasswordReset(email, resetToken); err != nil {
+	if err := s.notify.SendPasswordReset(ctx, email, resetToken); err != nil {
 		return fmt.Errorf("forgot-password: send: %w", err)
 	}
 	return nil
@@ -460,7 +484,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 // legitimate client back off.
 //
 // Defense-in-depth layering (each layer short-circuits before the next, and
-// every store-backed layer is shared across instances via the StoreProvider):
+// every store-backed layer is shared across instances via the store.Store):
 //  1. per-IP middleware limiter (process-local, cheap first filter)
 //  2. GLOBAL volume cap — circuit-breaker vs botnet floods rotating IPs+emails
 //  3. per-IP service throttle — store-backed, survives IP rotation
@@ -542,7 +566,7 @@ func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) e
 	if err != nil {
 		return err
 	}
-	if err := s.notify.SendEmailVerification(user.Email, verifyToken); err != nil {
+	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
 		return fmt.Errorf("resend-verify: send: %w", err)
 	}
 	return nil
@@ -569,8 +593,9 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 		return ErrUserNotFound
 	}
 
-	// §1.8 — single-use enforcement: check-and-mark the jti atomically.
-	if !s.markTokenUsed(claims.ID) {
+	// §1.8 — single-use enforcement: check-and-mark the jti atomically, with
+	// the durable used_tokens table backstopping a store flush (C8).
+	if !s.consumeSingleUseToken(ctx, claims.ID) {
 		return ErrInvalidToken
 	}
 	if s.usedTokens != nil {
@@ -583,6 +608,15 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 		return err
 	}
 	if err := s.users.UpdatePassword(ctx, user, hashed); err != nil {
+		return err
+	}
+	// C10 — the reset proves account ownership: clear any attacker-sustained
+	// lockout so the victim is not still locked out with their new password.
+	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
+		return err
+	}
+	// A7 — kill outstanding ACCESS tokens too (refresh tokens die below).
+	if err := s.bumpPwdVersion(ctx, user.ID); err != nil {
 		return err
 	}
 	if err := s.tokens.RevokeAllForUser(ctx, user.ID); err != nil {
@@ -618,6 +652,14 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 		return err
 	}
 	if err := s.users.UpdatePassword(ctx, user, hashed); err != nil {
+		return err
+	}
+	// C10 — knowing the old password proves ownership: clear lockout state.
+	if err := s.users.ResetFailedAttempts(ctx, user); err != nil {
+		return err
+	}
+	// A7 — kill outstanding ACCESS tokens too (refresh tokens die below).
+	if err := s.bumpPwdVersion(ctx, user.ID); err != nil {
 		return err
 	}
 	if err := s.tokens.RevokeAllForUser(ctx, user.ID); err != nil {
@@ -674,6 +716,10 @@ func (s *AuthService) SetPassword(ctx context.Context, userID uint, newPassword,
 	if err := s.users.UpdatePassword(ctx, user, hashed); err != nil {
 		return err
 	}
+	// A7 — a first credential invalidates pre-credential access tokens.
+	if err := s.bumpPwdVersion(ctx, user.ID); err != nil {
+		return err
+	}
 	s.audits.Record(ctx, &models.AuditLog{
 		UserID: &user.ID, Email: user.Email, Event: models.AuditEventPasswordSet,
 		IPAddress: ip, Success: true, Detail: "first password set (oauth-only account)",
@@ -712,8 +758,8 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 		return ErrUserNotFound
 	}
 
-	// §1.8 — single-use enforcement.
-	if !s.markTokenUsed(claims.ID) {
+	// §1.8 — single-use enforcement (store + durable backstop, C8).
+	if !s.consumeSingleUseToken(ctx, claims.ID) {
 		return ErrInvalidToken
 	}
 	if s.usedTokens != nil {
@@ -729,9 +775,11 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 // issueTokenPair mints an access JWT + opaque refresh token (hash stored).
 // The caller's ip/ua are stamped onto the new refresh-token row so it doubles
 // as a session/device record (location is resolved via the geo resolver).
+// The access token embeds the user's password version so the next credential
+// change kills it (A7).
 func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, error) {
-	access, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		jwt.TokenTypeAccess, s.jwtCfg.AccessTTL)
+	access, err := s.jwt.IssueAccess(user.ID, user.Role, user.Email,
+		s.jwtCfg.AccessTTL, user.PwdVersion)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -851,10 +899,23 @@ func (s *AuthService) recordFailedLogin(ctx context.Context, user *models.User, 
 		lockUntil = &t
 	}
 	if err := s.users.IncrementFailedAttempts(ctx, user, lockUntil); err != nil {
-		_ = err
+		// Log the error — lockout enforcement depends on this write succeeding.
+		// Do NOT return the error to the caller (login should still fail with
+		// ErrInvalidCredentials, not a 500), but the failure must be observable.
+		slog.Error("recordFailedLogin: increment failed attempts",
+			"user_id", user.ID, "err", err)
 	}
 	s.recordLoginFailIP(ctx, ip)
+	s.recordLoginFailAccount(email)
 	s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "bad password"))
+}
+
+// recordLoginFailAccount grows the per-account login velocity counter — its
+// only writer (C9: failures only; a successful login deletes the key instead).
+func (s *AuthService) recordLoginFailAccount(email string) {
+	if s.store != nil && email != "" {
+		s.store.IncrBy("login:acct:"+email, 1, s.rlCfg.LoginWindow)
+	}
 }
 
 // recordLoginFailIP increments the per-IP failure counter used by the adaptive
@@ -865,6 +926,59 @@ func (s *AuthService) recordLoginFailIP(ctx context.Context, ip string) {
 	}
 }
 
+// pwdVerCacheTTL bounds how long AuthMiddleware sees a stale password
+// version after a credential change (A7). 60s keeps the per-request cost at
+// one store hit; the exposure window for a revoked-but-still-accepted access
+// token is this TTL, and at most AccessTTL when the store is unavailable.
+const pwdVerCacheTTL = 60 * time.Second
+
+// bumpPwdVersion advances the credential counter and drops its cached value
+// so AuthMiddleware sees the new version immediately instead of after the
+// cache TTL (A7).
+func (s *AuthService) bumpPwdVersion(ctx context.Context, userID uint) error {
+	if err := s.users.BumpPwdVersion(ctx, userID); err != nil {
+		return err
+	}
+	if s.store != nil {
+		s.store.Delete(fmt.Sprintf("pwdver:%d", userID))
+	}
+	return nil
+}
+
+// CurrentPwdVersion returns the user's live credential version for
+// AuthMiddleware (A7): store-cached for pwdVerCacheTTL, DB on cache miss.
+// A store failure falls through to the DB; when both fail the error is
+// returned and callers must decide (the middleware then fails OPEN — the
+// remaining bound is AccessTTL, the documented worst case).
+func (s *AuthService) CurrentPwdVersion(ctx context.Context, userID uint) (int64, error) {
+	key := fmt.Sprintf("pwdver:%d", userID)
+	if s.store != nil {
+		if v, ok := s.store.Get(key); ok {
+			switch n := v.(type) {
+			case int64:
+				return n, nil
+			case int:
+				return int64(n), nil
+			case string:
+				if parsed, err := strconv.ParseInt(n, 10, 64); err == nil {
+					return parsed, nil
+				}
+			}
+		}
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return 0, err
+	}
+	if user == nil {
+		return 0, nil
+	}
+	if s.store != nil {
+		s.store.Set(key, user.PwdVersion, pwdVerCacheTTL)
+	}
+	return user.PwdVersion, nil
+}
+
 // markTokenUsed uses SetNX on the store to atomically check-and-mark a JWT
 // jti as consumed. Returns false if already used (single-use enforcement §1.8).
 func (s *AuthService) markTokenUsed(jti string) bool {
@@ -873,6 +987,26 @@ func (s *AuthService) markTokenUsed(jti string) bool {
 	}
 	key := "jti:" + jti
 	return s.store.SetNX(key, "used", 24*time.Hour)
+}
+
+// consumeSingleUseToken enforces one-time use of a jti across BOTH guards:
+// the volatile store (fast, shared) and the durable used_tokens table. A
+// store MISS is not proof of freshness — a Redis flush/eviction would revive
+// consumed tokens — so the DB replay check runs on every miss and fails
+// CLOSED (a token whose history cannot be verified is rejected, C8). With no
+// store wired at all, the durable table alone decides.
+func (s *AuthService) consumeSingleUseToken(ctx context.Context, jti string) bool {
+	if !s.markTokenUsed(jti) {
+		return false
+	}
+	if s.usedTokens == nil {
+		return true // no durable guard wired (tests) — store decision stands
+	}
+	used, err := s.usedTokens.IsUsed(ctx, jti)
+	if err != nil {
+		return false // cannot prove freshness — fail closed
+	}
+	return !used
 }
 
 // validatePassword enforces a basic complexity policy (length + classes + cap).

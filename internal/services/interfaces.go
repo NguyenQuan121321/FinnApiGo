@@ -25,6 +25,9 @@ type UserRepo interface {
 	IncrementFailedAttempts(ctx context.Context, user *models.User, lockUntil *time.Time) error
 	ResetFailedAttempts(ctx context.Context, user *models.User) error
 	SetEmailVerified(ctx context.Context, user *models.User, verified bool) error
+	// BumpPwdVersion atomically increments users.pwd_version — called on
+	// every credential change so outstanding access tokens die (A7).
+	BumpPwdVersion(ctx context.Context, userID uint) error
 }
 
 // RefreshTokenRepo abstracts persistence for refresh tokens. Each token row
@@ -40,21 +43,15 @@ type RefreshTokenRepo interface {
 	// session (defense against IDOR). Returns ErrSessionNotFound (via gorm's
 	// ErrRecordNotFound sentinel → mapped by the service) when no row matches.
 	RevokeByID(ctx context.Context, id, userID uint) error
+	// Revoke marks the given token row revoked via compare-and-set
+	// (WHERE revoked = false). It returns repositories.ErrTokenAlreadyRevoked
+	// when the row was already revoked by a concurrent request — callers must
+	// treat that as token reuse, not as an error to propagate.
 	Revoke(ctx context.Context, rt *models.RefreshToken) error
 	RevokeAllForUser(ctx context.Context, userID uint) error
 	// TouchLastActive bumps last_active_at for the token — called whenever the
 	// session is used (login / refresh rotation). Bounded to the given row id.
 	TouchLastActive(ctx context.Context, id uint) error
-	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
-}
-
-// OtpRepo abstracts persistence for OTP codes.
-type OtpRepo interface {
-	Create(ctx context.Context, o *models.OtpCode) error
-	FindLatestActive(ctx context.Context, userID uint, purpose string) (*models.OtpCode, error)
-	Update(ctx context.Context, o *models.OtpCode) error
-	MarkUsed(ctx context.Context, o *models.OtpCode) error
-	IncrementAttempts(ctx context.Context, o *models.OtpCode) (int, error)
 	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
 }
 
@@ -65,6 +62,10 @@ type TOTPRepo interface {
 	// codes (used and unused) and inserts the new batch in one transaction.
 	ReplaceRecoveryCodes(context.Context, uint, []*models.RecoveryCode) error
 	ActiveRecoveryCodes(context.Context, uint) ([]models.RecoveryCode, error)
+	// MarkRecoveryCodeUsed marks the code consumed via compare-and-set on
+	// used_at IS NULL; it returns repositories.ErrRecoveryCodeUsed when a
+	// concurrent request already consumed the code — callers must treat that
+	// as a failed attempt, not propagate it.
 	MarkRecoveryCodeUsed(context.Context, *models.RecoveryCode) error
 }
 
@@ -100,15 +101,15 @@ type UsedTokenRepo interface {
 	IsUsed(ctx context.Context, jti string) (bool, error)
 }
 
-// ---- Notifier (for OTP / reset / verify emails) ----
+// ---- Notifier (for reset / verify emails) ----
 
-// Notifier delivers OTP / password-reset / email-verification messages.
+// Notifier delivers password-reset / email-verification messages.
 // The default implementation logs to console; swap for an SMTP-backed one
-// in production.
+// in production. Implementations must honor the context (A2) so request
+// cancellation and deadlines propagate into delivery.
 type Notifier interface {
-	SendOTP(to, code, purpose string) error
-	SendPasswordReset(to, resetToken string) error
-	SendEmailVerification(to, verifyToken string) error
+	SendPasswordReset(ctx context.Context, to, resetToken string) error
+	SendEmailVerification(ctx context.Context, to, verifyToken string) error
 }
 
 // ---- CAPTCHA verifier (§2) ----

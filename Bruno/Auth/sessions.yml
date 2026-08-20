@@ -5,13 +5,13 @@ info:
 
 http:
   method: GET
-  url: http://localhost:8081/api/v1/auth/sessions
+  url: "{{baseUrl}}/api/v1/auth/sessions"
   body:
     type: json
     data: ""
   auth:
     type: bearer
-    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjIsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJ0ZXN0MUBleGFtcGxlLmNvbSIsInR5cGUiOiJhY2Nlc3MiLCJpc3MiOiJmaW5uYXBpZ28iLCJzdWIiOiIyIiwiZXhwIjoxNzg2Njk5MTM0LCJuYmYiOjE3ODY2OTgyMzQsImlhdCI6MTc4NjY5ODIzNH0.F8kUqrlDMqsDmF_o091Es_IWaNdEY0dbA_7ZXsRYMiU
+    token: "{{accessToken}}"
 
 settings:
   encodeUrl: true

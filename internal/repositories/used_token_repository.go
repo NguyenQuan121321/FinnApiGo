@@ -52,8 +52,8 @@ func (r *UsedTokenRepository) IsUsed(ctx context.Context, jti string) (bool, err
 
 // PurgeExpired removes used-token rows past their original JWT expiry — they
 // can no longer be replayed once the JWT itself is expired, so keeping them
-// forever is pointless.
+// forever is pointless. Deletes run in LIMIT-batched statements against the
+// expires_at index (P1).
 func (r *UsedTokenRepository) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
-	res := r.db.WithContext(ctx).Where("expires_at < ?", before).Delete(&models.UsedToken{})
-	return res.RowsAffected, res.Error
+	return batchedDelete(r.db.WithContext(ctx), &models.UsedToken{}, "expires_at < ?", before)
 }

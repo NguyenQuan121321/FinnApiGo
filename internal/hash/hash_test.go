@@ -61,20 +61,3 @@ func TestPasswordOverBcryptLimitIsRejected(t *testing.T) {
 		t.Fatal("overlong password must not authenticate via bcrypt truncation")
 	}
 }
-
-func TestGenerateNumericOTP(t *testing.T) {
-	for _, tc := range []struct {
-		length  int
-		wantErr bool
-	}{{6, false}, {0, true}, {-1, true}} {
-		t.Run("length", func(t *testing.T) {
-			otp, err := GenerateNumericOTP(tc.length)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err=%v wantErr=%v", err, tc.wantErr)
-			}
-			if !tc.wantErr && (len(otp) != tc.length || strings.Trim(otp, "0123456789") != "") {
-				t.Fatalf("invalid OTP %q", otp)
-			}
-		})
-	}
-}

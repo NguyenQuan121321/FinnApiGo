@@ -6,11 +6,17 @@ run:
 linters:
   default: none
   enable:
-    - govet
-    - staticcheck
-    - errcheck
-    - gosec
-    - depguard
+    - errcheck    # unchecked errors
+    - govet       # suspicious constructs
+    - staticcheck # bugs, performance, style — subsumes gosimple + stylecheck in v2
+    - ineffassign # useless assignments
+    - unused      # unused code
+    - gosec       # security scanner
+    - gocritic    # opinionated quality checks
+    - exhaustive  # enum switch completeness
+    - nilerr      # returning nil when err != nil
+    - errorlint   # proper error wrapping (errors.Is/As over == / type asserts)
+    - depguard    # import restrictions
   settings:
     depguard:
       rules:

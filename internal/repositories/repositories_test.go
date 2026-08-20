@@ -5,12 +5,20 @@ package repositories
 // deliberately covered with fakes in services tests, not forced through SQLite.
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/finnapigo/finnapigo/internal/models"
 )
@@ -21,7 +29,7 @@ func testDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.OtpCode{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -177,6 +185,34 @@ func TestRefreshTokenRepository_FindActiveByUser(t *testing.T) {
 	}
 }
 
+// TestRefreshTokenRepository_RevokeCAS_C1 — C1 regression: Revoke must be a
+// compare-and-set. Revoking an already-revoked row must report
+// ErrTokenAlreadyRevoked instead of silently succeeding, so a concurrent
+// double-refresh of one token can be detected as reuse.
+func TestRefreshTokenRepository_RevokeCAS_C1(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	repo := NewRefreshTokenRepository(db)
+	rt := &models.RefreshToken{UserID: u.ID, TokenHash: "cas", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := repo.Create(ctx, rt); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Revoke(ctx, rt); err != nil {
+		t.Fatalf("first Revoke err=%v", err)
+	}
+	if err := repo.Revoke(ctx, rt); !errors.Is(err, ErrTokenAlreadyRevoked) {
+		t.Fatalf("second Revoke must return ErrTokenAlreadyRevoked, got %v", err)
+	}
+	got, err := repo.FindByHash(ctx, "cas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Revoked {
+		t.Error("row must remain revoked after rejected second Revoke")
+	}
+}
+
 func TestRefreshTokenRepository_RevokeByID(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
@@ -227,31 +263,11 @@ func TestRefreshTokenRepository_TouchLastActive(t *testing.T) {
 	}
 }
 
-func TestOtpAndUsedTokenRepositories(t *testing.T) {
+func TestUsedTokenRepository(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
 	u := testUser(t, db)
-	otpRepo := NewOtpRepository(db)
 	usedRepo := NewUsedTokenRepository(db)
-	active := &models.OtpCode{UserID: u.ID, CodeHash: "a", Purpose: models.OTPPurposeLogin, ExpiresAt: time.Now().Add(time.Hour)}
-	if err := otpRepo.Create(ctx, active); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := otpRepo.FindLatestActive(ctx, u.ID, models.OTPPurposeLogin); err != nil || got == nil {
-		t.Fatalf("active=%+v err=%v", got, err)
-	}
-	if n, err := otpRepo.IncrementAttempts(ctx, active); err != nil || n != 1 {
-		t.Fatalf("attempts=%d err=%v", n, err)
-	}
-	if err := otpRepo.MarkUsed(ctx, active); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := otpRepo.FindLatestActive(ctx, u.ID, models.OTPPurposeLogin); err != nil || got != nil {
-		t.Fatalf("used=%+v err=%v", got, err)
-	}
-	if n, err := otpRepo.PurgeExpired(ctx, time.Now()); err != nil || n != 1 {
-		t.Fatalf("purge=%d err=%v", n, err)
-	}
 	if marked, err := usedRepo.MarkUsed(ctx, "jti", "verify", u.ID, time.Now().Add(time.Hour)); err != nil || !marked {
 		t.Fatalf("marked=%t err=%v", marked, err)
 	}
@@ -268,11 +284,200 @@ func TestAuditRepository(t *testing.T) {
 	db := testDB(t)
 	repo := NewAuditRepository(db)
 	repo.Record(ctx, &models.AuditLog{Event: models.AuditEventLogin, Success: true})
-	if n := repo.BatchInsert(ctx, []*models.AuditLog{{Event: models.AuditEventLogout}, {Event: models.AuditEventOTPSent}}); n != 2 {
+	if n := repo.BatchInsert(ctx, []*models.AuditLog{{Event: models.AuditEventLogout}, {Event: models.AuditEventTOTPEnabled}}); n != 2 {
 		t.Fatalf("BatchInsert=%d", n)
 	}
 	var count int64
 	if err := db.Model(&models.AuditLog{}).Count(&count).Error; err != nil || count != 3 {
 		t.Fatalf("count=%d err=%v", count, err)
+	}
+}
+
+// TestTOTPRepository_MarkRecoveryCodeUsedCAS_C2 — C2 regression: marking a
+// recovery code used must be a compare-and-set on used_at IS NULL so the
+// second of two concurrent submissions is rejected instead of silently
+// succeeding twice.
+func TestTOTPRepository_MarkRecoveryCodeUsedCAS_C2(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	if err := db.AutoMigrate(&models.TOTPDevice{}, &models.RecoveryCode{}); err != nil {
+		t.Fatal(err)
+	}
+	repo := NewTOTPRepository(db)
+	if err := repo.Upsert(ctx, &models.TOTPDevice{UserID: u.ID, Secret: "S", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	code := &models.RecoveryCode{UserID: u.ID, CodeHash: "h1"}
+	if err := db.Create(code).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.MarkRecoveryCodeUsed(ctx, code); err != nil {
+		t.Fatalf("first MarkRecoveryCodeUsed err=%v", err)
+	}
+	if err := repo.MarkRecoveryCodeUsed(ctx, code); !errors.Is(err, ErrRecoveryCodeUsed) {
+		t.Fatalf("second MarkRecoveryCodeUsed must return ErrRecoveryCodeUsed, got %v", err)
+	}
+	var row models.RecoveryCode
+	if err := db.First(&row, code.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if row.UsedAt == nil {
+		t.Error("row must remain used after rejected second mark")
+	}
+}
+
+// TestUserRepository_IncrementFailedAttempts_Atomic_C3 — C3 regression: the
+// increment must happen in SQL (read-modify-write from a stale struct loses
+// concurrent failures, letting an attacker evade the lockout threshold). Two
+// racers starting from the SAME snapshot must both land in the DB.
+func TestUserRepository_IncrementFailedAttempts_Atomic_C3(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	repo := NewUserRepository(db)
+
+	// Both racers hold a snapshot taken before either wrote (the exact state
+	// two parallel failed logins produce).
+	stale1, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale2, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.IncrementFailedAttempts(ctx, stale1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.IncrementFailedAttempts(ctx, stale2, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := repo.FindByID(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.FailedLoginAttempts != 2 {
+		t.Fatalf("parallel failures must both persist: attempts=%d, want 2", got.FailedLoginAttempts)
+	}
+}
+
+// TestPurgeExpired_Behavior_P1 — P1: the split, batched purge removes
+// exactly the expired + revoked rows and leaves active sessions alone.
+func TestPurgeExpired_Behavior_P1(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	u := testUser(t, db)
+	past := time.Now().Add(-time.Hour)
+	future := time.Now().Add(time.Hour)
+	rows := []*models.RefreshToken{}
+	for i := 0; i < 5; i++ {
+		rows = append(rows, &models.RefreshToken{UserID: u.ID, TokenHash: fmt.Sprintf("exp-%d", i), ExpiresAt: past})
+	}
+	for i := 0; i < 3; i++ {
+		rows = append(rows, &models.RefreshToken{UserID: u.ID, TokenHash: fmt.Sprintf("rev-%d", i), ExpiresAt: future, Revoked: true})
+	}
+	for i := 0; i < 2; i++ {
+		rows = append(rows, &models.RefreshToken{UserID: u.ID, TokenHash: fmt.Sprintf("live-%d", i), ExpiresAt: future})
+	}
+	for _, r := range rows {
+		if err := db.Create(r).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prev := purgeBatchSize
+	purgeBatchSize = 2
+	defer func() { purgeBatchSize = prev }()
+
+	repo := NewRefreshTokenRepository(db)
+	n, err := repo.PurgeExpired(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 8 {
+		t.Fatalf("purged %d rows, want 8 (5 expired + 3 revoked)", n)
+	}
+	var remaining int64
+	db.Model(&models.RefreshToken{}).Count(&remaining)
+	if remaining != 2 {
+		t.Fatalf("remaining rows = %d, want 2 (active sessions survive)", remaining)
+	}
+}
+
+// TestPurgeExpired_BatchedSQLShape_P1 — P1: against the PRODUCTION dialect
+// (MySQL, DryRun so nothing executes), each purge statement must be a
+// single-predicate DELETE capped with LIMIT — the OR-combined full-scan
+// delete is gone. (GORM's SQLite test dialect silently drops DELETE..LIMIT,
+// which is why shape is asserted here under the MySQL dialect.)
+func TestPurgeExpired_BatchedSQLShape_P1(t *testing.T) {
+	rawDB, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rawDB.Close() }()
+	var buf bytes.Buffer
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: rawDB, SkipInitializeWithVersion: true}), &gorm.Config{
+		DryRun: true,
+		Logger: gormlogger.New(log.New(&buf, "\n", 0), gormlogger.Config{LogLevel: gormlogger.Info}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := NewRefreshTokenRepository(db)
+	if _, err := repo.PurgeExpired(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	sqlLog := buf.String()
+	deletes := strings.Count(sqlLog, "DELETE")
+	if deletes != 2 {
+		t.Fatalf("expected one DELETE per predicate stream (2), got %d:\n%s", deletes, sqlLog)
+	}
+	if !strings.Contains(sqlLog, "LIMIT") {
+		t.Fatalf("purge DELETEs must carry LIMIT under the MySQL dialect:\n%s", sqlLog)
+	}
+	if strings.Contains(sqlLog, " OR ") {
+		t.Fatalf("purge must not use an OR predicate (defeats the indexes):\n%s", sqlLog)
+	}
+}
+
+// TestAuditRepository_PurgeOlderThan_R4 — R4: the retention purge removes
+// only rows older than the cutoff (batched, P1 discipline) and leaves recent
+// audit history intact.
+func TestAuditRepository_PurgeOlderThan_R4(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	repo := NewAuditRepository(db)
+
+	old := time.Now().Add(-91 * 24 * time.Hour)
+	for i := 0; i < 3; i++ {
+		if err := db.Create(&models.AuditLog{Event: "old_login", CreatedAt: old}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := db.Create(&models.AuditLog{Event: "fresh_login", CreatedAt: time.Now()}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	prev := purgeBatchSize
+	purgeBatchSize = 2
+	defer func() { purgeBatchSize = prev }()
+
+	n, err := repo.PurgeOlderThan(ctx, time.Now().Add(-90*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Fatalf("purged %d rows, want 3", n)
+	}
+	var remaining int64
+	db.Model(&models.AuditLog{}).Count(&remaining)
+	if remaining != 2 {
+		t.Fatalf("remaining = %d, want 2 (recent rows survive)", remaining)
 	}
 }

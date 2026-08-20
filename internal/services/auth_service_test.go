@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,24 +15,29 @@ import (
 	"github.com/finnapigo/finnapigo/internal/models"
 )
 
-// newTestAuthService builds an AuthService wired to in-memory mocks. OTP/lockout
+// newTestAuthService builds an AuthService wired to in-memory mocks. Lockout
 // knobs are tuned short for test speed.
 func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier) {
-	users := newMockUserRepo()
 	tokens := newMockTokenRepo()
+	svc, users, audit, notify, _ := newTestAuthServiceWithTokens(tokens)
+	return svc, users, tokens, audit, notify
+}
+
+// newTestAuthServiceWithTokens is newTestAuthService with a caller-supplied
+// RefreshTokenRepo, for concurrency tests that must control the read→revoke
+// race window deterministically. It also returns the mock store so tests can
+// flush it (single-use durability, C8).
+func newTestAuthServiceWithTokens(tokens RefreshTokenRepo) (*AuthService, *mockUserRepo, *mockAuditRepo, *mockNotifier, *mockStore) {
+	users := newMockUserRepo()
 	usedTokens := newMockUsedTokenRepo()
-	store := newMockStore()
+	kv := newMockStore()
 	audit := &mockAuditRepo{}
 	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
 	notify := &mockNotifier{}
 	cfg := config.AuthConfig{
 		MaxLoginAttempts:     5,
 		LoginLockoutDuration: 15 * time.Minute,
-		OTPTTL:               5 * time.Minute,
-		OTPLength:            6,
-		OTPMaxAttempts:       5,
 	}
-
 	rateLimitCfg := config.RateLimitConfig{
 		RPS:                      100,
 		Burst:                    20,
@@ -38,8 +45,6 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 		LoginWindow:              time.Minute, // tests are unaffected by velocity
 		RegisterPerIPMax:         10000,       // limiters; tight-limit tests build a
 		RegisterWindow:           time.Hour,   // dedicated service.
-		OTPSendPerUserMax:        10000,
-		OTPSendWindow:            time.Minute,
 		VerifyResendPerEmailMax:  10000,
 		VerifyResendWindow:       time.Minute,
 		VerifyResendGlobalMax:    10000,
@@ -52,9 +57,8 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
-
-	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil)
-	return svc, users, tokens, audit, notify
+	svc := NewAuthService(users, tokens, usedTokens, audit, kv, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil)
+	return svc, users, audit, notify, kv
 }
 
 // ----- Register -----
@@ -77,6 +81,7 @@ func TestRegister_Success(t *testing.T) {
 	u, _ := users.FindByEmail(context.Background(), "alice@example.com")
 	if u == nil {
 		t.Fatal("user not persisted")
+		return
 	}
 	if u.Password == "Password1" {
 		t.Error("password must be hashed, not stored in plaintext")
@@ -302,6 +307,85 @@ func TestRefresh_ReuseDetection_RevokesAll(t *testing.T) {
 	}
 }
 
+// barrierTokenRepo holds every concurrent FindByHash call for one target hash
+// until all racers have READ their clone, then releases them together — each
+// racer is thereby guaranteed a pre-revoke copy of the token row. It
+// reproduces the read→revoke TOCTOU window deterministically instead of
+// relying on scheduler luck.
+type barrierTokenRepo struct {
+	*mockTokenRepo
+	target   string
+	racers   int32
+	arrived  int32
+	released chan struct{}
+}
+
+func (b *barrierTokenRepo) FindByHash(ctx context.Context, hash string) (*models.RefreshToken, error) {
+	rt, err := b.mockTokenRepo.FindByHash(ctx, hash)
+	if hash == b.target && atomic.AddInt32(&b.arrived, 1) <= b.racers {
+		if atomic.LoadInt32(&b.arrived) == b.racers {
+			close(b.released)
+		}
+		<-b.released
+	}
+	return rt, err
+}
+
+// TestRefresh_ConcurrentDoubleRefresh_ExactlyOneSuccess_C1 — C1 regression:
+// concurrent refreshes presenting the SAME token must yield exactly one
+// success; every loser must be rejected as reuse (which also triggers
+// revoke-all). The barrier guarantees every racer reads the token as
+// un-revoked, which before the CAS fix made ALL of them rotate successfully.
+func TestRefresh_ConcurrentDoubleRefresh_ExactlyOneSuccess_C1(t *testing.T) {
+	inner := newMockTokenRepo()
+	tokens := &barrierTokenRepo{mockTokenRepo: inner, racers: 8, released: make(chan struct{})}
+	svc, _, audit, _, _ := newTestAuthServiceWithTokens(tokens)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pair, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "alice@example.com", Password: "Password1",
+	}, "ip", "test-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Login itself called FindByHash? No — but Refresh does; arm the barrier to
+	// the token issued by Login now that its hash is computable.
+	tokens.target = hash.HashToken(pair.RefreshToken)
+
+	const racers = 8
+	var wg sync.WaitGroup
+	var successes atomic.Int32
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, err := svc.Refresh(context.Background(), pair.RefreshToken, "ip", "test-agent"); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("exactly one concurrent refresh must succeed, got %d/%d", got, racers)
+	}
+	// The losers' reuse handling must be observable: token_reuse audits and a
+	// fully revoked session set (the winner's fresh token is dead too).
+	if events := audit.byEvent("token_reuse"); len(events) == 0 {
+		t.Error("expected token_reuse audit events from the losing racers")
+	}
+	_, err = svc.Refresh(context.Background(), pair.RefreshToken, "ip", "test-agent")
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("expected ErrInvalidToken after revoke-all, got %v", err)
+	}
+}
+
 // ----- Forgot / reset password -----
 
 func TestForgotPassword_UnknownEmailReturnsNil(t *testing.T) {
@@ -516,7 +600,7 @@ func TestResendVerifyEmail_RateLimited(t *testing.T) {
 		VerifyResendWindow:      time.Minute,
 	}
 	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr,
-		config.AuthConfig{OTPLength: 6}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil)
+		config.AuthConfig{}, rlCfg, config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil)
 
 	if _, err := svc.Register(context.Background(), RegisterInput{
 		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
@@ -563,7 +647,7 @@ func newResendTestService(rlCfg config.RateLimitConfig, users *mockUserRepo, aud
 	return NewAuthService(
 		users, newMockTokenRepo(), newMockUsedTokenRepo(), audit, newMockStore(),
 		jwt.NewJWTManager("test-secret", "test-issuer"),
-		config.AuthConfig{OTPLength: 6}, rlCfg,
+		config.AuthConfig{}, rlCfg,
 		config.JWTConfig{VerifyTTL: time.Hour}, notify, nil, nil, nil, nil,
 	)
 }
@@ -888,6 +972,7 @@ func TestRefresh_MetadataPopulated(t *testing.T) {
 	tokens.mu.Unlock()
 	if loginRT == nil {
 		t.Fatal("no active session found after login")
+		return
 	}
 	if loginRT.IPAddress != "10.0.0.1" {
 		t.Errorf("ip = %q, want %q", loginRT.IPAddress, "10.0.0.1")
@@ -916,6 +1001,7 @@ func TestRefresh_MetadataPopulated(t *testing.T) {
 	tokens.mu.Unlock()
 	if refreshRT == nil {
 		t.Fatal("no active session found after refresh")
+		return
 	}
 	if refreshRT.IPAddress != "20.0.0.2" {
 		t.Errorf("refreshed session ip = %q, want %q", refreshRT.IPAddress, "20.0.0.2")
@@ -1040,6 +1126,7 @@ func TestLogin_TOTPActive_ReturnsMFAPending(t *testing.T) {
 	}
 	if mfaPending == nil {
 		t.Fatal("mfaPending should not be nil for TOTP-active user")
+		return
 	}
 	if !mfaPending.MFARequired {
 		t.Error("MFARequired should be true")
@@ -1113,6 +1200,7 @@ func TestCompleteMFALogin_CorrectCode(t *testing.T) {
 	tokens.mu.Unlock()
 	if rt == nil {
 		t.Fatal("no refresh token record created")
+		return
 	}
 	if rt.IPAddress != "1.2.3.4" {
 		t.Errorf("rt IP = %q, want %q", rt.IPAddress, "1.2.3.4")
@@ -1138,13 +1226,13 @@ func TestCompleteMFALogin_WrongCode(t *testing.T) {
 	// ... rest of test
 
 	// Set up mock to reject the code.
-	totpVal.err = ErrInvalidOTP
+	totpVal.err = ErrInvalidCode
 
 	_, _, err := svc.CompleteMFALogin(context.Background(), CompleteMFALoginInput{
 		UserID: 1, Code: "000000", IP: "1.2.3.4", UA: "agent",
 	})
-	if !errors.Is(err, ErrInvalidOTP) {
-		t.Errorf("expected ErrInvalidOTP, got %v", err)
+	if !errors.Is(err, ErrInvalidCode) {
+		t.Errorf("expected ErrInvalidCode, got %v", err)
 	}
 }
 
@@ -1154,3 +1242,354 @@ type mockGeoResolver struct {
 }
 
 func (m mockGeoResolver) Resolve(_ context.Context, _ string) string { return m.loc }
+
+// TestResetPassword_SingleUse_SurvivesStoreFlush_C8 — C8 regression: the
+// volatile store alone must not decide single-use. After a successful reset,
+// flushing the store (Redis restart / eviction) must NOT revive the token —
+// the durable used_tokens row rejects the replay.
+func TestResetPassword_SingleUse_SurvivesStoreFlush_C8(t *testing.T) {
+	svc, users, _, notify, kv := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "Alice",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ForgotPassword(context.Background(), "alice@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	in := ResetPasswordInput{Token: notify.lastReset, NewPassword: "NewPassword1"}
+	if err := svc.ResetPassword(context.Background(), in, "ip"); err != nil {
+		t.Fatalf("first reset failed: %v", err)
+	}
+
+	// Simulate a store flush — every jti marker gone.
+	kv.mu.Lock()
+	kv.data = map[string]any{}
+	kv.mu.Unlock()
+
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "AttackerPassword1",
+	}, "evil-ip"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("replay after store flush must be rejected, got %v", err)
+	}
+	u, _ := users.FindByEmail(context.Background(), "alice@example.com")
+	if !hash.CheckPassword(u.Password, "NewPassword1") {
+		t.Error("victim's password must be unchanged by the rejected replay")
+	}
+}
+
+// TestVerifyEmail_SingleUse_SurvivesStoreFlush_C8 — same durability property
+// for the verify-email token.
+func TestVerifyEmail_SingleUse_SurvivesStoreFlush_C8(t *testing.T) {
+	svc, _, _, notify, kv := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "bob", Email: "bob@example.com", Password: "Password1", FullName: "Bob",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: notify.lastVerify}); err != nil {
+		t.Fatalf("first verify failed: %v", err)
+	}
+
+	kv.mu.Lock()
+	kv.data = map[string]any{}
+	kv.mu.Unlock()
+
+	if err := svc.VerifyEmail(context.Background(), EmailVerifyInput{Token: notify.lastVerify}); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("verify-email replay after store flush must be rejected, got %v", err)
+	}
+}
+
+// TestLogin_SuccessClearsPerAccountCounter_C9 — C9 regression: a successful
+// login must reset the per-account velocity counter so earlier typos don't
+// linger toward the cap (pre-fix the counter counted EVERY attempt and never
+// reset — fail/fail/success left the account one typo away from 429).
+func TestLogin_SuccessClearsPerAccountCounter_C9(t *testing.T) {
+	cfg := config.AuthConfig{MaxLoginAttempts: 50, LoginLockoutDuration: time.Minute}
+	rlCfg := config.RateLimitConfig{LoginPerAccountMax: 3, LoginWindow: time.Hour}
+	svc, _, _, _, _, _ := buildAuthService(t, cfg, rlCfg, nil)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "carol", Email: "carol@example.com", Password: "Password1", FullName: "C",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two failures below the cap...
+	for i := 0; i < 2; i++ {
+		_, _, _, err := svc.Login(context.Background(), LoginInput{
+			Email: "carol@example.com", Password: "WrongPass1",
+		}, "ip", "ua")
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("failed login %d: %v", i, err)
+		}
+	}
+	// ...then the correct password: the success must CLEAR the counter.
+	if _, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "carol@example.com", Password: "Password1",
+	}, "ip", "ua"); err != nil {
+		t.Fatalf("correct login after typos must succeed, got %v", err)
+	}
+
+	// The window restarted: three more wrong attempts are ordinary credential
+	// failures (pre-fix the lingering counter 429'd the first of them)...
+	for i := 0; i < 3; i++ {
+		_, _, _, err := svc.Login(context.Background(), LoginInput{
+			Email: "carol@example.com", Password: "WrongPass1",
+		}, "ip", "ua")
+		if !errors.Is(err, ErrInvalidCredentials) {
+			t.Fatalf("post-reset wrong login %d must be ErrInvalidCredentials, got %v", i, err)
+		}
+	}
+	// ...and only the attempt after the fresh batch trips the cap.
+	_, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "carol@example.com", Password: "WrongPass1",
+	}, "ip", "ua")
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("attempt after cap must be ErrRateLimited, got %v", err)
+	}
+}
+
+// TestResetPassword_ClearsLockoutState_C10 — C10 regression: resetting the
+// password must clear the attacker-sustained lockout, else the victim resets
+// and STILL cannot log in.
+func TestResetPassword_ClearsLockoutState_C10(t *testing.T) {
+	svc, users, _, notify, _ := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "dave", Email: "dave@example.com", Password: "Password1", FullName: "D",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Attacker-sustained lockout: attempts racked up, account locked for an hour.
+	u, _ := users.FindByEmail(context.Background(), "dave@example.com")
+	lock := time.Now().Add(time.Hour)
+	for i := 0; i < 5; i++ {
+		if err := users.IncrementFailedAttempts(context.Background(), u, &lock); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := svc.ForgotPassword(context.Background(), "dave@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "FreshPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := users.FindByEmail(context.Background(), "dave@example.com")
+	if got.FailedLoginAttempts != 0 || got.LockedUntil != nil {
+		t.Fatalf("lockout must be cleared by reset: attempts=%d locked_until=%v",
+			got.FailedLoginAttempts, got.LockedUntil)
+	}
+	// The victim can log in immediately with the new password.
+	if _, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "dave@example.com", Password: "FreshPassword1",
+	}, "ip", "ua"); err != nil {
+		t.Fatalf("login after reset must not be locked, got %v", err)
+	}
+}
+
+// TestChangePassword_ClearsLockoutState_C10 — same invariant for the
+// authenticated change-password flow.
+func TestChangePassword_ClearsLockoutState_C10(t *testing.T) {
+	svc, users, _, _, _ := newTestAuthServiceWithTokens(newMockTokenRepo())
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "erin", Email: "erin@example.com", Password: "Password1", FullName: "E",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := users.FindByEmail(context.Background(), "erin@example.com")
+	lock := time.Now().Add(time.Hour)
+	for i := 0; i < 5; i++ {
+		if err := users.IncrementFailedAttempts(context.Background(), u, &lock); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := svc.ChangePassword(context.Background(), ChangePasswordInput{
+		UserID: u.ID, OldPassword: "Password1", NewPassword: "FreshPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _ := users.FindByID(context.Background(), u.ID)
+	if got.FailedLoginAttempts != 0 || got.LockedUntil != nil {
+		t.Fatalf("lockout must be cleared by change: attempts=%d locked_until=%v",
+			got.FailedLoginAttempts, got.LockedUntil)
+	}
+}
+
+// TestRegister_NotifierFailureStillSucceeds_C11 — C11 regression: the user
+// row is already committed when the verification email send fails; returning
+// 500 made the client retry into ErrEmailExists. A delivery failure is now
+// a successful registration + error log + audit (the resend endpoint exists).
+func TestRegister_NotifierFailureStillSucceeds_C11(t *testing.T) {
+	svc, users, _, audit, notify := newTestAuthService()
+	notify.mu.Lock()
+	notify.verifySendErr = errors.New("smtp down")
+	notify.mu.Unlock()
+
+	profile, err := svc.Register(context.Background(), RegisterInput{
+		Username: "frank", Email: "frank@example.com", Password: "Password1", FullName: "F",
+	})
+	if err != nil {
+		t.Fatalf("register must succeed despite notifier failure, got %v", err)
+	}
+	if profile.Username != "frank" {
+		t.Errorf("profile = %+v", profile)
+	}
+	if u, _ := users.FindByEmail(context.Background(), "frank@example.com"); u == nil {
+		t.Fatal("user row must exist")
+	}
+	if events := audit.byEvent("verify_email_send_failed"); len(events) != 1 {
+		t.Fatalf("expected one verify_email_send_failed audit event, got %d", len(events))
+	}
+}
+
+// failingStore models a store whose backend is down, per the A1 contract:
+// counters fail open (IncrBy → 0, Get → absent) while single-use guards fail
+// closed (SetNX → false).
+type failingStore struct{}
+
+func (failingStore) Get(string) (any, bool)                    { return nil, false }
+func (failingStore) Set(string, any, time.Duration)            {}
+func (failingStore) SetNX(string, any, time.Duration) bool     { return false }
+func (failingStore) IncrBy(string, int64, time.Duration) int64 { return 0 }
+func (failingStore) Delete(string)                             {}
+
+// TestResetPassword_StoreOutage_SingleUseStillFailClosed_A1 — A1 counterpart:
+// even with the store failing, a single-use reset token must never be
+// consumable (SetNX fails closed → ErrInvalidToken).
+func TestResetPassword_StoreOutage_SingleUseStillFailClosed_A1(t *testing.T) {
+	users := newMockUserRepo()
+	tokens := newMockTokenRepo()
+	usedTokens := newMockUsedTokenRepo()
+	audit := &mockAuditRepo{}
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	notify := &mockNotifier{}
+	cfg := config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute}
+	rlCfg := config.RateLimitConfig{LoginPerAccountMax: 10000, LoginWindow: time.Minute}
+	jwtCfg := config.JWTConfig{AccessTTL: time.Minute, RefreshTTL: time.Hour, ResetTTL: time.Minute, VerifyTTL: time.Hour}
+	svc := NewAuthService(users, tokens, usedTokens, audit, failingStore{}, jwtMgr, cfg, rlCfg, jwtCfg, notify, nil, nil, nil, nil)
+
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "gina", Email: "gina@example.com", Password: "Password1", FullName: "G",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ForgotPassword(context.Background(), "gina@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "NewPassword1",
+	}, "ip"); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("single-use guard must fail CLOSED during a store outage, got %v", err)
+	}
+}
+
+// TestConsoleNotifier_RefusesInReleaseMode_A8 — A8 regression: in
+// GIN_MODE=release the console notifier must refuse to log live reset /
+// verification tokens unless the operator explicitly sets
+// ALLOW_TOKEN_CONSOLE=true.
+func TestConsoleNotifier_RefusesInReleaseMode_A8(t *testing.T) {
+	t.Setenv("GIN_MODE", "release")
+	t.Setenv("ALLOW_TOKEN_CONSOLE", "")
+
+	n := NewConsoleNotifier("no-reply@example.com")
+	if err := n.SendPasswordReset(context.Background(), "a@b.com", "live-reset-token"); err == nil {
+		t.Error("reset delivery must fail in release mode")
+	}
+	if err := n.SendEmailVerification(context.Background(), "a@b.com", "live-verify-token"); err == nil {
+		t.Error("verification delivery must fail in release mode")
+	}
+
+	// Explicit operator opt-in re-enables delivery.
+	t.Setenv("ALLOW_TOKEN_CONSOLE", "true")
+	n = NewConsoleNotifier("no-reply@example.com")
+	if err := n.SendPasswordReset(context.Background(), "a@b.com", "tok"); err != nil {
+		t.Fatalf("explicit opt-in must allow delivery: %v", err)
+	}
+
+	// Debug mode is unaffected.
+	t.Setenv("GIN_MODE", "debug")
+	t.Setenv("ALLOW_TOKEN_CONSOLE", "")
+	n = NewConsoleNotifier("no-reply@example.com")
+	if err := n.SendEmailVerification(context.Background(), "a@b.com", "tok"); err != nil {
+		t.Fatalf("debug mode must allow delivery: %v", err)
+	}
+}
+
+// TestCredentialChange_RevokesAccessTokensViaPwdVer_A7 — A7: password
+// change bumps users.pwd_version; access tokens minted afterwards carry the
+// new version while pre-change tokens keep the old one (and are therefore
+// rejected by AuthMiddleware, covered in the middleware tests).
+func TestCredentialChange_RevokesAccessTokensViaPwdVer_A7(t *testing.T) {
+	svc, users, _, _, notify, _ := buildAuthService(t,
+		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute},
+		config.RateLimitConfig{}, nil)
+	if _, err := svc.Register(context.Background(), RegisterInput{
+		Username: "heidi", Email: "heidi@example.com", Password: "Password1", FullName: "H",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := users.FindByEmail(context.Background(), "heidi@example.com")
+	mgr := jwt.NewJWTManager("test-secret", "test-issuer")
+
+	// Pre-change token carries pwdver=0; the live version starts at 0.
+	pair, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "heidi@example.com", Password: "Password1",
+	}, "ip", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := mgr.Verify(pair.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.PwdVer != 0 {
+		t.Fatalf("pre-change token pwdver = %d, want 0", claims.PwdVer)
+	}
+
+	// Change the password: the version bumps to 1.
+	if err := svc.ChangePassword(context.Background(), ChangePasswordInput{
+		UserID: u.ID, OldPassword: "Password1", NewPassword: "NewPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+	live, err := svc.CurrentPwdVersion(context.Background(), u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live != 1 {
+		t.Fatalf("pwd_version after change = %d, want 1", live)
+	}
+
+	// A fresh login carries the new version.
+	pair2, _, _, err := svc.Login(context.Background(), LoginInput{
+		Email: "heidi@example.com", Password: "NewPassword1",
+	}, "ip", "ua")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims2, err := mgr.Verify(pair2.AccessToken); err != nil || claims2.PwdVer != 1 {
+		t.Fatalf("post-change token pwdver = %d err=%v, want 1", claims2.PwdVer, err)
+	}
+
+	// Password reset bumps again.
+	if err := svc.ForgotPassword(context.Background(), "heidi@example.com", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ResetPassword(context.Background(), ResetPasswordInput{
+		Token: notify.lastReset, NewPassword: "ResetPassword1",
+	}, "ip"); err != nil {
+		t.Fatal(err)
+	}
+	live, err = svc.CurrentPwdVersion(context.Background(), u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live != 2 {
+		t.Fatalf("pwd_version after reset = %d, want 2", live)
+	}
+}

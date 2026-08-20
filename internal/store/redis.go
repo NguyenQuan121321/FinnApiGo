@@ -2,11 +2,35 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+// StoreErrors counts backend failures (Redis unreachable, timeouts, ...) across
+// every store operation. It is the availability metric backing the split
+// failure semantics (A1): rate COUNTERS fail OPEN (a Redis outage must not
+// become an auth outage) while single-use guards fail CLOSED. Exposed to
+// Prometheus in the metrics phase; readable by tests and /healthz handlers.
+var StoreErrors atomic.Int64
+
+// incrWithExpireScript atomically increments a counter and anchors its TTL at
+// the FIRST increment of a window: PEXPIRE fires only when the increment just
+// created the key (n == delta). Later increments — including requests the
+// limiter denies — never extend the window, so a counter always resets even
+// under sustained traffic (C4); before, every call refreshed the TTL and a
+// hammering client stayed 429-locked indefinitely.
+var incrWithExpireScript = redis.NewScript(`
+    local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+    if tonumber(ARGV[2]) > 0 and n == tonumber(ARGV[1]) then
+        redis.call('PEXPIRE', KEYS[1], ARGV[2])
+    end
+    return n
+`)
 
 // RedisStore is the multi-instance Store backend (§1.3 better-fix, §7).
 //
@@ -21,8 +45,9 @@ import (
 //   - Get: missing/expired key → (nil,false).
 //   - Set: ttl<=0 means no expiry.
 //   - SetNX: writes only if absent; atomic via SET NX PX.
-//   - IncrBy: missing treated as 0; ttl is refreshed on every call so the
-//     window is sliding (matches the in-memory behavior tests rely on).
+//   - IncrBy: missing treated as 0; the TTL anchors at the first increment
+//     of a window (fixed-window semantics) and is NOT refreshed by later
+//     increments (matches the in-memory behavior tests rely on).
 type RedisStore struct {
 	client redis.UniversalClient
 	ctx    context.Context // background ctx for fire-and-forget calls
@@ -48,52 +73,71 @@ func NewRedisStoreFromURL(url string) (*RedisStore, func() error, error) {
 
 // Get returns the string value at key, or false if missing. Numeric counters
 // written by IncrBy are returned as their string form; callers that use Get for
-// jti markers only care about presence, not the value.
+// jti markers only care about presence, not the value. On backend failure it
+// reports absent — readers treat "unknown" as the safe default for their
+// semantics (counters read as zero = fail open; presence checks consult their
+// durable backstop) and the error is counted in StoreErrors (A1).
 func (s *RedisStore) Get(key string) (any, bool) {
 	v, err := s.client.Get(s.ctx, key).Result()
 	if err != nil {
-		// redis.Nil covers both "missing" and "expired" — either way: absent.
+		if !errors.Is(err, redis.Nil) {
+			StoreErrors.Add(1)
+			slog.Error("store: redis get failed", "key", key, "err", err)
+		}
 		return nil, false
 	}
 	return v, true
 }
 
 // Set writes value with ttl (<=0 = no expiry). Values are stored as strings;
-// callers that need structured data should serialize first.
+// callers that need structured data should serialize first. Write failures
+// are counted in StoreErrors and logged — the Store contract has no error
+// return, so this is the only way an operator learns Redis is down.
 func (s *RedisStore) Set(key string, value any, ttl time.Duration) {
 	str := toRedisValue(value)
-	if ttl <= 0 {
-		_ = s.client.Set(s.ctx, key, str, 0).Err()
-		return
+	if err := s.client.Set(s.ctx, key, str, ttl).Err(); err != nil {
+		StoreErrors.Add(1)
+		slog.Error("store: redis set failed", "key", key, "err", err)
 	}
-	_ = s.client.Set(s.ctx, key, str, ttl).Err()
 }
 
 // SetNX writes only if the key is absent; returns whether it wrote. The NX flag
 // makes this atomic — the exact primitive single-use token (jti) enforcement
-// and fixed-window counters depend on.
+// and fixed-window counters depend on. Errors return false (fail CLOSED):
+// for a single-use guard, denying the write is always the safe outcome — a
+// store outage must not let a consumed token replay (A1).
 func (s *RedisStore) SetNX(key string, value any, ttl time.Duration) bool {
 	str := toRedisValue(value)
 	ok, err := s.client.SetNX(s.ctx, key, str, ttl).Result()
-	return err == nil && ok
+	if err != nil {
+		StoreErrors.Add(1)
+		slog.Error("store: redis setnx failed", "key", key, "err", err)
+		return false
+	}
+	return ok
 }
 
 // IncrBy atomically adds delta to the numeric value at key (missing = 0) and
-// returns the new value. The TTL is refreshed on every call so the window is
-// sliding, matching InMemoryStore's behavior.
+// returns the new value. The TTL is anchored at the first increment of a
+// window — later increments do not extend it, so the counter always resets
+// one TTL after the window started (fixed-window semantics, C4). INCRBY and
+// the conditional PEXPIRE run as one Lua script, so the counter never
+// survives without its window.
 //
-// INCRBY is itself atomic; we follow it with PEXPIRE to (re)start the window.
-// There is a tiny gap between the two (a crash between them leaves the counter
-// without a TTL), which is acceptable for rate-limiting — the next IncrBy will
-// re-apply the TTL. For true atomicity a Lua script would be used; kept simple
-// here to stay dependency-light and match the in-memory semantics closely.
+// On Redis failure it returns 0 — fail OPEN (A1). Every IncrBy use is a
+// throttle (rate limits, velocity caps); returning 0 means "no limit known",
+// callers let the request through, and the shared-path rate limiter
+// additionally falls back to its process-local token bucket. Redis being
+// down must not lock users out of authentication. This SUPERSEDES the
+// earlier always-return-MaxInt64 decision: counters fail open, single-use
+// guards (SetNX) stay fail closed.
 func (s *RedisStore) IncrBy(key string, delta int64, ttl time.Duration) int64 {
-	n, err := s.client.IncrBy(s.ctx, key, delta).Result()
+	n, err := incrWithExpireScript.Run(s.ctx, s.client, []string{key},
+		delta, ttl.Milliseconds()).Int64()
 	if err != nil {
-		return 0
-	}
-	if ttl > 0 {
-		_ = s.client.PExpire(s.ctx, key, ttl).Err()
+		StoreErrors.Add(1)
+		slog.Error("store: redis incrby failed", "key", key, "err", err)
+		return 0 // fail OPEN — throttle unknown, do not deny
 	}
 	return n
 }

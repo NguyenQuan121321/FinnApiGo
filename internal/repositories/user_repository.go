@@ -75,11 +75,14 @@ func (r *UserRepository) UpdatePassword(ctx context.Context, user *models.User, 
 }
 
 // IncrementFailedAttempts bumps the failed-login counter and (when lockUntil
-// is non-nil) sets the lockout timestamp.
+// is non-nil) sets the lockout timestamp. The counter bump runs as SQL
+// (failed_login_attempts + 1), never as a value computed from the in-memory
+// struct — parallel failures from stale snapshots must all persist or the
+// lockout threshold can be evaded (C3).
 func (r *UserRepository) IncrementFailedAttempts(ctx context.Context, user *models.User, lockUntil *time.Time) error {
 	user.FailedLoginAttempts++
 	updates := map[string]interface{}{
-		"failed_login_attempts": user.FailedLoginAttempts,
+		"failed_login_attempts": gorm.Expr("failed_login_attempts + 1"),
 	}
 	if lockUntil != nil {
 		user.LockedUntil = lockUntil
@@ -96,6 +99,15 @@ func (r *UserRepository) ResetFailedAttempts(ctx context.Context, user *models.U
 		"failed_login_attempts": 0,
 		"locked_until":          nil,
 	}).Error
+}
+
+// BumpPwdVersion increments the credential-version counter in SQL (atomic —
+// concurrent changes must both land). Access tokens carrying an older
+// version are rejected afterwards (A7).
+func (r *UserRepository) BumpPwdVersion(ctx context.Context, userID uint) error {
+	return r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ?", userID).
+		Update("pwd_version", gorm.Expr("pwd_version + 1")).Error
 }
 
 func (r *UserRepository) SetEmailVerified(ctx context.Context, user *models.User, verified bool) error {

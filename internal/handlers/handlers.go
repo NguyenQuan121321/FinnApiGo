@@ -23,15 +23,15 @@ func statusForError(err error) (int, string) {
 		return http.StatusUnauthorized, err.Error()
 	case errors.Is(err, services.ErrInvalidToken):
 		return http.StatusUnauthorized, err.Error()
-	case errors.Is(err, services.ErrInvalidOTP):
+	case errors.Is(err, services.ErrInvalidCode):
 		return http.StatusUnauthorized, err.Error()
-	case errors.Is(err, services.ErrOTPMaxAttempts):
-		return http.StatusTooManyRequests, err.Error()
 	case errors.Is(err, services.ErrAccountLocked):
 		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrAccountDisabled):
 		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrEmailNotVerified):
+		return http.StatusForbidden, err.Error()
+	case errors.Is(err, services.ErrSudoRequired):
 		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrUserNotFound), errors.Is(err, services.ErrSessionNotFound):
 		return http.StatusNotFound, err.Error()

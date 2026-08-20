@@ -98,3 +98,24 @@ func TestInMemoryStore_SweeperReapsExpired(t *testing.T) {
 		t.Error("sweeper should have reaped the expired key")
 	}
 }
+
+// TestInMemoryStore_IncrBy_FixedWindowNotExtended_C4 — C4 regression, mirror
+// of the Redis test: the TTL anchors at the first increment and later
+// increments must not extend the window.
+func TestInMemoryStore_IncrBy_FixedWindowNotExtended_C4(t *testing.T) {
+	clock := time.Now()
+	s := NewInMemoryStore(0, WithClock(func() time.Time { return clock }))
+	defer s.Close()
+
+	if n := s.IncrBy("c", 1, time.Minute); n != 1 {
+		t.Fatalf("IncrBy = %d, want 1", n)
+	}
+	clock = clock.Add(30 * time.Second)
+	if n := s.IncrBy("c", 1, time.Minute); n != 2 {
+		t.Fatalf("mid-window IncrBy = %d, want 2", n)
+	}
+	clock = clock.Add(31 * time.Second) // 61s after the first increment
+	if n := s.IncrBy("c", 1, time.Minute); n != 1 {
+		t.Errorf("counter must reset one window after the first increment, got %d", n)
+	}
+}

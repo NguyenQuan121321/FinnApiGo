@@ -1,24 +1,23 @@
 # FinnApiGo
 
-Authentication & MFA backend written in **Go**, built as a reusable module (`handler → service → repository`) meant to plug into larger applications. Implements core auth (register, login, refresh-token rotation, password reset, email verification) plus OTP and TOTP-based two-factor verification, with the security hardening a production system needs: rate limiting, lockout, single-use tokens, audit logging, session & device management, and an optional Redis backend for multi-instance deployments.
+Authentication & MFA backend written in **Go**, built as a reusable module (`handler → service → repository`) meant to plug into larger applications. Implements core auth (register, login, refresh-token rotation, password reset, email verification) plus TOTP-based two-factor verification, with the security hardening a production system needs: rate limiting, lockout, single-use tokens, audit logging, session & device management, and an optional Redis backend for multi-instance deployments.
 
-> **Naming note:** "MFA" here means OTP/TOTP-based two-step verification. It is unrelated to OAuth 2.0 — nothing in this codebase is an OAuth/third-party login flow.
+> **Naming note:** "MFA" here means TOTP-based two-step verification. It is unrelated to OAuth 2.0 — nothing in this codebase is an OAuth/third-party login flow.
 
 ---
 
 ## Features
 
 - **Core auth** — register, login, logout, logout-all, refresh-token (with rotation + reuse detection), forgot/reset password, change password, email verification, resend verification, profile (`/me`)
-- **MFA — OTP** — 6-digit OTP send/verify, single-use, capped verification attempts
 - **MFA — TOTP** — RFC 6238 time-based one-time passwords with QR provisioning, single-use recovery codes, brute-force protection, and concurrency-gated CPU-bound verification
 - **Session & device management** — list all active devices (IP, user-agent, device name, location estimate, last active), revoke individual sessions, IDOR-protected revocation, metadata populated on every login and refresh
 - **Security hardening**
   - Passwords hashed with bcrypt, never stored or logged in plaintext
   - Access tokens are short-lived JWTs; refresh tokens are opaque, stored as SHA-256 hashes, and **rotated** on every use — presenting an already-used refresh token revokes every session for that user (theft response)
   - Reset/verify-email tokens are single-use (tracked by JWT ID)
-  - Timing-safe comparisons for OTP/TOTP verification; login response time is equalized for unknown vs. wrong-password accounts to resist enumeration
+  - Timing-safe comparisons for TOTP verification; login response time is equalized for unknown vs. wrong-password accounts to resist enumeration
   - Account lockout after repeated failed logins, with optional exponential backoff for repeat offenders
-  - Per-IP **and** per-account rate limiting on login; per-IP registration velocity limiting; per-user OTP send limiting
+  - Per-IP **and** per-account rate limiting on login; per-IP registration velocity limiting
   - Verification-email resend protection with per-email, shared per-IP, and shared global circuit-breaker limits; blocked abuse is audited
   - Optional CAPTCHA (Cloudflare Turnstile) on registration and adaptively after repeated login failures
   - Disposable-email domain blocking and a honeypot field on registration
@@ -148,13 +147,12 @@ Everything is read from environment variables (`.env` supported). See `.env.exam
 | Group | Variables | Notes |
 |---|---|---|
 | Server | `SERVER_PORT`, `GIN_MODE`, `TRUSTED_PROXIES` | `TRUSTED_PROXIES` is a comma-separated CIDR list; empty = trust no one |
-| Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS` | |
+| Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS`, `DB_TLS` | `DB_TLS` appends `&tls=...` to the DSN (`true`/`skip-verify`/`preferred`); empty = plaintext (local dev) |
 | JWT | `JWT_SECRET` (required, no default), `JWT_ISSUER`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `RESET_TOKEN_TTL`, `EMAIL_VERIFY_TOKEN_TTL` | |
 | Account security | `MAX_LOGIN_ATTEMPTS`, `LOGIN_LOCKOUT_DURATION`, `MAX_LOCKOUT_MULTIPLIER`, `REQUIRE_EMAIL_VERIFIED` | `MAX_LOCKOUT_MULTIPLIER` scales lockout duration for repeat offenders |
-| MFA / OTP | `OTP_TTL`, `OTP_LENGTH`, `OTP_MAX_ATTEMPTS`, `OTP_SEND_PER_USER_MAX`, `OTP_SEND_WINDOW` | |
 | MFA / TOTP | `TOTP_MAX_ATTEMPTS`, `TOTP_ATTEMPT_WINDOW`, `TOTP_MAX_CONCURRENT` | Brute-force lockout + concurrency gate on CPU-bound verification |
 | Rate limiting | `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `LOGIN_PER_ACCOUNT_MAX`, `LOGIN_WINDOW`, `REGISTER_PER_IP_MAX`, `REGISTER_WINDOW`, `VERIFY_RESEND_PER_EMAIL_MAX`, `VERIFY_RESEND_PER_IP_MAX`, `VERIFY_RESEND_GLOBAL_MAX`, `LOGIN_CAPTCHA_AFTER_FAILS` | Resend limits are shared when `REDIS_URL` is configured. |
-| Email | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Empty `SMTP_HOST` -> tokens/OTPs are logged to console instead of emailed |
+| Email | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Empty `SMTP_HOST` -> tokens are logged to console instead of emailed |
 | CAPTCHA | `CAPTCHA_PROVIDER` (`turnstile` \| empty), `CAPTCHA_SECRET`, `CAPTCHA_SITE_KEY` | Off unless a provider + secret are set |
 | Shared store | `REDIS_URL` | Empty -> in-memory store (single instance only) |
 | Hardening | `MAX_REQUEST_BODY_BYTES`, `MAX_PASSWORD_LENGTH`, `RATE_LIMITER_ENTRY_TTL` | |
@@ -181,13 +179,6 @@ Base path: `/api/v1/auth`. MFA endpoints are nested under `/api/v1/auth/mfa`.
 | POST | `/change-password` | Yes | Change password (revokes all sessions afterward) |
 | POST | `/set-password` | Yes | Establish a first password for Google-OAuth-only accounts (409 if a password already exists) |
 | GET | `/me` | Yes | Current user's profile |
-
-### MFA
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| POST | `/mfa/send-otp` | Yes | Generate and deliver a 6-digit OTP |
-| POST | `/mfa/verify-otp` | Yes | Verify the submitted OTP |
 
 ### Operational
 
@@ -217,8 +208,16 @@ A few decisions worth knowing if you're extending this:
 - **Password reset / email verification use JWTs with a `type` claim** (`reset`, `verify-email`) rather than a separate token table — reuses the existing JWT infrastructure and gets expiry for free. Single-use is enforced separately via the JWT ID, tracked in `store.Store`.
 - **Passwords are capped at bcrypt's 72-byte limit.** This prevents bcrypt truncation from treating two distinct long passwords as the same credential.
 - **`locked_until` is a nullable timestamp**, distinct from `is_active` — a boolean can't express a *temporary* lock, only a permanent enable/disable state.
-- **OTPs and refresh tokens are hashed with SHA-256**, not bcrypt — they're already high-entropy random values, so bcrypt's deliberately slow KDF isn't needed (unlike user-chosen passwords, which are lower-entropy and benefit from that slowness).
+- **Refresh tokens are hashed with SHA-256**, not bcrypt — they're already high-entropy random values, so bcrypt's deliberately slow KDF isn't needed (unlike user-chosen passwords, which are lower-entropy and benefit from that slowness).
 - **The `store.Store` interface is the seam for horizontal scaling.** Nothing above it knows whether counters live in a Go map or Redis — swapping is a config change (`REDIS_URL`), not a code change.
+- **TOTP shared secrets are sealed at rest with AES-256-GCM** (`totp_devices.secret_encrypted`, keyed by the same `RECOVERY_CODE_KEY`/JWT-secret derivation as recovery codes). Rows written before this column existed keep their plaintext `secret` and keep validating (lazy migration on read); the next enrollment or sudo-gated rotation re-writes them sealed and blanks the plaintext column. Rotating the encryption key (or `JWT_SECRET`) orphans existing sealed secrets — affected users must re-enroll TOTP, exactly like recovery codes.
+
+## Operational notes
+
+- **`GET /metrics` (Prometheus) is unauthenticated by design** so scrapers need no credentials. It exposes process/Go runtime metrics plus `finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`, `finnapigo_rate_limited_requests_total`, and `finnapigo_audit_buffer_depth`. **Never expose it publicly** — bind the server to an internal interface or restrict it at the load balancer; the payload reveals internals useful to an attacker.
+- **Schema migrations (R1).** Schema changes ship as golang-migrate SQL files under `migrations/` and are applied as a DEPLOY STEP: `go run ./cmd/migrate up` (also `down N`, `force V`, `version`). Servers no longer auto-migrate at boot; set `MIGRATE_AUTO=true` to restore GORM AutoMigrate for local dev only. The `0001_init` baseline matches the GORM models at the time it was generated — `migrate up` + `migrate down 1` against a throwaway MySQL DB remain to be executed on an environment with Docker/MySQL available (not present where this was authored); do that before the first production rollout.
+- **Audit retention (R4).** `audit_logs` rows contain PII (email addresses, client IPs, usernames) and are kept **forever by default**. Set `AUDIT_RETENTION_DAYS` (e.g. `90`) to have the cleanup job batch-delete older rows every 15 minutes. Consider your jurisdiction's requirements before enabling: retention supports both "keep evidence long" and "minimize PII" postures — pick one deliberately.
+- **`PPROF_ADDR`** (optional) starts a `net/http/pprof` listener on a separate internal port (e.g. `localhost:6060`). Empty (default) = disabled. Never expose this port publicly.
 
 ## Known limitations
 

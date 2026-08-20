@@ -5,6 +5,7 @@ package repositories
 
 import (
 	"context"
+	"errors"
 
 	"github.com/finnapigo/finnapigo/internal/models"
 	"gorm.io/gorm"
@@ -35,7 +36,7 @@ func (r *OAuthIdentityRepository) FindByProviderAndProviderUserID(ctx context.Co
 	if err := r.db.WithContext(ctx).
 		Where("provider = ? AND provider_user_id = ?", provider, providerUserID).
 		First(&identity).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
 		return nil, err
@@ -50,7 +51,7 @@ func (r *OAuthIdentityRepository) FindByUserIDAndProvider(ctx context.Context, u
 	if err := r.db.WithContext(ctx).
 		Where("user_id = ? AND provider = ?", userID, provider).
 		First(&identity).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
 		return nil, err

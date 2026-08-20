@@ -9,8 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -23,6 +24,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/metrics"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/repositories"
@@ -32,8 +34,14 @@ import (
 )
 
 func main() {
+	// Structured JSON logs for the whole process — every slog call (including
+	// from libraries that use the default logger) emits machine-parseable JSON.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
 	if err := run(); err != nil {
-		log.Fatalf("finnapigo: %v", err)
+		slog.Error("finnapigo fatal", "err", err)
+		os.Exit(1)
 	}
 }
 
@@ -49,24 +57,33 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	log.Printf("database connected: %s:%s/%s", cfg.DB.Host, cfg.DB.Port, cfg.DB.Name)
+	slog.Info("database connected", "host", cfg.DB.Host, "port", cfg.DB.Port, "db", cfg.DB.Name)
 
-	// --- Migrations (explicit; safe to run on every boot) ---
-	if err := db.AutoMigrate(
-		&models.User{}, &models.RefreshToken{}, &models.OtpCode{},
-		&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
-		&models.OAuthIdentity{},
-	); err != nil {
-		return errors.Join(errors.New("auto-migrate failed"), err)
+	// --- Schema (R1) ---
+	// Production NEVER auto-migrates at boot: schema changes ship as
+	// golang-migrate files (migrations/, applied by `go run ./cmd/migrate
+	// up` as a deploy step). MIGRATE_AUTO=true re-enables GORM AutoMigrate
+	// as the dev-only escape hatch.
+	if cfg.DB.MigrateAuto {
+		slog.Warn("MIGRATE_AUTO=true — running GORM AutoMigrate at boot (dev escape hatch; production must use cmd/migrate)")
+		if err := db.AutoMigrate(
+			&models.User{}, &models.RefreshToken{},
+			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
+			&models.OAuthIdentity{},
+		); err != nil {
+			return errors.Join(errors.New("auto-migrate failed"), err)
+		}
 	}
 
 	// --- Repositories ---
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
-	otpRepo := repositories.NewOtpRepository(db)
 	baseAuditRepo := repositories.NewAuditRepository(db)
+	// auditRepo buffers audit writes on a background worker; it is closed
+	// explicitly in the shutdown sequence (NOT deferred) so the flush is
+	// ordered before the DB pool close. Boot-failure returns below bypass the
+	// flush, but those paths have served no traffic yet.
 	auditRepo := services.NewAsyncAuditWriter(baseAuditRepo, baseAuditRepo, cfg.Audit)
-	defer auditRepo.Close()
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
 	totpRepo := repositories.NewTOTPRepository(db)
 	oauthIdentityRepo := repositories.NewOAuthIdentityRepository(db)
@@ -74,7 +91,7 @@ func run() error {
 	// --- Store (in-memory default; Redis when REDIS_URL set) ---
 	// §1.3/§7 — rate-limit counters, velocity windows, and jti tracking are
 	// shared across instances when Redis is configured; otherwise in-memory.
-	var kvStore services.StoreProvider
+	var kvStore store.Store
 	if cfg.Redis.URL != "" {
 		redisStore, closeRedis, err := store.NewRedisStoreFromURL(cfg.Redis.URL)
 		if err != nil {
@@ -82,12 +99,12 @@ func run() error {
 		}
 		defer func() { _ = closeRedis() }()
 		kvStore = redisStore
-		log.Println("store: Redis-backed (shared across instances)")
+		slog.Info("store: Redis-backed (shared across instances)")
 	} else {
 		memStore := store.NewInMemoryStore(5 * time.Minute)
 		defer memStore.Close()
 		kvStore = memStore
-		log.Println("store: in-memory (single-instance mode)")
+		slog.Info("store: in-memory (single-instance mode)")
 	}
 
 	// --- JWT ---
@@ -99,21 +116,20 @@ func run() error {
 	var notifier services.Notifier
 	if smtpNotif.Enabled() {
 		notifier = smtpNotif
-		log.Println("email: SMTP notifier enabled")
+		slog.Info("email: SMTP notifier enabled")
 	} else {
 		notifier = services.NewConsoleNotifier(cfg.SMTP.From)
-		log.Println("email: SMTP_HOST not set — using console notifier (tokens logged to stdout)")
+		slog.Warn("email: SMTP_HOST not set — using console notifier (tokens logged to stdout)")
 	}
 
 	// --- CAPTCHA verifier (§2: off by default) ---
 	var captchaVerifier services.CaptchaVerifier // nil = NoOp in handler
-	switch cfg.Captcha.Provider {
-	case "turnstile":
+	if cfg.Captcha.Provider == "turnstile" {
 		if cfg.Captcha.Secret == "" {
-			log.Println("captcha: CAPTCHA_PROVIDER=turnstile but CAPTCHA_SECRET is empty — CAPTCHA disabled")
+			slog.Warn("captcha: CAPTCHA_PROVIDER=turnstile but CAPTCHA_SECRET is empty — CAPTCHA disabled")
 		} else {
 			captchaVerifier = services.NewTurnstileVerifier(cfg.Captcha.Secret)
-			log.Println("captcha: Turnstile verifier enabled")
+			slog.Info("captcha: Turnstile verifier enabled")
 		}
 	}
 
@@ -127,13 +143,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEncKey)
+	// Build the AES-256-GCM cipher ONCE — the key never changes at runtime, so
+	// the key schedule is computed here instead of per Encrypt/Decrypt call.
+	recoveryEnc, err := crypto.NewEncryptor(recoveryEncKey)
+	if err != nil {
+		return fmt.Errorf("recovery-code encryptor: %w", err)
+	}
+	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEnc, jwtMgr)
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
 		totpRepo, totpSvc,
 	)
-	mfaSvc := services.NewMFAService(otpRepo, userRepo, auditRepo, notifier, cfg.Auth, cfg.RateLimit, kvStore)
 
 	// --- Google OAuth (endpoints only registered when fully configured) ---
 	var oauthHandler *handlers.OAuthHandler
@@ -141,19 +162,22 @@ func run() error {
 		gVerifier := services.NewProductionGoogleVerifier(cfg.GoogleOAuth.ClientID)
 		oauthSvc := services.NewOAuthService(userRepo, oauthIdentityRepo, kvStore, authSvc, gVerifier, gClient)
 		oauthHandler = handlers.NewOAuthHandler(oauthSvc)
-		log.Println("oauth: Google sign-in enabled")
+		slog.Info("oauth: Google sign-in enabled")
 	} else {
-		log.Println("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
+		slog.Info("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
 	}
 
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
-	mfaHandler := handlers.NewMFAHandler(mfaSvc, totpSvc, jwtMgr, cfg.JWT.SudoTTL)
+	mfaHandler := handlers.NewMFAHandler(totpSvc, jwtMgr, cfg.JWT.SudoTTL)
 	sessionHandler := handlers.NewSessionHandler(authSvc)
 
 	// --- Rate limiter ---
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
 	defer rateLimiter.Close()
+
+	// P3 — optional pprof listener on a separate internal port.
+	defer startPProf(cfg.Server.PProfAddr)()
 
 	// --- TOTP concurrency limiter (caps CPU-bound validations) ---
 	totpCluster := middleware.NewConcurrencyLimiter(cfg.Security.TOTPMaxConcurrent)
@@ -170,6 +194,9 @@ func run() error {
 		DB:                  db,
 		MaxRequestBodyBytes: cfg.Security.MaxRequestBodyBytes,
 		TrustedProxies:      cfg.Server.TrustedProxies,
+		HSTSSeconds:         cfg.Server.HSTSSeconds,
+		PwdVersion:          authSvc.CurrentPwdVersion,
+		Metrics:             metrics.Handler(func() float64 { return float64(auditRepo.Buffered()) }),
 	})
 
 	// --- HTTP server with graceful shutdown ---
@@ -182,12 +209,12 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Run token/OTP/used-token cleanup in the background.
-	go startCleanup(tokenRepo, otpRepo, usedTokenRepo)
+	// Run token/used-token/audit-retention cleanup in the background.
+	go startCleanup(tokenRepo, usedTokenRepo, baseAuditRepo, cfg.Audit.RetentionDays)
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("server listening on :%s (mode=%s)", cfg.Server.Port, cfg.Server.GinMode)
+		slog.Info("server listening", "port", cfg.Server.Port, "mode", cfg.Server.GinMode)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -198,17 +225,28 @@ func run() error {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case <-stop:
-		log.Println("shutdown signal received")
+		slog.Info("shutdown signal received")
 	case err := <-errCh:
-		log.Printf("server error: %v", err)
+		slog.Error("server error", "err", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	err = srv.Shutdown(ctx)
+
+	// Flush resources in dependency order: the async audit writer drains its
+	// buffer into the DB first, then the DB pool itself is closed. Closing in
+	// the reverse order would drop buffered audit rows.
+	slog.Info("flushing resources")
+	auditRepo.Close()
+	if sqlDB, derr := db.DB(); derr == nil {
+		_ = sqlDB.Close()
+	}
+
+	if err != nil {
 		return errors.Join(errors.New("graceful shutdown failed"), err)
 	}
-	log.Println("server stopped cleanly")
+	slog.Info("server stopped cleanly")
 	return nil
 }
 
@@ -229,17 +267,19 @@ func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 	if cfg.JWT.Secret == "" {
 		return nil, errors.New("cannot derive recovery-code key: JWT_SECRET is empty")
 	}
-	log.Println("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
+	slog.Warn("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
 	sum := sha256.Sum256([]byte(cfg.JWT.Secret + ":finnapigo:recovery-codes:v1"))
 	return sum[:], nil
 }
 
-// startCleanup periodically purges expired refresh tokens, OTP codes, and
-// used-token rows. Failures are logged but never fatal.
+// startCleanup periodically purges expired refresh tokens, used-token rows,
+// and — when auditRetentionDays > 0 — audit rows older than the retention
+// window (R4). Failures are logged but never fatal.
 func startCleanup(
 	tokenRepo *repositories.RefreshTokenRepository,
-	otpRepo *repositories.OtpRepository,
 	usedTokenRepo *repositories.UsedTokenRepository,
+	auditRepo *repositories.AuditRepository,
+	auditRetentionDays int,
 ) {
 	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
@@ -247,13 +287,49 @@ func startCleanup(
 	for range ticker.C {
 		now := time.Now()
 		if n, err := tokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
-			log.Printf("cleanup: purged %d expired refresh tokens", n)
-		}
-		if n, err := otpRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
-			log.Printf("cleanup: purged %d expired/used OTPs", n)
+			slog.Info("cleanup: purged expired refresh tokens", "count", n)
 		}
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
-			log.Printf("cleanup: purged %d expired used tokens", n)
+			slog.Info("cleanup: purged expired used tokens", "count", n)
 		}
+		if auditRetentionDays > 0 {
+			cutoff := now.AddDate(0, 0, -auditRetentionDays)
+			if n, err := auditRepo.PurgeOlderThan(ctx, cutoff); err == nil && n > 0 {
+				slog.Info("cleanup: purged audit rows past retention", "days", auditRetentionDays, "count", n)
+			} else if err != nil {
+				slog.Error("cleanup: audit retention purge failed", "err", err)
+			}
+		}
+	}
+}
+
+// startPProf serves net/http/pprof on a separate listener gated by
+// PPROF_ADDR (P3); empty address = disabled. It uses a private mux so the
+// pprof handlers are never reachable through the main API engine, and must
+// be bound to an internal address — pprof leaks runtime internals.
+func startPProf(addr string) func() {
+	if addr == "" {
+		return func() {}
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	srv := &http.Server{
+		Addr: addr, Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second, // gosec G112 — bound slow clients
+	}
+	go func() {
+		slog.Info("pprof: debug server listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("pprof: debug server failed", "addr", addr, "err", err)
+		}
+	}()
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
 	}
 }
