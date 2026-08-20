@@ -3,8 +3,8 @@ package models
 import "time"
 
 type TOTPDevice struct {
-	ID     uint   `gorm:"primaryKey"`
-	UserID uint   `gorm:"uniqueIndex;not null"`
+	ID     uint `gorm:"primaryKey"`
+	UserID uint `gorm:"uniqueIndex;not null"`
 	// Secret is kept ONLY for rows written before encrypted storage existed
 	// (C7); reads fall back to it lazily and every write seals into
 	// SecretEncrypted instead, leaving this blank.

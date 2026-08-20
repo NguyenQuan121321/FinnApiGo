@@ -55,5 +55,3 @@ func TestMigrationsSourceParses_R1(t *testing.T) {
 		}
 	}
 }
-
-

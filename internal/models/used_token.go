@@ -10,10 +10,10 @@ import "time"
 // multi-instance correctness doesn't depend on DB row visibility timing; this
 // table exists for durability and backstop auditing.
 type UsedToken struct {
-	ID        uint      `gorm:"primaryKey" json:"id"`
-	JTI       string    `gorm:"size:64;uniqueIndex;not null" json:"jti"`
-	TokenType string    `gorm:"size:20;not null" json:"tokenType"`
-	UserID    uint      `gorm:"index" json:"userId"`
+	ID        uint   `gorm:"primaryKey" json:"id"`
+	JTI       string `gorm:"size:64;uniqueIndex;not null" json:"jti"`
+	TokenType string `gorm:"size:20;not null" json:"tokenType"`
+	UserID    uint   `gorm:"index" json:"userId"`
 	// ExpiresAt is indexed for the purge job's batched deletes (P1).
 	ExpiresAt time.Time `gorm:"not null;index" json:"expiresAt"`
 	CreatedAt time.Time `gorm:"index" json:"createdAt"`

@@ -19,8 +19,8 @@ const (
 	AuditEventRecoveryCodeUsed         = "recovery_code_used"
 	AuditEventRecoveryCodesViewed      = "recovery_codes_viewed"      // user re-viewed saved codes (grants sudo)
 	AuditEventRecoveryCodesRegenerated = "recovery_codes_regenerated" // old set invalidated, new set issued
-	AuditEventSessionRevoked        = "session_revoked"          // user revoked a single device/session
-	AuditEventVerifyEmailSendFailed = "verify_email_send_failed" // account persisted but the verification email did not (C11)
+	AuditEventSessionRevoked           = "session_revoked"            // user revoked a single device/session
+	AuditEventVerifyEmailSendFailed    = "verify_email_send_failed"   // account persisted but the verification email did not (C11)
 )
 
 // AuditLog records security-relevant actions for compliance / forensics.
