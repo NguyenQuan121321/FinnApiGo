@@ -10,7 +10,7 @@
       "variables": [
         {
           "name": "baseUrl",
-          "value": "http://localhost:8081",
+          "value": "{{baseUrl}}",
           "type": "text",
           "enabled": true,
           "secret": false
