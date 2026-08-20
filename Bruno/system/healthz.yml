@@ -5,7 +5,7 @@ info:
 
 http:
   method: GET
-  url: {{baseUrl}}/healthz
+  url: "{{baseUrl}}/healthz"
 
 settings:
   encodeUrl: true
