@@ -5,16 +5,30 @@ info:
 
 http:
   method: POST
-  url: http://localhost:8081/api/v1/auth/mfa/login-verify
+  url: "{{baseUrl}}/api/v1/auth/mfa/login-verify"
   body:
     type: json
     data: |-
       {
-        "code": "311586fbf4fed540005481fab6729a5b"
+        "code": "802556"
       }
   auth:
     type: bearer
-    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjI2NDQsInR5cGUiOiJtZmFfcGVuZGluZyIsImlzcyI6ImZpbm5hcGlnbyIsInN1YiI6IjI2NDQiLCJleHAiOjE3ODY4MjYxNzEsIm5iZiI6MTc4NjgyNTg3MSwiaWF0IjoxNzg2ODI1ODcxfQ.hX03vzKoWj5HYQvFilpvVCANTV0MyjWfmOqFIRvp7lk
+    token: "{{mfaToken}}"
+
+runtime:
+  scripts:
+    - type: after-response
+      code: |-
+        if (res.getStatus() === 200) {
+          const data = res.getBody().data;
+          if (data.accessToken) {
+            bru.setVar("accessToken", data.accessToken);
+          }
+          if (data.refreshToken) {
+            bru.setVar("refreshToken", data.refreshToken);
+          }
+        }
 
 settings:
   encodeUrl: true

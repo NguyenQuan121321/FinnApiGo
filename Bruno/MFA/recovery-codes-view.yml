@@ -10,11 +10,22 @@ http:
     type: json
     data: |-
       {
-        "code": "450544"
+        "code": "756688"
       }
   auth:
     type: bearer
-    token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjI2NDQsInJvbGUiOiJ1c2VyIiwiZW1haWwiOiJuZ3V5ZW5ob2FuZ2FuaHF1YW4xM0BnbWFpbC5jb20iLCJ0eXBlIjoiYWNjZXNzIiwiaXNzIjoiZmlubmFwaWdvIiwic3ViIjoiMjY0NCIsImV4cCI6MTc4NjgyNjgwMywibmJmIjoxNzg2ODI1OTAzLCJpYXQiOjE3ODY4MjU5MDN9.em5xxecPgzGKrRPrYQa4Q46Cf7ec8dD0UqKIS2PHF-Y
+    token: "{{accessToken}}"
+
+runtime:
+  scripts:
+    - type: after-response
+      code: |-
+        if (res.getStatus() === 200) {
+          const data = res.getBody().data;
+          if (data.sudoToken) {
+            bru.setVar("sudoToken", data.sudoToken);
+          }
+        }
 
 settings:
   encodeUrl: true

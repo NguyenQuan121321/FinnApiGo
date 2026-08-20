@@ -1,0 +1,33 @@
+{
+  "info": {
+    "type": "bruno-environment",
+    "exportedAt": "2026-08-16T10:15:24.010Z",
+    "exportedUsing": "Bruno/v4.0.0"
+  },
+  "environments": [
+    {
+      "name": "Local",
+      "variables": [
+        {
+          "name": "baseUrl",
+          "value": "http://localhost:8081",
+          "type": "text",
+          "enabled": true,
+          "secret": false
+        }
+      ]
+    },
+    {
+      "name": "Production",
+      "variables": [
+        {
+          "name": "baseUrl",
+          "value": "https://finnapigo.onrender.com",
+          "type": "text",
+          "enabled": true,
+          "secret": false
+        }
+      ]
+    }
+  ]
+}
