@@ -59,13 +59,20 @@ func run() error {
 	}
 	slog.Info("database connected", "host", cfg.DB.Host, "port", cfg.DB.Port, "db", cfg.DB.Name)
 
-	// --- Migrations (explicit; safe to run on every boot) ---
-	if err := db.AutoMigrate(
-		&models.User{}, &models.RefreshToken{},
-		&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
-		&models.OAuthIdentity{},
-	); err != nil {
-		return errors.Join(errors.New("auto-migrate failed"), err)
+	// --- Schema (R1) ---
+	// Production NEVER auto-migrates at boot: schema changes ship as
+	// golang-migrate files (migrations/, applied by `go run ./cmd/migrate
+	// up` as a deploy step). MIGRATE_AUTO=true re-enables GORM AutoMigrate
+	// as the dev-only escape hatch.
+	if cfg.DB.MigrateAuto {
+		slog.Warn("MIGRATE_AUTO=true — running GORM AutoMigrate at boot (dev escape hatch; production must use cmd/migrate)")
+		if err := db.AutoMigrate(
+			&models.User{}, &models.RefreshToken{},
+			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
+			&models.OAuthIdentity{},
+		); err != nil {
+			return errors.Join(errors.New("auto-migrate failed"), err)
+		}
 	}
 
 	// --- Repositories ---

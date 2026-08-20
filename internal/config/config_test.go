@@ -169,3 +169,25 @@ func TestDBConfigDSN_LocUTC_R3(t *testing.T) {
 		t.Fatalf("DSN must not use loc=Local: %q", dsn)
 	}
 }
+
+// TestLoad_MigrateAutoDefaultOff_R1 — R1: AutoMigrate at boot must be
+// opt-in; the default (unset) posture is "schema comes from migrations".
+func TestLoad_MigrateAutoDefaultOff_R1(t *testing.T) {
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("MIGRATE_AUTO", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DB.MigrateAuto {
+		t.Fatal("MIGRATE_AUTO must default to false")
+	}
+	t.Setenv("MIGRATE_AUTO", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DB.MigrateAuto {
+		t.Fatal("MIGRATE_AUTO=true must enable the dev escape hatch")
+	}
+}

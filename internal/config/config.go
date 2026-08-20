@@ -58,6 +58,11 @@ type DBConfig struct {
 	// TLS appends ?tls=... to the DSN: "true" (verify CA + hostname),
 	// "skip-verify", "preferred", or "" (disabled — plaintext, local dev only).
 	TLS string
+	// MigrateAuto (env MIGRATE_AUTO) re-enables GORM AutoMigrate at boot —
+	// the DEV-ONLY escape hatch (R1). Production defaults to false: schema
+	// changes go through the golang-migrate files applied by cmd/migrate as
+	// a deploy step.
+	MigrateAuto bool
 }
 
 // DSN builds a MySQL DSN string for GORM.
@@ -231,6 +236,7 @@ func Load() (*Config, error) {
 			MaxIdleConns: l.envInt("DB_MAX_IDLE_CONNS", 10),
 			MaxOpenConns: l.envInt("DB_MAX_OPEN_CONNS", 100),
 			TLS:          l.env("DB_TLS", ""),
+			MigrateAuto:  l.envBool("MIGRATE_AUTO", false),
 		},
 		JWT: JWTConfig{
 			Secret:        l.env("JWT_SECRET", ""),
