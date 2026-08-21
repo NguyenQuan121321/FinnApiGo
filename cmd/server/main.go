@@ -107,8 +107,11 @@ func run() error {
 		slog.Info("store: in-memory (single-instance mode)")
 	}
 
-	// --- JWT ---
-	jwtMgr := jwt.NewJWTManager(cfg.JWT.Secret, cfg.JWT.Issuer)
+	// --- JWT (K2: versioned keyset when JWT_SECRET_PREVIOUS is set) ---
+	jwtMgr := jwt.NewRotatingJWTManager(cfg.JWT.Secret, cfg.JWT.PreviousSecret, cfg.JWT.Issuer)
+	if cfg.JWT.PreviousSecret != "" && cfg.JWT.PreviousSecret != cfg.JWT.Secret {
+		slog.Info("jwt: rotation active — current + previous secrets accepted until legacy tokens expire")
+	}
 
 	// --- Notifier (§1.2: SMTP when configured, Console fallback) ---
 	smtpNotif := services.NewSMTPNotifier(cfg.SMTP.Host, cfg.SMTP.Port,

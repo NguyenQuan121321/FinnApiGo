@@ -140,3 +140,123 @@ func TestJWT_Verify_RejectsNonHS256Alg_C5(t *testing.T) {
 		t.Error("alg=none token must be rejected")
 	}
 }
+
+// ----- K2: kid header + versioned key map -----
+
+func TestJWT_IssueSetsKidHeader_K2(t *testing.T) {
+	mgr := NewJWTManager("k2-current-secret", "issuer")
+	tok1, err := mgr.Issue(1, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok2, _ := mgr.Issue(2, "user", "c@d.com", TokenTypeAccess, time.Minute)
+	kid1 := headerKid(t, tok1)
+	kid2 := headerKid(t, tok2)
+	if kid1 == "" {
+		t.Fatal("issued tokens must carry a kid header")
+	}
+	if kid1 != kid2 {
+		t.Fatal("kid must be stable for the same signing secret")
+	}
+	other := NewJWTManager("k2-different-secret", "issuer")
+	tok3, _ := other.Issue(1, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if headerKid(t, tok3) == kid1 {
+		t.Fatal("kid must differ when the signing secret differs")
+	}
+}
+
+// TestJWT_VerifyAcceptsPreviousKeyVersion_K2 — phase gate: after rotation
+// (JWT_SECRET=new, JWT_SECRET_PREVIOUS=old), tokens signed by the previous
+// secret still verify, so rotation does not invalidate every session.
+func TestJWT_VerifyAcceptsPreviousKeyVersion_K2(t *testing.T) {
+	oldMgr := NewJWTManager("k2-previous-secret", "issuer")
+	legacy, err := oldMgr.Issue(7, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated := NewRotatingJWTManager("k2-current-secret", "k2-previous-secret", "issuer")
+	claims, err := rotated.Verify(legacy)
+	if err != nil {
+		t.Fatalf("previous-key token must verify after rotation: %v", err)
+	}
+	if claims.UserID != 7 {
+		t.Fatalf("uid = %d, want 7", claims.UserID)
+	}
+	fresh, err := rotated.Issue(8, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rotated.Verify(fresh); err != nil {
+		t.Fatalf("current-key token must verify: %v", err)
+	}
+	stranger := NewJWTManager("k2-unrelated-secret", "issuer")
+	alien, _ := stranger.Issue(9, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if _, err := rotated.Verify(alien); err == nil {
+		t.Fatal("token signed by a key outside the keyset must be rejected")
+	}
+}
+
+// TestJWT_VerifyLegacyTokenWithoutKid_K2 — tokens issued before K2 carry no
+// kid header; the verifier must still accept them while the keyset covers
+// their signing secret (grace window for the rotation rollout).
+func TestJWT_VerifyLegacyTokenWithoutKid_K2(t *testing.T) {
+	rotated := NewRotatingJWTManager("k2-current-secret", "k2-previous-secret", "issuer")
+	mk := func(secret string) string {
+		claims := Claims{UserID: 1, Type: TokenTypeAccess, RegisteredClaims: jwtv5.RegisteredClaims{
+			Issuer: "issuer", ExpiresAt: jwtv5.NewNumericDate(time.Now().Add(time.Minute)),
+		}}
+		tok, err := jwtv5.NewWithClaims(jwtv5.SigningMethodHS256, claims).SignedString([]byte(secret))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	if _, err := rotated.Verify(mk("k2-current-secret")); err != nil {
+		t.Fatalf("kid-less current-key token must verify: %v", err)
+	}
+	if _, err := rotated.Verify(mk("k2-previous-secret")); err != nil {
+		t.Fatalf("kid-less previous-key token must verify: %v", err)
+	}
+	if _, err := rotated.Verify(mk("k2-unrelated-secret")); err == nil {
+		t.Fatal("kid-less token with unknown key must be rejected")
+	}
+}
+
+// TestJWT_VerifyRejectsUnknownKid_K2 — a kid not in the keyset is rejected
+// outright instead of falling through to blind key guessing.
+func TestJWT_VerifyRejectsUnknownKid_K2(t *testing.T) {
+	mgr := NewJWTManager("k2-current-secret", "issuer")
+	stranger := NewJWTManager("k2-unrelated-secret", "issuer")
+	tok, err := stranger.Issue(1, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Verify(tok); err == nil {
+		t.Fatal("token with unknown kid must be rejected")
+	}
+}
+
+// TestJWT_RotatingManagerDedupesEqualSecrets_K2 — setting
+// JWT_SECRET_PREVIOUS to the same value as JWT_SECRET must not error or
+// double-register the key.
+func TestJWT_RotatingManagerDedupesEqualSecrets_K2(t *testing.T) {
+	mgr := NewRotatingJWTManager("k2-same-secret", "k2-same-secret", "issuer")
+	tok, err := mgr.Issue(1, "user", "a@b.com", TokenTypeAccess, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Verify(tok); err != nil {
+		t.Fatalf("verify with deduped keyset failed: %v", err)
+	}
+}
+
+// headerKid extracts the kid header without verifying the token (test only).
+func headerKid(t *testing.T, tokenStr string) string {
+	t.Helper()
+	tok, _, err := jwtv5.NewParser().ParseUnverified(tokenStr, &jwtv5.MapClaims{})
+	if err != nil {
+		t.Fatalf("parse unverified: %v", err)
+	}
+	kid, _ := tok.Header["kid"].(string)
+	return kid
+}

@@ -81,8 +81,13 @@ func (d DBConfig) DSN() string {
 }
 
 type JWTConfig struct {
-	Secret        string
-	Issuer        string
+	Secret string
+	// PreviousSecret (env JWT_SECRET_PREVIOUS) optionally holds the prior
+	// JWT secret during a rotation (K2): new tokens are signed with Secret,
+	// while tokens carrying the previous kid keep verifying until they
+	// expire. Empty = single-key mode.
+	PreviousSecret string
+	Issuer         string
 	AccessTTL     time.Duration
 	RefreshTTL    time.Duration
 	ResetTTL      time.Duration
@@ -239,8 +244,9 @@ func Load() (*Config, error) {
 			MigrateAuto:  l.envBool("MIGRATE_AUTO", false),
 		},
 		JWT: JWTConfig{
-			Secret:        l.env("JWT_SECRET", ""),
-			Issuer:        l.env("JWT_ISSUER", "finnapigo"),
+			Secret:         l.env("JWT_SECRET", ""),
+			PreviousSecret: l.env("JWT_SECRET_PREVIOUS", ""),
+			Issuer:         l.env("JWT_ISSUER", "finnapigo"),
 			AccessTTL:     l.envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
 			RefreshTTL:    l.envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
 			ResetTTL:      l.envDuration("RESET_TOKEN_TTL", 15*time.Minute),
