@@ -251,11 +251,12 @@ func run() error {
 }
 
 // recoveryEncryptionKey resolves the AES-256 key that seals the re-viewable
-// copy of MFA recovery codes: RECOVERY_CODE_KEY (64-char hex) when provided,
-// otherwise a domain-separated SHA-256 derivation of JWT_SECRET. The fallback
-// keeps deployments without the extra variable working; a dedicated key is
-// still preferred so the two secrets rotate independently. Rotating either
-// orphans previously sealed codes — affected users regenerate a fresh set.
+// copy of MFA recovery codes: RECOVERY_CODE_KEY (64-char hex) when provided.
+// Without it, release mode refuses to boot (K1) — silently deriving the key
+// from JWT_SECRET couples the two secrets: one leaked secret unravels both
+// token integrity and recovery-code confidentiality. Dev mode keeps the
+// derivation with a loud warning so local setups stay zero-config. Rotating
+// either key orphans previously sealed codes — users regenerate a fresh set.
 func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 	if cfg.Auth.RecoveryCodeKey != "" {
 		key, err := hex.DecodeString(cfg.Auth.RecoveryCodeKey)
@@ -264,10 +265,13 @@ func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 		}
 		return key, nil
 	}
+	if cfg.Server.GinMode == gin.ReleaseMode {
+		return nil, errors.New("RECOVERY_CODE_KEY is required in release mode (set a dedicated 64-hex-char AES-256 key; deriving it from JWT_SECRET is disabled)")
+	}
 	if cfg.JWT.Secret == "" {
 		return nil, errors.New("cannot derive recovery-code key: JWT_SECRET is empty")
 	}
-	slog.Warn("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
+	slog.Warn("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (dev only; release mode refuses to boot without it)")
 	sum := sha256.Sum256([]byte(cfg.JWT.Secret + ":finnapigo:recovery-codes:v1"))
 	return sum[:], nil
 }
