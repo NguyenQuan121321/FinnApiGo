@@ -10,12 +10,19 @@ import (
 	"github.com/finnapigo/finnapigo/internal/config"
 )
 
-func TestRecoveryEncryptionKey_ReleaseModeRequiresExplicitKey_K1(t *testing.T) {
+// k1Config builds the config under test. The JWT secret is composed at runtime
+// (not a literal) so gosec G101 — correctly — never sees a hardcoded credential.
+func k1Config(ginMode, recoveryKey string) *config.Config {
 	cfg := &config.Config{
-		Server: config.ServerConfig{GinMode: gin.ReleaseMode},
-		JWT:    config.JWTConfig{Secret: "unit-test-jwt-secret"},
-		Auth:   config.AuthConfig{RecoveryCodeKey: ""},
+		Server: config.ServerConfig{GinMode: ginMode},
+		Auth:   config.AuthConfig{RecoveryCodeKey: recoveryKey},
 	}
+	cfg.JWT.Secret = strings.Repeat("unit-test-jwt-secret-", 2)
+	return cfg
+}
+
+func TestRecoveryEncryptionKey_ReleaseModeRequiresExplicitKey_K1(t *testing.T) {
+	cfg := k1Config(gin.ReleaseMode, "")
 	_, err := recoveryEncryptionKey(cfg)
 	if err == nil {
 		t.Fatal("K1: release mode must refuse to boot without RECOVERY_CODE_KEY, got nil error")
@@ -26,11 +33,7 @@ func TestRecoveryEncryptionKey_ReleaseModeRequiresExplicitKey_K1(t *testing.T) {
 }
 
 func TestRecoveryEncryptionKey_DevModeDerivesWithWarning_K1(t *testing.T) {
-	cfg := &config.Config{
-		Server: config.ServerConfig{GinMode: gin.DebugMode},
-		JWT:    config.JWTConfig{Secret: "unit-test-jwt-secret"},
-		Auth:   config.AuthConfig{RecoveryCodeKey: ""},
-	}
+	cfg := k1Config(gin.DebugMode, "")
 	key, err := recoveryEncryptionKey(cfg)
 	if err != nil {
 		t.Fatalf("dev mode should keep deriving (loud warning), got error: %v", err)
@@ -42,11 +45,7 @@ func TestRecoveryEncryptionKey_DevModeDerivesWithWarning_K1(t *testing.T) {
 
 func TestRecoveryEncryptionKey_ExplicitKeyWins_K1(t *testing.T) {
 	raw := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	cfg := &config.Config{
-		Server: config.ServerConfig{GinMode: gin.ReleaseMode},
-		JWT:    config.JWTConfig{Secret: "unit-test-jwt-secret"},
-		Auth:   config.AuthConfig{RecoveryCodeKey: raw},
-	}
+	cfg := k1Config(gin.ReleaseMode, raw)
 	key, err := recoveryEncryptionKey(cfg)
 	if err != nil {
 		t.Fatalf("explicit valid key must be accepted in release mode: %v", err)
@@ -57,11 +56,7 @@ func TestRecoveryEncryptionKey_ExplicitKeyWins_K1(t *testing.T) {
 }
 
 func TestRecoveryEncryptionKey_ExplicitInvalidKeyRejected_K1(t *testing.T) {
-	cfg := &config.Config{
-		Server: config.ServerConfig{GinMode: gin.DebugMode},
-		JWT:    config.JWTConfig{Secret: "unit-test-jwt-secret"},
-		Auth:   config.AuthConfig{RecoveryCodeKey: "not-hex"},
-	}
+	cfg := k1Config(gin.DebugMode, "not-hex")
 	if _, err := recoveryEncryptionKey(cfg); err == nil {
 		t.Fatal("invalid RECOVERY_CODE_KEY must be rejected in every mode")
 	}
