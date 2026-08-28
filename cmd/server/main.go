@@ -33,6 +33,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/routes"
 	"github.com/finnapigo/finnapigo/internal/services"
 	"github.com/finnapigo/finnapigo/internal/store"
+	"github.com/finnapigo/finnapigo/internal/tracing"
 )
 
 func main() {
@@ -55,6 +56,14 @@ func run() error {
 		return err
 	}
 	gin.SetMode(cfg.Server.GinMode)
+
+	// O1 — distributed tracing: no-op provider (and zero export overhead)
+	// unless OTEL_EXPORTER_OTLP_ENDPOINT is set. Flushed at shutdown.
+	setupTracing, err := tracing.Setup(context.Background())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = setupTracing(context.Background()) }()
 
 	// G1 — release mode must acknowledge the audit PII retention policy.
 	if msg := auditRetentionWarning(cfg); msg != "" {
@@ -220,6 +229,7 @@ func run() error {
 		HSTSSeconds:         cfg.Server.HSTSSeconds,
 		PwdVersion:          authSvc.CurrentPwdVersion,
 		Metrics:             publicMetricsHandler,
+		Tracing:             true,
 	})
 
 	// --- HTTP server with graceful shutdown ---

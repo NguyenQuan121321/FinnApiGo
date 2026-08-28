@@ -223,6 +223,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		hash.CheckPassword(dummyHash, in.Password)
 		s.recordLoginFailIP(ctx, ip)
 		s.recordLoginFailAccount(email)
+		LoginFailures.Add(1)
 		s.audits.Record(ctx, loginFailedEvent(nil, email, ip, "unknown user"))
 		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
@@ -235,6 +236,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	}
 
 	if !user.IsActive {
+		LoginFailures.Add(1)
 		s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "disabled"))
 		return TokenPair{}, UserProfile{}, nil, ErrAccountDisabled
 	}
@@ -245,6 +247,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	}
 
 	if !hash.CheckPassword(user.Password, in.Password) {
+		LoginFailures.Add(1)
 		s.recordFailedLogin(ctx, user, email, ip)
 		return TokenPair{}, UserProfile{}, nil, ErrInvalidCredentials
 	}
@@ -308,6 +311,9 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 // auditDetail is an optional label for the audit row (e.g. "" for password,
 // "google-oauth" for Google sign-in).
 func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.User, ip, ua, auditDetail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+	// The password check passed — count the login as a credential success
+	// regardless of which branch below completes it (O3).
+	LoginSuccesses.Add(1)
 	// ---- MFA enforcement: check if TOTP is active for this user ----
 	// When totpRepo is nil (e.g. legacy tests), skip the check entirely so
 	// the login flow is unchanged for users without TOTP wired.
@@ -404,6 +410,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 	// it as a reuse/theft signal: revoke ALL of the user's sessions (per the
 	// existing security spec) and record a high-severity audit event.
 	if rt.Revoked {
+		TokenReuseDetections.Add(1)
 		_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
 		s.audits.Record(ctx, &models.AuditLog{
 			UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
@@ -431,6 +438,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 	// consumed this token, which is reuse by definition (C1).
 	if err := s.tokens.Revoke(ctx, rt); err != nil {
 		if errors.Is(err, repositories.ErrTokenAlreadyRevoked) {
+			TokenReuseDetections.Add(1)
 			_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
 			s.audits.Record(ctx, &models.AuditLog{
 				UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
@@ -444,6 +452,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 	if err != nil {
 		return TokenPair{}, err
 	}
+	RefreshRotations.Add(1)
 	s.audits.Record(ctx, &models.AuditLog{
 		UserID: &user.ID, Event: models.AuditEventRefreshToken, IPAddress: ip, Success: true,
 	})

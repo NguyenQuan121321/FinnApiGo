@@ -10,6 +10,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	otelgin "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
@@ -42,6 +44,10 @@ type Deps struct {
 	// credential change (A7); typically services.AuthService.CurrentPwdVersion.
 	// Nil disables the check.
 	PwdVersion middleware.VersionSource
+	// Tracing installs the otelgin middleware (O1) so every request carries a
+	// span context; O2's request-log enrichment reads it. Enable it whenever
+	// a TracerProvider is configured — it is a no-op provider when unset.
+	Tracing bool
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -58,6 +64,11 @@ func Register(deps Deps) *gin.Engine {
 	// list restricts header trust to exactly those peers.
 	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
+	// O1 — the span must start BEFORE requestLogger so the log line (emitted
+	// after c.Next()) can carry the span's trace_id/span_id (O2).
+	if deps.Tracing {
+		r.Use(otelgin.Middleware("finnapigo"))
+	}
 	r.Use(requestLogger())
 	// A3 — baseline security headers on every response: nosniff, no-referrer,
 	// Cache-Control: no-store (this is an auth API — nothing is cacheable),
@@ -207,14 +218,21 @@ func requestLogger() gin.HandlerFunc {
 		// particular) read the same resolution via c.ClientIP() themselves.
 		status := c.Writer.Status()
 		latency := time.Since(start)
-		slog.Info("request",
+		// O2 — correlate the log line with the request span. With tracing
+		// enabled (or an incoming traceparent) the fields carry the same
+		// trace/span IDs the span exports; otherwise they are omitted.
+		args := []any{
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"status", status,
 			"latency_ms", latency.Milliseconds(),
 			"client_ip", c.ClientIP(),
 			"rid", requestID,
-		)
+		}
+		if sc := oteltrace.SpanContextFromContext(c.Request.Context()); sc.IsValid() {
+			args = append(args, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+		}
+		slog.Info("request", args...)
 	}
 }
 

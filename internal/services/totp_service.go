@@ -447,6 +447,7 @@ func (s *TOTPService) recordSuccess(ctx context.Context, userID uint, event, det
 // place the per-user brute-force counter grows (C9: failures only). Wrapped
 // in a defer/recover because audit logging must NEVER break the auth flow.
 func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail string) {
+	TOTPFailures.Add(1)
 	if s.store != nil {
 		s.store.IncrBy(fmt.Sprintf("totp:fail:%d", userID), 1, s.cfg.TOTPAttemptWindow)
 	}
