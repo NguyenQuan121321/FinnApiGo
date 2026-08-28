@@ -60,6 +60,10 @@ func run() error {
 	if msg := auditRetentionWarning(cfg); msg != "" {
 		slog.Warn(msg)
 	}
+	// X1 — release mode must acknowledge the metrics exposure policy.
+	if cfg.Server.MetricsAddr == "" && cfg.Server.GinMode == gin.ReleaseMode {
+		slog.Warn("metrics: METRICS_ADDR is unset in release mode — /metrics is served on the PUBLIC listener; set METRICS_ADDR to an internal address (e.g. 127.0.0.1:9090)")
+	}
 
 	// --- Database ---
 	db, err := database.Connect(cfg.DB)
@@ -188,8 +192,15 @@ func run() error {
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
 	defer rateLimiter.Close()
 
-	// P3 — optional pprof listener on a separate internal port.
-	defer startPProf(cfg.Server.PProfAddr)()
+	// --- Internal-only endpoints (X1/X2): metrics + pprof off the public API ---
+	metricsH := metrics.Handler(func() float64 { return float64(auditRepo.Buffered()) })
+	// X1 — when METRICS_ADDR is set, metrics leave the public router and are
+	// served on the dedicated internal listener below.
+	publicMetricsHandler := metricsH
+	if cfg.Server.MetricsAddr != "" {
+		publicMetricsHandler = nil
+	}
+	defer startInternalServers(cfg.Server.MetricsAddr, cfg.Server.PProfAddr, cfg.Server.MetricsToken, metricsH)()
 
 	// --- TOTP concurrency limiter (caps CPU-bound validations) ---
 	totpCluster := middleware.NewConcurrencyLimiter(cfg.Security.TOTPMaxConcurrent)
@@ -208,7 +219,7 @@ func run() error {
 		TrustedProxies:      cfg.Server.TrustedProxies,
 		HSTSSeconds:         cfg.Server.HSTSSeconds,
 		PwdVersion:          authSvc.CurrentPwdVersion,
-		Metrics:             metrics.Handler(func() float64 { return float64(auditRepo.Buffered()) }),
+		Metrics:             publicMetricsHandler,
 	})
 
 	// --- HTTP server with graceful shutdown ---
@@ -354,33 +365,65 @@ func startJobs(
 	}
 }
 
-// startPProf serves net/http/pprof on a separate listener gated by
-// PPROF_ADDR (P3); empty address = disabled. It uses a private mux so the
-// pprof handlers are never reachable through the main API engine, and must
-// be bound to an internal address — pprof leaks runtime internals.
-func startPProf(addr string) func() {
-	if addr == "" {
-		return func() {}
+// startInternalServers binds the internal-only endpoints (X1/X2) on private
+// listeners that are never part of the public API engine:
+//
+//   - METRICS_ADDR → Prometheus /metrics (optionally Bearer-gated by
+//     METRICS_TOKEN). Empty = metrics stay on the public router (legacy dev
+//     behavior; warned about in release mode — see run()).
+//   - PPROF_ADDR → net/http/pprof under /debug/pprof/ (P3). Empty = disabled.
+//   - Both set to the SAME address → ONE internal server mounts both.
+//
+// Each listener uses a private mux and a bounded header timeout (G112).
+func startInternalServers(metricsAddr, pprofAddr, metricsToken string, metricsH http.Handler) (stopAll func()) {
+	var shutdowns []func()
+	mountPProf := func(mux *http.ServeMux) {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	srv := &http.Server{
-		Addr: addr, Handler: mux,
-		ReadHeaderTimeout: 5 * time.Second, // gosec G112 — bound slow clients
-	}
-	go func() {
-		slog.Info("pprof: debug server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("pprof: debug server failed", "addr", addr, "err", err)
+	startListener := func(name, addr string, mux *http.ServeMux) func() {
+		srv := &http.Server{
+			Addr: addr, Handler: mux,
+			ReadHeaderTimeout: 5 * time.Second, // gosec G112 — bound slow clients
 		}
-	}()
+		go func() {
+			slog.Info("internal server listening", "name", name, "addr", addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("internal server failed", "name", name, "addr", addr, "err", err)
+			}
+		}()
+		return func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(ctx)
+		}
+	}
+	switch {
+	case metricsAddr != "" && metricsAddr == pprofAddr:
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.BearerAuth(metricsToken, metricsH))
+		mountPProf(mux)
+		shutdowns = append(shutdowns, startListener("internal", metricsAddr, mux))
+	case metricsAddr != "":
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.BearerAuth(metricsToken, metricsH))
+		shutdowns = append(shutdowns, startListener("metrics", metricsAddr, mux))
+		if pprofAddr != "" {
+			pprofMux := http.NewServeMux()
+			mountPProf(pprofMux)
+			shutdowns = append(shutdowns, startListener("pprof", pprofAddr, pprofMux))
+		}
+	case pprofAddr != "":
+		mux := http.NewServeMux()
+		mountPProf(mux)
+		shutdowns = append(shutdowns, startListener("pprof", pprofAddr, mux))
+	}
 	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		for _, s := range shutdowns {
+			s()
+		}
 	}
 }

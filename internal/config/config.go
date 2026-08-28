@@ -41,6 +41,16 @@ type ServerConfig struct {
 	// address when non-empty (P3). Empty (default) = disabled. Bind to an
 	// internal address — pprof must never be publicly reachable.
 	PProfAddr string
+	// MetricsAddr (env METRICS_ADDR) moves the Prometheus /metrics endpoint
+	// OFF the public router onto a dedicated internal listener (X1). Empty
+	// keeps the legacy behavior — /metrics on the public listener — which is
+	// acceptable in dev and loudly warned about in release mode. Never expose
+	// this listener publicly.
+	MetricsAddr string
+	// MetricsToken (env METRICS_TOKEN) optionally gates the internal /metrics
+	// listener with Bearer auth. Empty = open on the internal interface (the
+	// listener binding is the control).
+	MetricsToken string
 	// HSTSSeconds (env HSTS_SECONDS) enables the Strict-Transport-Security
 	// header on HTTPS responses when > 0 (A3). 0 (default) sends no HSTS —
 	// correct for plain-HTTP dev setups behind no TLS terminator.
@@ -236,6 +246,8 @@ func Load() (*Config, error) {
 			GinMode:        l.env("GIN_MODE", "debug"),
 			TrustedProxies: l.envCSV("TRUSTED_PROXIES"),
 			PProfAddr:      l.env("PPROF_ADDR", ""),
+			MetricsAddr:    l.env("METRICS_ADDR", ""),
+			MetricsToken:   l.env("METRICS_TOKEN", ""),
 			HSTSSeconds:    l.envInt("HSTS_SECONDS", 0),
 			RunJobs:        l.envOptionalBool("RUN_JOBS"),
 		},
