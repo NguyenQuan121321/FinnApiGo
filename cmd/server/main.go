@@ -197,7 +197,7 @@ func run() error {
 	if cfg.WebAuthn.RPID != "" {
 		passkeySvc, err := services.NewPasskeyService(
 			repositories.NewPasskeyRepository(db), userRepo, auditRepo, kvStore,
-			services.PasskeyConfig{
+			authSvc, services.PasskeyConfig{
 				RPDisplayName:         cfg.WebAuthn.RPDisplayName,
 				RPID:                  cfg.WebAuthn.RPID,
 				RPOrigins:             cfg.WebAuthn.RPOrigins,

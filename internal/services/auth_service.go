@@ -1077,3 +1077,15 @@ func loginFailedEvent(uid *uint, email, ip, detail string) *models.AuditLog {
 		IPAddress: ip, Success: false, Detail: detail,
 	}
 }
+
+// IssuePasskeyTokenPair issues the standard access+refresh pair for a user
+// who completed a WebAuthn authentication ceremony (W5). The ceremony has
+// already proven possession of a registered credential; this is the same
+// issuance path a password login uses.
+func (s *AuthService) IssuePasskeyTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, UserProfile, error) {
+	pair, err := s.issueTokenPair(ctx, user, ip, ua)
+	if err != nil {
+		return TokenPair{}, UserProfile{}, err
+	}
+	return pair, FromUser(user), nil
+}

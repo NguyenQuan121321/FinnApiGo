@@ -53,6 +53,8 @@ type PasskeyConfig struct {
 type PasskeyService interface {
 	BeginRegistration(ctx context.Context, userID uint, in PasskeyBeginInput) (any, error)
 	FinishRegistration(ctx context.Context, userID uint, r *http.Request) (*models.PasskeyCredential, error)
+	BeginAuthentication(ctx context.Context, userID uint) (any, error)
+	FinishAuthentication(ctx context.Context, userID uint, r *http.Request) (*PasskeyAuthResult, error)
 }
 
 type passkeyService struct {
@@ -61,13 +63,14 @@ type passkeyService struct {
 	users        UserRepo
 	audits       AuditRepo
 	kv           store.Store
+	tokens       PasskeyTokenIssuer
 	challengeTTL time.Duration
 }
 
 // NewPasskeyService builds the WebAuthn core. RP ID must be the registrable
 // domain suffix of every origin in RPOrigins; HTTPS origin enforcement is the
 // browser's to apply (documented in README).
-func NewPasskeyService(repo PasskeyRepo, users UserRepo, audits AuditRepo, kv store.Store, cfg PasskeyConfig) (PasskeyService, error) {
+func NewPasskeyService(repo PasskeyRepo, users UserRepo, audits AuditRepo, kv store.Store, tokens PasskeyTokenIssuer, cfg PasskeyConfig) (PasskeyService, error) {
 	pref := protocol.PreferNoAttestation
 	switch cfg.AttestationPreference {
 	case "indirect":
@@ -85,7 +88,7 @@ func NewPasskeyService(repo PasskeyRepo, users UserRepo, audits AuditRepo, kv st
 		return nil, fmt.Errorf("passkey: webauthn config: %w", err)
 	}
 	return &passkeyService{
-		web: w, repo: repo, users: users, audits: audits, kv: kv,
+		web: w, repo: repo, users: users, audits: audits, kv: kv, tokens: tokens,
 		challengeTTL: 60 * time.Second, // W3: challenge/session TTL
 	}, nil
 }
@@ -275,3 +278,105 @@ func lastIndexByte(s string, b byte) int {
 }
 
 func regSessionKey(userID uint) string { return fmt.Sprintf("passkey:reg:%d", userID) }
+
+// ----- 9C — authentication ceremony (W5) -----
+
+// PasskeyTokenIssuer is the narrow capability the authentication ceremony
+// needs to hand out a standard token pair on success (implemented by
+// AuthService).
+type PasskeyTokenIssuer interface {
+	IssuePasskeyTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, UserProfile, error)
+}
+
+// PasskeyAuthResult is what a completed passkey login returns to the client —
+// the same shape as a password login.
+type PasskeyAuthResult struct {
+	TokenPair TokenPair   `json:"-"`
+	Profile   UserProfile `json:"-"`
+}
+
+// authSession is the staged authentication challenge state.
+type authSession struct {
+	Session webauthn.SessionData `json:"session"`
+}
+
+func authSessionKey(userID uint) string { return fmt.Sprintf("passkey:auth:%d", userID) }
+
+// BeginAuthentication issues the PKC assertion options for a signed-in
+// session re-adding proof of possession (challenge staged, 60s TTL).
+func (s *passkeyService) BeginAuthentication(ctx context.Context, userID uint) (any, error) {
+	user, _, err := s.loadUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	options, session, err := s.web.BeginLogin(user)
+	if err != nil {
+		// A user with zero credentials cannot start an authentication
+		// ceremony — surface as not found so the client offers registration.
+		return nil, fmt.Errorf("passkey: begin authentication: %w", err)
+	}
+	if err := s.stageJSON(ctx, authSessionKey(userID), authSession{Session: *session}); err != nil {
+		return nil, err
+	}
+	return options, nil
+}
+
+// FinishAuthentication verifies the assertion against the stored credential,
+// enforces sign-count clone detection, and issues a standard token pair.
+func (s *passkeyService) FinishAuthentication(ctx context.Context, userID uint, r *http.Request) (*PasskeyAuthResult, error) {
+	if s.tokens == nil {
+		return nil, ErrPasskeyNotConfigured
+	}
+	var staged authSession
+	if err := s.takeJSON(ctx, authSessionKey(userID), &staged); err != nil {
+		return nil, err
+	}
+	user, _, err := s.loadUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	cred, err := s.web.FinishLogin(user, staged.Session, r)
+	if err != nil {
+		return nil, fmt.Errorf("passkey: finish authentication: %w", err)
+	}
+	return s.completeAuthentication(ctx, userID, r, user, cred)
+}
+
+// completeAuthentication enforces the W5 policy on a library-verified
+// assertion: clone detection (sign-count regression ⇒ revoke + audit +
+// refuse), device-record maintenance, and standard token-pair issuance.
+func (s *passkeyService) completeAuthentication(ctx context.Context, userID uint, r *http.Request, user webauthnUser, cred *webauthn.Credential) (*PasskeyAuthResult, error) {
+	// W5 — clone detection: the library flags sign-count regression
+	// (presented counter ≤ stored counter). Revoke the credential, audit the
+	// event, and refuse the login.
+	if cred.Authenticator.CloneWarning {
+		_ = s.repo.RevokeByID(ctx, s.rowIDByCredential(userID, cred.ID), userID)
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID: &userID, Event: models.AuditEventWebAuthnCloneDetected,
+			IPAddress: clientIPFrom(r), Success: false,
+			Detail: "signCount regression on passkey credential — revoked",
+		})
+		return nil, fmt.Errorf("%w: credential sign counter regressed", ErrPasskeyCredentialRevoked)
+	}
+
+	// Maintain the device record (W6).
+	_ = s.repo.TouchUsage(ctx, s.rowIDByCredential(userID, cred.ID), cred.Authenticator.SignCount, time.Now())
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &userID, Event: models.AuditEventPasskeyLogin,
+		IPAddress: clientIPFrom(r), Success: true, Detail: cred.AttestationFormat,
+	})
+	pair, profile, err := s.tokens.IssuePasskeyTokenPair(ctx, user.u, clientIPFrom(r), r.UserAgent())
+	if err != nil {
+		return nil, err
+	}
+	return &PasskeyAuthResult{TokenPair: pair, Profile: profile}, nil
+}
+
+// rowIDByCredential resolves the DB row id for a verified credential.
+func (s *passkeyService) rowIDByCredential(userID uint, credentialID []byte) uint {
+	row, err := s.repo.FindByCredentialID(context.Background(), credentialID)
+	if err != nil || row == nil || row.UserID != userID {
+		return 0
+	}
+	return row.ID
+}

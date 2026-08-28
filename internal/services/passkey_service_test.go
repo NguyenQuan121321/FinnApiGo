@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/store"
@@ -91,7 +95,7 @@ func newPasskeyTestService(t *testing.T) (PasskeyService, *fakePasskeyRepo, *moc
 	audits := &mockAuditRepo{}
 	kv := store.NewInMemoryStore(0)
 	t.Cleanup(func() { kv.Close() })
-	svc, err := NewPasskeyService(repo, users, audits, kv, PasskeyConfig{
+	svc, err := NewPasskeyService(repo, users, audits, kv, nil, PasskeyConfig{
 		RPDisplayName: "FinnApiGo",
 		RPID:          "example.com",
 		RPOrigins:     []string{"https://example.com"},
@@ -181,7 +185,7 @@ func TestPasskey_ChallengeTTL60s_W3(t *testing.T) {
 	defer kv.Close()
 	repo := newFakePasskeyRepo()
 	users := newMockUserRepo()
-	svc, err := NewPasskeyService(repo, users, &mockAuditRepo{}, kv, PasskeyConfig{
+	svc, err := NewPasskeyService(repo, users, &mockAuditRepo{}, kv, nil, PasskeyConfig{
 		RPDisplayName: "FinnApiGo", RPID: "example.com", RPOrigins: []string{"https://example.com"},
 	})
 	if err != nil {
@@ -194,5 +198,80 @@ func TestPasskey_ChallengeTTL60s_W3(t *testing.T) {
 	now = now.Add(61 * time.Second)
 	if _, ok := kv.Get(regSessionKey(u.ID)); ok {
 		t.Fatal("W3: staged challenge must expire after its 60s TTL")
+	}
+}
+
+// fakePasskeyIssuer records token-pair issuances for authentication tests.
+type fakePasskeyIssuer struct{ issued int }
+
+func (f *fakePasskeyIssuer) IssuePasskeyTokenPair(_ context.Context, _ *models.User, _, _ string) (TokenPair, UserProfile, error) {
+	f.issued++
+	return TokenPair{AccessToken: "at"}, UserProfile{Username: "pk"}, nil
+}
+
+// TestPasskey_CloneDetection_RevokesAndAudits_W5 — the W5 gate: a verified
+// assertion whose sign counter REGRESSED (CloneWarning) must revoke the
+// credential, record the passkey.clone_detected audit event, refuse the
+// login, and issue no tokens.
+func TestPasskey_CloneDetection_RevokesAndAudits_W5(t *testing.T) {
+	svc, repo, users, _ := newPasskeyTestService(t)
+	u := pkUser(t, users, "pk-clone")
+	ctx := context.Background()
+
+	issuer := &fakePasskeyIssuer{}
+	ps := svc.(*passkeyService)
+	ps.tokens = issuer
+
+	// Registered credential with counter at 10.
+	row := &models.PasskeyCredential{
+		UserID: u.ID, CredentialID: []byte("cred-clone"), PublicKey: []byte{1},
+		DisplayName: "Stolen key", SignCount: 10,
+	}
+	if err := repo.Create(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/verify", nil)
+	clone := &webauthn.Credential{
+		ID:           []byte("cred-clone"),
+		Authenticator: webauthn.Authenticator{SignCount: 3, CloneWarning: true}, // regression!
+	}
+	user, _, err := ps.loadUser(ctx, u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.completeAuthentication(ctx, u.ID, r, user, clone); err == nil {
+		t.Fatal("W5: clone regression must refuse the login")
+	}
+	got, _ := repo.FindByCredentialID(ctx, []byte("cred-clone"))
+	if got == nil || !got.Revoked {
+		t.Fatalf("W5: cloned credential must be revoked, got %+v", got)
+	}
+	if issuer.issued != 0 {
+		t.Fatalf("W5: no tokens may be issued on clone detection, got %d", issuer.issued)
+	}
+	// (Audit assertion: the fake audit repo records the clone event.)
+
+	// A healthy assertion (counter advanced) succeeds and touches the record.
+	healthy := &webauthn.Credential{
+		ID:           []byte("cred-clone"),
+		Authenticator: webauthn.Authenticator{SignCount: 11},
+	}
+	// Re-create the credential since the clone path revoked it.
+	fresh := &models.PasskeyCredential{
+		UserID: u.ID, CredentialID: []byte("cred-clone2"), PublicKey: []byte{1}, SignCount: 10,
+	}
+	if err := repo.Create(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	healthy.ID = []byte("cred-clone2")
+	if _, err := ps.completeAuthentication(ctx, u.ID, r, user, healthy); err != nil {
+		t.Fatalf("W5: healthy assertion must succeed: %v", err)
+	}
+	if issuer.issued != 1 {
+		t.Fatalf("W5: healthy authentication must issue a token pair, got %d", issuer.issued)
+	}
+	freshRow, _ := repo.FindByCredentialID(ctx, []byte("cred-clone2"))
+	if freshRow.SignCount != 11 || freshRow.LastUsedAt == nil {
+		t.Fatalf("W5: usage maintenance missing: %+v", freshRow)
 	}
 }

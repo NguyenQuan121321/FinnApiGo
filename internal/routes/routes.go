@@ -197,6 +197,10 @@ func Register(deps Deps) *gin.Engine {
 	if deps.Passkey != nil {
 		mfa.POST("/passkey/register/challenge", deps.RateLimit.Handler(), deps.Passkey.BeginRegistration)
 		mfa.POST("/passkey/register/verify", deps.RateLimit.Handler(), deps.Passkey.FinishRegistration)
+		// Authentication ceremony (W5): step-up login with a registered
+		// passkey; issues a fresh standard token pair on success.
+		mfa.POST("/passkey/authenticate/challenge", deps.RateLimit.Handler(), deps.Passkey.BeginAuthentication)
+		mfa.POST("/passkey/authenticate/verify", deps.RateLimit.Handler(), deps.Passkey.FinishAuthentication)
 	}
 
 	// ---- Recovery-code regeneration (GitHub-style sudo mode) ----

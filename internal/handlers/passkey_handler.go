@@ -75,3 +75,46 @@ func (h *PasskeyHandler) FinishRegistration(c *gin.Context) {
 		"createdAt":   row.CreatedAt,
 	})
 }
+
+// BeginAuthentication issues the PKC assertion options (step-up login with a
+// registered passkey on an active session).
+func (h *PasskeyHandler) BeginAuthentication(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	options, err := h.svc.BeginAuthentication(c.Request.Context(), uid)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "passkey authentication challenge", options)
+}
+
+// FinishAuthentication verifies the assertion, enforces clone detection, and
+// issues a standard token pair (W5).
+func (h *PasskeyHandler) FinishAuthentication(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	result, err := h.svc.FinishAuthentication(c.Request.Context(), uid, c.Request)
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrPasskeyChallenge),
+			errors.Is(err, services.ErrPasskeyCredentialRevoked):
+			response.Respond(c, http.StatusUnauthorized, err.Error(), nil)
+		case errors.Is(err, services.ErrUserNotFound):
+			response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		default:
+			respondError(c, err)
+		}
+		return
+	}
+	response.Respond(c, http.StatusOK, "login successful", LoginResponse{
+		Profile:   result.Profile,
+		TokenPair: result.TokenPair,
+	})
+}
