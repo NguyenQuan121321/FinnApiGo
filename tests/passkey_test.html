@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <title>FinnApiGo — Passkey Test Harness</title>
@@ -17,28 +17,28 @@
 <body>
 
 <h1>🔑 FinnApiGo — Passkey Test Harness</h1>
-<p>Trang test độc lập, KHÔNG phải frontend thật — chỉ dùng để verify luồng WebAuthn thật trên trình duyệt.</p>
+<p>Standalone test page — NOT a real frontend; only for verifying the real WebAuthn flow in a browser.</p>
 
-<h2>0. Cấu hình</h2>
+<h2>0. Configuration</h2>
 <label>Base URL</label>
 <input id="baseUrl" value="http://localhost:8081">
-<label>Access Token (login trước qua Bruno, dán vào đây)</label>
+<label>Access Token (log in via Bruno first, paste it here)</label>
 <input id="accessToken" placeholder="eyJhbGciOi...">
 
-<h2>1. Đăng ký Passkey mới (Registration)</h2>
-<label>Tên hiển thị cho thiết bị này (tuỳ chọn)</label>
+<h2>1. Register a new passkey (Registration)</h2>
+<label>Display name for this device (optional)</label>
 <input id="displayName" value="Laptop Windows Hello / macOS Touch ID">
-<button onclick="registerPasskey()">🆕 Đăng ký Passkey</button>
+<button onclick="registerPasskey()">🆕 Register Passkey</button>
 
-<h2>2. Xác thực bằng Passkey (Step-up Authentication)</h2>
-<p style="font-size:13px;color:#555">Backend hiện tại: passkey là yếu tố thứ hai trên session ĐÃ đăng nhập — cần accessToken (giống mục 1). Trả về cặp token mới khi thành công.</p>
-<button onclick="authenticatePasskey()">🔓 Xác thực bằng Passkey</button>
+<h2>2. Authenticate with a passkey (Step-up Authentication)</h2>
+<p style="font-size:13px;color:#555">The backend treats passkeys as a second factor on an ALREADY-authenticated session — an accessToken is required (same as step 1). Returns a fresh token pair on success.</p>
+<button onclick="authenticatePasskey()">🔓 Authenticate with Passkey</button>
 
-<h2>3. Danh sách Passkey đã đăng ký</h2>
-<button onclick="listPasskeys()">📋 Xem danh sách</button>
+<h2>3. Registered passkeys</h2>
+<button onclick="listPasskeys()">📋 List passkeys</button>
 
-<h2>Log kết quả</h2>
-<pre id="log">Sẵn sàng...</pre>
+<h2>Output log</h2>
+<pre id="log">Ready...</pre>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -53,7 +53,7 @@ function authHeaders() {
   return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + $('accessToken').value.trim() };
 }
 
-// --- base64url <-> ArrayBuffer helpers (WebAuthn dùng base64url, không phải base64 thường) ---
+// --- base64url <-> ArrayBuffer helpers (WebAuthn uses base64url, not plain base64) ---
 function b64urlToBuf(b64url) {
   const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/').padEnd(b64url.length + (4 - b64url.length % 4) % 4, '=');
   const bin = atob(b64);
@@ -68,7 +68,7 @@ function bufToB64url(buf) {
   return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// Chuyển options JSON từ server (chứa base64url string) thành ArrayBuffer thật để trình duyệt hiểu
+// Convert the options JSON from the server (base64url strings) into real ArrayBuffers for the browser
 function decodeCreationOptions(opts) {
   opts.challenge = b64urlToBuf(opts.challenge);
   opts.user.id = b64urlToBuf(opts.user.id);
@@ -85,7 +85,7 @@ function decodeRequestOptions(opts) {
   return opts;
 }
 
-// Chuyển kết quả trình duyệt trả về (ArrayBuffer) ngược lại thành JSON base64url để gửi lên server
+// Convert the browser result (ArrayBuffers) back into base64url JSON for the server
 function credentialToJSON(cred, type) {
   const out = {
     id: cred.id,
@@ -110,20 +110,20 @@ function credentialToJSON(cred, type) {
 
 async function registerPasskey() {
   try {
-    log('Bước 1/2: xin challenge từ server (BeginRegistration)...');
+    log('Step 1/2: requesting challenge from server (BeginRegistration)...');
     const beginRes = await fetch(api('/api/v1/auth/mfa/passkey/register/challenge'), {
       method: 'POST', headers: authHeaders(),
       body: JSON.stringify({ displayName: $('displayName').value }),
     });
     const beginData = await beginRes.json();
     if (!beginRes.ok) throw new Error(JSON.stringify(beginData));
-    log('Nhận options: ' + JSON.stringify(beginData.data).slice(0, 200) + '...');
+    log('Received options: ' + JSON.stringify(beginData.data).slice(0, 200) + '...');
 
     const options = decodeCreationOptions(beginData.data.publicKey || beginData.data);
-    log('Đang mở hộp thoại trình duyệt (vân tay/FaceID/Windows Hello)...');
+    log('Opening browser dialog (fingerprint/FaceID/Windows Hello)...');
 
     const credential = await navigator.credentials.create({ publicKey: options });
-    log('Trình duyệt tạo credential thành công, đang gửi verify lên server...');
+    log('Browser created the credential, sending verify to the server...');
 
     const payload = credentialToJSON(credential, 'registration');
     const finishRes = await fetch(api('/api/v1/auth/mfa/passkey/register/verify'), {
@@ -131,16 +131,16 @@ async function registerPasskey() {
     });
     const finishData = await finishRes.json();
     if (!finishRes.ok) throw new Error(JSON.stringify(finishData));
-    log('✅ ĐĂNG KÝ PASSKEY THÀNH CÔNG: ' + JSON.stringify(finishData));
+    log('✅ PASSKEY REGISTRATION SUCCESSFUL: ' + JSON.stringify(finishData));
   } catch (e) {
-    log('❌ LỖI: ' + e.message, true);
+    log('❌ ERROR: ' + e.message, true);
     console.error(e);
   }
 }
 
 async function authenticatePasskey() {
   try {
-    log('Bước 1/2: xin challenge từ server (BeginAuthentication)...');
+    log('Step 1/2: requesting challenge from server (BeginAuthentication)...');
     const beginRes = await fetch(api('/api/v1/auth/mfa/passkey/authenticate/challenge'), {
       method: 'POST', headers: authHeaders(), body: '{}',
     });
@@ -148,10 +148,10 @@ async function authenticatePasskey() {
     if (!beginRes.ok) throw new Error(JSON.stringify(beginData));
 
     const options = decodeRequestOptions(beginData.data.publicKey || beginData.data);
-    log('Đang mở hộp thoại trình duyệt để xác thực...');
+    log('Opening browser dialog for authentication...');
 
     const assertion = await navigator.credentials.get({ publicKey: options });
-    log('Trình duyệt xác thực thành công, đang gửi verify lên server...');
+    log('Browser assertion succeeded, sending verify to the server...');
 
     const payload = credentialToJSON(assertion, 'authentication');
     const finishRes = await fetch(api('/api/v1/auth/mfa/passkey/authenticate/verify'), {
@@ -159,13 +159,13 @@ async function authenticatePasskey() {
     });
     const finishData = await finishRes.json();
     if (!finishRes.ok) throw new Error(JSON.stringify(finishData));
-    log('✅ ĐĂNG NHẬP BẰNG PASSKEY THÀNH CÔNG: ' + JSON.stringify(finishData));
+    log('✅ PASSKEY AUTHENTICATION SUCCESSFUL: ' + JSON.stringify(finishData));
     if (finishData.data && finishData.data.accessToken) {
       $('accessToken').value = finishData.data.accessToken;
-      log('→ Đã tự động cập nhật accessToken mới vào ô phía trên.');
+      log('→ New accessToken automatically filled into the field above.');
     }
   } catch (e) {
-    log('❌ LỖI: ' + e.message, true);
+    log('❌ ERROR: ' + e.message, true);
     console.error(e);
   }
 }
@@ -175,9 +175,9 @@ async function listPasskeys() {
     const res = await fetch(api('/api/v1/auth/mfa/passkeys'), { headers: authHeaders() });
     const data = await res.json();
     if (!res.ok) throw new Error(JSON.stringify(data));
-    log('📋 Danh sách passkeys: ' + JSON.stringify(data.data, null, 2));
+    log('📋 Registered passkeys: ' + JSON.stringify(data.data, null, 2));
   } catch (e) {
-    log('❌ LỖI: ' + e.message, true);
+    log('❌ ERROR: ' + e.message, true);
   }
 }
 </script>
