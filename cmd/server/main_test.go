@@ -61,3 +61,26 @@ func TestRecoveryEncryptionKey_ExplicitInvalidKeyRejected_K1(t *testing.T) {
 		t.Fatal("invalid RECOVERY_CODE_KEY must be rejected in every mode")
 	}
 }
+
+// TestAuditRetentionWarning_G1 — release mode with AUDIT_RETENTION_DAYS
+// unset emits the PII-retention boot warning; dev mode and an explicit
+// window stay silent (a warning, not a boot failure — the policy decision
+// is documented on the function).
+func TestAuditRetentionWarning_G1(t *testing.T) {
+	release := func(retentionDays int) *config.Config {
+		cfg := k1Config(gin.ReleaseMode, strings.Repeat("ab", 32))
+		cfg.Audit.RetentionDays = retentionDays
+		return cfg
+	}
+	if msg := auditRetentionWarning(release(0)); msg == "" {
+		t.Fatal("G1: release mode with unset retention must emit a warning")
+	}
+	if msg := auditRetentionWarning(release(90)); msg != "" {
+		t.Fatalf("G1: explicit retention window must not warn, got: %s", msg)
+	}
+	dev := k1Config(gin.DebugMode, "")
+	dev.Audit.RetentionDays = 0
+	if msg := auditRetentionWarning(dev); msg != "" {
+		t.Fatalf("G1: dev mode must not warn, got: %s", msg)
+	}
+}

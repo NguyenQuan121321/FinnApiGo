@@ -24,6 +24,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/logging"
 	"github.com/finnapigo/finnapigo/internal/metrics"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/models"
@@ -36,9 +37,11 @@ import (
 func main() {
 	// Structured JSON logs for the whole process — every slog call (including
 	// from libraries that use the default logger) emits machine-parseable JSON.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	// The redacting handler (G2) guarantees secret-shaped attributes never
+	// reach stdout, regardless of call-site discipline.
+	slog.SetDefault(slog.New(logging.NewRedactingHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 	if err := run(); err != nil {
 		slog.Error("finnapigo fatal", "err", err)
 		os.Exit(1)
@@ -51,6 +54,11 @@ func run() error {
 		return err
 	}
 	gin.SetMode(cfg.Server.GinMode)
+
+	// G1 — release mode must acknowledge the audit PII retention policy.
+	if msg := auditRetentionWarning(cfg); msg != "" {
+		slog.Warn(msg)
+	}
 
 	// --- Database ---
 	db, err := database.Connect(cfg.DB)
@@ -277,6 +285,19 @@ func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 	slog.Warn("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (dev only; release mode refuses to boot without it)")
 	sum := sha256.Sum256([]byte(cfg.JWT.Secret + ":finnapigo:recovery-codes:v1"))
 	return sum[:], nil
+}
+
+// auditRetentionWarning implements the G1 policy decision: retention is a
+// release-mode WARNING, not a boot failure. Retention is a data-governance
+// CHOICE (some deployments are contractually required to keep history), so
+// refusing to boot would force that choice under rollout pressure; instead
+// the operator gets an explicit, loud notice that audit rows — which carry
+// PII (email, IP) — are being kept forever. Dev mode stays silent.
+func auditRetentionWarning(cfg *config.Config) string {
+	if cfg.Server.GinMode != gin.ReleaseMode || cfg.Audit.RetentionDays > 0 {
+		return ""
+	}
+	return "audit retention: AUDIT_RETENTION_DAYS is unset in release mode — audit rows (PII: email, IP) are kept forever; set a retention window (see README PII/retention policy)"
 }
 
 // startCleanup periodically purges expired refresh tokens, used-token rows,
