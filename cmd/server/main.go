@@ -91,7 +91,7 @@ func run() error {
 		if err := db.AutoMigrate(
 			&models.User{}, &models.RefreshToken{},
 			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
-			&models.OAuthIdentity{},
+			&models.OAuthIdentity{}, &models.PasskeyCredential{},
 		); err != nil {
 			return errors.Join(errors.New("auto-migrate failed"), err)
 		}

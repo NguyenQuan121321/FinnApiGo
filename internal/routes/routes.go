@@ -9,9 +9,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 	otelgin "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	oteltrace "go.opentelemetry.io/otel/trace"
+	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
 	"github.com/finnapigo/finnapigo/internal/jwt"
@@ -251,6 +251,15 @@ func requestLogger() gin.HandlerFunc {
 		}
 		if sc := oteltrace.SpanContextFromContext(c.Request.Context()); sc.IsValid() {
 			args = append(args, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+		}
+		// 5xx responses carry the server-side reason — surface it, otherwise
+		// an internal failure is invisible behind the bare status code.
+		if status >= 500 {
+			if len(c.Errors) > 0 {
+				args = append(args, "err", c.Errors.String())
+			}
+			slog.Error("request", args...)
+			return
 		}
 		slog.Info("request", args...)
 	}
