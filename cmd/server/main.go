@@ -277,13 +277,17 @@ func run() error {
 }
 
 // recoveryEncryptionKey resolves the AES-256 key that seals the re-viewable
-// copy of MFA recovery codes: RECOVERY_CODE_KEY (64-char hex) when provided.
-// Without it, release mode refuses to boot (K1) — silently deriving the key
-// from JWT_SECRET couples the two secrets: one leaked secret unravels both
-// token integrity and recovery-code confidentiality. Dev mode keeps the
+// copy of MFA recovery codes (K1/K3): KEY_PROVIDER=file reads
+// <KEY_DIR>/recovery_codes.key; otherwise RECOVERY_CODE_KEY (64-char hex)
+// wins. Without either, release mode refuses to boot — silently deriving the
+// key from JWT_SECRET couples the two secrets: one leaked secret unravels
+// both token integrity and recovery-code confidentiality. Dev mode keeps the
 // derivation with a loud warning so local setups stay zero-config. Rotating
-// either key orphans previously sealed codes — users regenerate a fresh set.
+// the key orphans previously sealed codes — users regenerate a fresh set.
 func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
+	if cfg.Security.KeyProvider == "file" {
+		return crypto.NewFileKeyProvider(cfg.Security.KeyDir).Retrieve(crypto.KeyNameRecoveryCodes)
+	}
 	if cfg.Auth.RecoveryCodeKey != "" {
 		key, err := hex.DecodeString(cfg.Auth.RecoveryCodeKey)
 		if err != nil || len(key) != crypto.KeyLen {

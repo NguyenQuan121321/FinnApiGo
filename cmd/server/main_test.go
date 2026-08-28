@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -82,5 +84,48 @@ func TestAuditRetentionWarning_G1(t *testing.T) {
 	dev.Audit.RetentionDays = 0
 	if msg := auditRetentionWarning(dev); msg != "" {
 		t.Fatalf("G1: dev mode must not warn, got: %s", msg)
+	}
+}
+
+// TestRecoveryEncryptionKey_FileProvider_K3 — KEY_PROVIDER=file reads the
+// recovery-code key from <KEY_DIR>/recovery_codes.key (mounted-secrets
+// pattern), bypassing the env var entirely.
+func TestRecoveryEncryptionKey_FileProvider_K3(t *testing.T) {
+	dir := t.TempDir()
+	raw := strings.Repeat("ef", 32)
+	if err := os.WriteFile(filepath.Join(dir, "recovery_codes.key"), []byte(raw+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := k1Config(gin.ReleaseMode, "")
+	cfg.Security.KeyProvider = "file"
+	cfg.Security.KeyDir = dir
+
+	key, err := recoveryEncryptionKey(cfg)
+	if err != nil {
+		t.Fatalf("file provider must supply the key in release mode: %v", err)
+	}
+	if want, _ := hex.DecodeString(raw); hex.EncodeToString(key) != hex.EncodeToString(want) {
+		t.Fatal("file-provider key must be used verbatim")
+	}
+
+	// Missing file => boot refuses (fail closed), even with JWT_SECRET present.
+	cfg.Security.KeyDir = filepath.Join(dir, "nonexistent")
+	if _, err := recoveryEncryptionKey(cfg); err == nil {
+		t.Fatal("K3: missing key file must fail the boot in file mode")
+	}
+}
+
+// TestConfig_KeyProviderValidation_K3 — invalid KEY_PROVIDER values and
+// file-mode-without-KEY_DIR fail the boot at config load.
+func TestConfig_KeyProviderValidation_K3(t *testing.T) {
+	t.Setenv("JWT_SECRET", strings.Repeat("k3-", 16))
+	t.Setenv("KEY_PROVIDER", "vault") // vendor binding is an operator decision — not a valid enum here
+	if _, err := config.Load(); err == nil {
+		t.Fatal("K3: invalid KEY_PROVIDER must fail config load")
+	}
+	t.Setenv("KEY_PROVIDER", "file")
+	t.Setenv("KEY_DIR", "")
+	if _, err := config.Load(); err == nil {
+		t.Fatal("K3: KEY_PROVIDER=file without KEY_DIR must fail config load")
 	}
 }

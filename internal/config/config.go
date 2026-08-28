@@ -200,6 +200,14 @@ type SecurityConfig struct {
 	// with 429 immediately, so a flood of validations cannot starve worker
 	// threads. 0 disables the gate (keeps legacy behavior for tests).
 	TOTPMaxConcurrent int
+	// KeyProvider selects the key-management backend (K3): "env" (default —
+	// keys from environment variables) or "file" (hex key files under
+	// KeyDir, e.g. mounted secrets). A cloud KMS plugs in behind the same
+	// crypto.KeyProvider interface.
+	KeyProvider string
+	// KeyDir is the directory holding <name>.key files when
+	// KeyProvider == "file".
+	KeyDir string
 }
 
 // CaptchaConfig drives the optional CAPTCHA on /register and post-fail /login.
@@ -314,6 +322,8 @@ func Load() (*Config, error) {
 			MaxPasswordLength:   l.envInt("MAX_PASSWORD_LENGTH", 72),
 			RateLimiterEntryTTL: l.envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
 			TOTPMaxConcurrent:   l.envInt("TOTP_MAX_CONCURRENT", 64),
+			KeyProvider:         l.env("KEY_PROVIDER", "env"),
+			KeyDir:              l.env("KEY_DIR", ""),
 		},
 		Captcha: CaptchaConfig{
 			Provider: l.env("CAPTCHA_PROVIDER", ""),
@@ -342,6 +352,16 @@ func Load() (*Config, error) {
 	case "", "true", "skip-verify", "preferred":
 	default:
 		return nil, fmt.Errorf("config: DB_TLS=%q is invalid (want \"\", true, skip-verify, or preferred)", cfg.DB.TLS)
+	}
+	// K3 — the key-management seam: "env" (default) or "file"; file mode
+	// is meaningless without a directory to read from.
+	switch cfg.Security.KeyProvider {
+	case "env", "file":
+	default:
+		return nil, fmt.Errorf("config: KEY_PROVIDER=%q is invalid (want env or file)", cfg.Security.KeyProvider)
+	}
+	if cfg.Security.KeyProvider == "file" && cfg.Security.KeyDir == "" {
+		return nil, errors.New("config: KEY_PROVIDER=file requires KEY_DIR")
 	}
 	if err := errors.Join(l.errs...); err != nil {
 		return nil, err
