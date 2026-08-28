@@ -33,6 +33,11 @@ func statusForError(err error) (int, string) {
 		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrSudoRequired):
 		return http.StatusForbidden, err.Error()
+	case errors.Is(err, services.ErrTOTPUnrecoverable):
+		// The account's sealed MFA data cannot be opened with the active key
+		// and no legacy fallback exists — the remediation is re-enrollment,
+		// never a retry.
+		return http.StatusUnprocessableEntity, err.Error()
 	case errors.Is(err, services.ErrUserNotFound), errors.Is(err, services.ErrSessionNotFound):
 		return http.StatusNotFound, err.Error()
 	case errors.Is(err, services.ErrEmailExists), errors.Is(err, services.ErrUsernameExists),

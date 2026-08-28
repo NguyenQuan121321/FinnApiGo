@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -96,6 +97,10 @@ func TestStatusForError(t *testing.T) {
 		{services.ErrUsernameExists, 409}, {services.ErrInvalidInput, 400}, {services.ErrPasswordTooWeak, 400},
 		{services.ErrCaptchaRequired, 400}, {services.ErrDisposableEmail, 422}, {services.ErrRateLimited, 429}, {errors.New("unexpected"), 500},
 		{services.ErrPasswordAlreadySet, 409},
+		// Unrecoverable sealed MFA data must map to 422 — including when it
+		// arrives wrapped, as the TOTP service emits it.
+		{services.ErrTOTPUnrecoverable, 422},
+		{fmt.Errorf("%w: sealed TOTP secret cannot be opened with the active key", services.ErrTOTPUnrecoverable), 422},
 	} {
 		t.Run(tc.err.Error(), func(t *testing.T) {
 			got, _ := statusForError(tc.err)
