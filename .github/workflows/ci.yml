@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "feat/enterprise-readiness" ]
   pull_request:
     branches: [ "main" ]
 
@@ -37,3 +37,132 @@ jobs:
 
       - name: Run govulncheck
         run: govulncheck ./...
+
+  integration:
+    name: Integration (MySQL + Redis)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_DATABASE: finnapigo_test
+          MYSQL_USER: test
+          MYSQL_PASSWORD: testpw
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot -prootpw"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.13'
+          cache: true
+
+      # T1 — the integration-tagged suite against REAL service containers:
+      # migration up/down proof, EXPLAIN plan assertions (D1), and Redis
+      # fixed-window/guard semantics.
+      - name: Go Test (integration tag)
+        env:
+          TEST_MYSQL_DSN: 'test:testpw@tcp(127.0.0.1:3306)/finnapigo_test'
+          TEST_REDIS_URL: 'redis://127.0.0.1:6379/0'
+        run: go test -tags=integration ./... -race -count=1
+
+  fuzz:
+    name: Fuzz smoke (30s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.13'
+          cache: true
+
+      # T2 — 30-second smoke per fuzz target. Full-time runs are local/nightly.
+      - name: Fuzz JWT parsing
+        run: go test ./internal/jwt/ -run='^$' -fuzz=FuzzJWTVerify -fuzztime=30s
+
+      - name: Fuzz TOTP code validation
+        run: go test ./internal/services/ -run='^$' -fuzz=FuzzTOTPCodeValidation -fuzztime=30s
+
+      - name: Fuzz recovery-code consumption
+        run: go test ./internal/services/ -run='^$' -fuzz=FuzzRecoveryCodeConsumption -fuzztime=30s
+
+  coverage:
+    name: Coverage floors (T3)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.13'
+          cache: true
+
+      # T3 — ratchet floors set at the current measured coverage (services
+      # 73.1%, jwt 91.1%). Raise the numbers as tests improve; never lower.
+      - name: internal/services floor (73.0%)
+        run: |
+          go test ./internal/services/ -count=1 -coverprofile=services.out
+          pct=$(go tool cover -func=services.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          echo "internal/services coverage: ${pct}% (floor 73.0)"
+          awk -v p="$pct" 'BEGIN { exit (p+0 < 73.0) ? 1 : 0 }'
+
+      - name: internal/jwt floor (91.0%)
+        run: |
+          go test ./internal/jwt/ -count=1 -coverprofile=jwt.out
+          pct=$(go tool cover -func=jwt.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+          echo "internal/jwt coverage: ${pct}% (floor 91.0)"
+          awk -v p="$pct" 'BEGIN { exit (p+0 < 91.0) ? 1 : 0 }'
+
+  security:
+    name: Security scans (T4)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.13'
+          cache: true
+
+      # T4a — dedicated gosec run (the linter already includes gosec; this
+      # standalone run is the explicit gate with its own failure signal).
+      - name: gosec
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -exclude-generated -quiet ./...
+
+      # T4b — container/config scan: Dockerfile + compose misconfigurations
+      # and dependency-lock vulnerabilities (go.mod/go.sum).
+      - name: Trivy filesystem/config scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scanners: vuln,misconfig
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
