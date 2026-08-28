@@ -45,6 +45,12 @@ type ServerConfig struct {
 	// header on HTTPS responses when > 0 (A3). 0 (default) sends no HSTS —
 	// correct for plain-HTTP dev setups behind no TLS terminator.
 	HSTSSeconds int
+	// RunJobs (env RUN_JOBS) controls background jobs (S2). Unset (nil,
+	// default) = leader election via the shared store — exactly one replica
+	// runs cleanup; single-instance deployments are always their own leader.
+	// true = this replica runs jobs unconditionally (the minimal variant:
+	// pin it to exactly one replica). false = jobs disabled on this replica.
+	RunJobs *bool
 }
 
 type DBConfig struct {
@@ -231,6 +237,7 @@ func Load() (*Config, error) {
 			TrustedProxies: l.envCSV("TRUSTED_PROXIES"),
 			PProfAddr:      l.env("PPROF_ADDR", ""),
 			HSTSSeconds:    l.envInt("HSTS_SECONDS", 0),
+			RunJobs:        l.envOptionalBool("RUN_JOBS"),
 		},
 		DB: DBConfig{
 			Host:         l.env("DB_HOST", "127.0.0.1"),
@@ -398,6 +405,22 @@ func (l *loader) envDuration(key string, fallback time.Duration) time.Duration {
 		l.fail(key, v, "duration (e.g. 15m)")
 	}
 	return fallback
+}
+
+// envOptionalBool reads a boolean flag that distinguishes UNSET (nil) from
+// an explicit false — RUN_JOBS semantics depend on the tri-state (S2). An
+// explicitly set but unparseable value fails the boot (R2 semantics).
+func (l *loader) envOptionalBool(key string) *bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		l.fail(key, v, "boolean")
+		return nil
+	}
+	return &b
 }
 
 // TrimSpace centralises whitespace cleanup for request fields.

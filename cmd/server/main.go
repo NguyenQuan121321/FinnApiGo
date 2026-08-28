@@ -23,6 +23,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
+	"github.com/finnapigo/finnapigo/internal/jobs"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/logging"
 	"github.com/finnapigo/finnapigo/internal/metrics"
@@ -220,8 +221,11 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Run token/used-token/audit-retention cleanup in the background.
-	go startCleanup(tokenRepo, usedTokenRepo, baseAuditRepo, cfg.Audit.RetentionDays)
+	// Run token/used-token/audit-retention cleanup in the background (S2):
+	// leader-elected via the shared store by default (exactly one replica
+	// runs it), with the RUN_JOBS tri-state as the explicit override.
+	stopJobs := startJobs(cfg, tokenRepo, usedTokenRepo, baseAuditRepo, kvStore)
+	defer stopJobs()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -300,19 +304,23 @@ func auditRetentionWarning(cfg *config.Config) string {
 	return "audit retention: AUDIT_RETENTION_DAYS is unset in release mode — audit rows (PII: email, IP) are kept forever; set a retention window (see README PII/retention policy)"
 }
 
-// startCleanup periodically purges expired refresh tokens, used-token rows,
-// and — when auditRetentionDays > 0 — audit rows older than the retention
-// window (R4). Failures are logged but never fatal.
-func startCleanup(
+// startJobs runs the token/used-token/audit-retention purge on a cadence
+// under the S2 policy: leader election via the shared store by default (a
+// single instance is always its own leader), RUN_JOBS=true to run
+// unconditionally on this replica, RUN_JOBS=false to disable here. Returns
+// the stop function for graceful shutdown.
+func startJobs(
+	cfg *config.Config,
 	tokenRepo *repositories.RefreshTokenRepository,
 	usedTokenRepo *repositories.UsedTokenRepository,
 	auditRepo *repositories.AuditRepository,
-	auditRetentionDays int,
-) {
-	ticker := time.NewTicker(15 * time.Minute)
-	defer ticker.Stop()
-	ctx := context.Background()
-	for range ticker.C {
+	kv store.Store,
+) (stop func()) {
+	const (
+		interval = 5 * time.Minute
+		lockTTL  = 15 * time.Minute // >= 2x interval: the claim outlives a missed tick
+	)
+	runOnce := func(ctx context.Context) {
 		now := time.Now()
 		if n, err := tokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			slog.Info("cleanup: purged expired refresh tokens", "count", n)
@@ -320,14 +328,29 @@ func startCleanup(
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			slog.Info("cleanup: purged expired used tokens", "count", n)
 		}
-		if auditRetentionDays > 0 {
-			cutoff := now.AddDate(0, 0, -auditRetentionDays)
+		if cfg.Audit.RetentionDays > 0 {
+			cutoff := now.AddDate(0, 0, -cfg.Audit.RetentionDays)
 			if n, err := auditRepo.PurgeOlderThan(ctx, cutoff); err == nil && n > 0 {
-				slog.Info("cleanup: purged audit rows past retention", "days", auditRetentionDays, "count", n)
+				slog.Info("cleanup: purged audit rows past retention", "days", cfg.Audit.RetentionDays, "count", n)
 			} else if err != nil {
 				slog.Error("cleanup: audit retention purge failed", "err", err)
 			}
 		}
+	}
+	switch {
+	case cfg.Server.RunJobs != nil && *cfg.Server.RunJobs:
+		slog.Warn("jobs: RUN_JOBS=true — background jobs run unconditionally on this replica (pin to exactly ONE replica)")
+		ctx, cancel := context.WithCancel(context.Background())
+		go jobs.RunWhileLeader(ctx, interval, runOnce)
+		return cancel
+	case cfg.Server.RunJobs != nil && !*cfg.Server.RunJobs:
+		slog.Info("jobs: RUN_JOBS=false — background jobs disabled on this replica")
+		return func() {}
+	default:
+		runner := jobs.NewLeaderRunner(kv, "cleanup", interval, lockTTL, runOnce)
+		runner.Start()
+		slog.Info("jobs: leader-elected background jobs active", "lock", "jobs:leader:cleanup", "interval", interval.String())
+		return runner.Stop
 	}
 }
 

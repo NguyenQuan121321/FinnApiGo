@@ -147,6 +147,19 @@ func (s *RedisStore) Delete(key string) {
 	_ = s.client.Del(s.ctx, key).Err()
 }
 
+// Renew extends a key's TTL without changing its value (PEXPIRE; the
+// jobs.Renewer capability). Returns false when the key is absent — a leader
+// whose lock expired must re-acquire, not blind-extend.
+func (s *RedisStore) Renew(key string, ttl time.Duration) bool {
+	ok, err := s.client.Expire(s.ctx, key, ttl).Result()
+	if err != nil {
+		StoreErrors.Add(1)
+		slog.Error("store: redis renew failed", "key", key, "err", err)
+		return false
+	}
+	return ok
+}
+
 // toRedisValue coerces an arbitrary value into a string Redis can store. int64
 // is rendered without quotes so IncrBy can operate on keys originally written
 // by Set; everything else falls back to fmt.
