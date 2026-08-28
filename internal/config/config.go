@@ -25,6 +25,7 @@ type Config struct {
 	Security    SecurityConfig
 	Captcha     CaptchaConfig
 	GoogleOAuth GoogleOAuthConfig
+	WebAuthn    WebAuthnConfig
 	Audit       AuditConfig
 }
 
@@ -227,6 +228,18 @@ type GoogleOAuthConfig struct {
 	RedirectURL  string // GOOGLE_REDIRECT_URL
 }
 
+// WebAuthnConfig holds the WebAuthn relying-party identity (W7). When RPID
+// is empty, passkey endpoints are disabled entirely (the handler is not
+// wired). RPOrigins is the exact-origin allowlist (scheme + host [+ port]);
+// browsers enforce HTTPS on non-localhost origins.
+type WebAuthnConfig struct {
+	RPDisplayName string   // WEBAUTHN_RP_DISPLAY_NAME
+	RPID          string   // WEBAUTHN_RP_ID
+	RPOrigins     []string // WEBAUTHN_RP_ORIGINS (comma-separated)
+	// AttestationPreference: none (default) | indirect | direct (W7).
+	AttestationPreference string // WEBAUTHN_ATTESTATION
+}
+
 // AuditConfig drives async audit logging (§7).
 type AuditConfig struct {
 	// BufferSize is the channel capacity; on overflow entries are dropped
@@ -335,6 +348,12 @@ func Load() (*Config, error) {
 			ClientSecret: l.env("GOOGLE_CLIENT_SECRET", ""),
 			RedirectURL:  l.env("GOOGLE_REDIRECT_URL", ""),
 		},
+		WebAuthn: WebAuthnConfig{
+			RPDisplayName:         l.env("WEBAUTHN_RP_DISPLAY_NAME", "FinnApiGo"),
+			RPID:                  l.env("WEBAUTHN_RP_ID", ""),
+			RPOrigins:             l.envCSV("WEBAUTHN_RP_ORIGINS"),
+			AttestationPreference: l.env("WEBAUTHN_ATTESTATION", "none"),
+		},
 		Audit: AuditConfig{
 			BufferSize:    l.envInt("AUDIT_BUFFER_SIZE", 1024),
 			FlushBatch:    l.envInt("AUDIT_FLUSH_BATCH", 64),
@@ -362,6 +381,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.Security.KeyProvider == "file" && cfg.Security.KeyDir == "" {
 		return nil, errors.New("config: KEY_PROVIDER=file requires KEY_DIR")
+	}
+	// W7 — attestation conveyance accepts only the WebAuthn enum values.
+	switch cfg.WebAuthn.AttestationPreference {
+	case "", "none", "indirect", "direct":
+	default:
+		return nil, fmt.Errorf("config: WEBAUTHN_ATTESTATION=%q is invalid (want none, indirect, or direct)", cfg.WebAuthn.AttestationPreference)
+	}
+	if cfg.WebAuthn.RPID != "" && len(cfg.WebAuthn.RPOrigins) == 0 {
+		return nil, errors.New("config: WEBAUTHN_RP_ID set but WEBAUTHN_RP_ORIGINS is empty — passkey ceremonies would always fail")
 	}
 	if err := errors.Join(l.errs...); err != nil {
 		return nil, err

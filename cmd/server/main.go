@@ -192,6 +192,27 @@ func run() error {
 		slog.Info("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
 	}
 
+	// --- Passkeys / WebAuthn (Phase 9) — enabled only when RP configured ---
+	var passkeyHandler *handlers.PasskeyHandler
+	if cfg.WebAuthn.RPID != "" {
+		passkeySvc, err := services.NewPasskeyService(
+			repositories.NewPasskeyRepository(db), userRepo, auditRepo, kvStore,
+			services.PasskeyConfig{
+				RPDisplayName:         cfg.WebAuthn.RPDisplayName,
+				RPID:                  cfg.WebAuthn.RPID,
+				RPOrigins:             cfg.WebAuthn.RPOrigins,
+				AttestationPreference: cfg.WebAuthn.AttestationPreference,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("passkey: %w", err)
+		}
+		passkeyHandler = handlers.NewPasskeyHandler(passkeySvc)
+		slog.Info("passkey: WebAuthn enabled", "rp_id", cfg.WebAuthn.RPID)
+	} else {
+		slog.Info("passkey: WEBAUTHN_RP_ID not set — passkey endpoints disabled")
+	}
+
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
 	mfaHandler := handlers.NewMFAHandler(totpSvc, jwtMgr, cfg.JWT.SudoTTL)
@@ -220,6 +241,7 @@ func run() error {
 		OAuth:               oauthHandler,
 		MFA:                 mfaHandler,
 		Sessions:            sessionHandler,
+		Passkey:             passkeyHandler,
 		JWT:                 jwtMgr,
 		RateLimit:           rateLimiter,
 		TOTPCluster:         totpCluster,

@@ -44,6 +44,9 @@ type Deps struct {
 	// credential change (A7); typically services.AuthService.CurrentPwdVersion.
 	// Nil disables the check.
 	PwdVersion middleware.VersionSource
+	// Passkey serves the WebAuthn ceremonies (Phase 9). Nil = endpoints not
+	// registered (passkeys disabled — the only approved API extension).
+	Passkey *handlers.PasskeyHandler
 	// Tracing installs the otelgin middleware (O1) so every request carries a
 	// span context; O2's request-log enrichment reads it. Enable it whenever
 	// a TracerProvider is configured — it is a no-op provider when unset.
@@ -185,6 +188,15 @@ func Register(deps Deps) *gin.Engine {
 		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.MFA.VerifyTOTP)
 		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.MFA.ValidateTOTP)
 		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.MFA.ViewRecoveryCodes)
+	}
+
+	// ---- Passkey / WebAuthn (Phase 9 — the ONLY approved API extension) ----
+	// POST /api/v1/auth/mfa/passkey/register/challenge + /verify — the
+	// registration ceremony (W4). The verify body is the verbatim WebAuthn
+	// attestation response, so no body-binding middleware may consume it.
+	if deps.Passkey != nil {
+		mfa.POST("/passkey/register/challenge", deps.RateLimit.Handler(), deps.Passkey.BeginRegistration)
+		mfa.POST("/passkey/register/verify", deps.RateLimit.Handler(), deps.Passkey.FinishRegistration)
 	}
 
 	// ---- Recovery-code regeneration (GitHub-style sudo mode) ----
