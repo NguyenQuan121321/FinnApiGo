@@ -252,6 +252,7 @@ func run() error {
 		PwdVersion:          authSvc.CurrentPwdVersion,
 		Metrics:             publicMetricsHandler,
 		Tracing:             true,
+		CORSAllowedOrigins:  cfg.Server.CORSAllowedOrigins,
 	})
 
 	// --- HTTP server with graceful shutdown ---

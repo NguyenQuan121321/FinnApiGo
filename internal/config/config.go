@@ -52,6 +52,10 @@ type ServerConfig struct {
 	// listener with Bearer auth. Empty = open on the internal interface (the
 	// listener binding is the control).
 	MetricsToken string
+	// CORSAllowedOrigins (env CORS_ALLOWED_ORIGINS, comma-separated) is the
+	// strict browser-origin allowlist for cross-origin API calls. Empty = no
+	// CORS behavior at all (native clients are unaffected either way).
+	CORSAllowedOrigins []string
 	// HSTSSeconds (env HSTS_SECONDS) enables the Strict-Transport-Security
 	// header on HTTPS responses when > 0 (A3). 0 (default) sends no HSTS —
 	// correct for plain-HTTP dev setups behind no TLS terminator.
@@ -105,11 +109,11 @@ type JWTConfig struct {
 	// expire. Empty = single-key mode.
 	PreviousSecret string
 	Issuer         string
-	AccessTTL     time.Duration
-	RefreshTTL    time.Duration
-	ResetTTL      time.Duration
-	VerifyTTL     time.Duration
-	MFAPendingTTL time.Duration
+	AccessTTL      time.Duration
+	RefreshTTL     time.Duration
+	ResetTTL       time.Duration
+	VerifyTTL      time.Duration
+	MFAPendingTTL  time.Duration
 	// SudoTTL is the lifetime of the short-lived "sudo" token minted after a
 	// successful TOTP verification on the recovery-codes view endpoint.
 	// Within this window the user may regenerate codes without re-entering
@@ -263,14 +267,15 @@ func Load() (*Config, error) {
 	l := &loader{}
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:           l.env("SERVER_PORT", "8080"),
-			GinMode:        l.env("GIN_MODE", "debug"),
-			TrustedProxies: l.envCSV("TRUSTED_PROXIES"),
-			PProfAddr:      l.env("PPROF_ADDR", ""),
-			MetricsAddr:    l.env("METRICS_ADDR", ""),
-			MetricsToken:   l.env("METRICS_TOKEN", ""),
-			HSTSSeconds:    l.envInt("HSTS_SECONDS", 0),
-			RunJobs:        l.envOptionalBool("RUN_JOBS"),
+			Port:               l.env("SERVER_PORT", "8080"),
+			GinMode:            l.env("GIN_MODE", "debug"),
+			TrustedProxies:     l.envCSV("TRUSTED_PROXIES"),
+			PProfAddr:          l.env("PPROF_ADDR", ""),
+			MetricsAddr:        l.env("METRICS_ADDR", ""),
+			MetricsToken:       l.env("METRICS_TOKEN", ""),
+			CORSAllowedOrigins: l.envCSV("CORS_ALLOWED_ORIGINS"),
+			HSTSSeconds:        l.envInt("HSTS_SECONDS", 0),
+			RunJobs:            l.envOptionalBool("RUN_JOBS"),
 		},
 		DB: DBConfig{
 			Host:         l.env("DB_HOST", "127.0.0.1"),
@@ -287,12 +292,12 @@ func Load() (*Config, error) {
 			Secret:         l.env("JWT_SECRET", ""),
 			PreviousSecret: l.env("JWT_SECRET_PREVIOUS", ""),
 			Issuer:         l.env("JWT_ISSUER", "finnapigo"),
-			AccessTTL:     l.envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
-			RefreshTTL:    l.envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
-			ResetTTL:      l.envDuration("RESET_TOKEN_TTL", 15*time.Minute),
-			VerifyTTL:     l.envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
-			MFAPendingTTL: l.envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
-			SudoTTL:       l.envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
+			AccessTTL:      l.envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
+			RefreshTTL:     l.envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
+			ResetTTL:       l.envDuration("RESET_TOKEN_TTL", 15*time.Minute),
+			VerifyTTL:      l.envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
+			MFAPendingTTL:  l.envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
+			SudoTTL:        l.envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
 		},
 		Auth: AuthConfig{
 			MaxLoginAttempts:     l.envInt("MAX_LOGIN_ATTEMPTS", 5),

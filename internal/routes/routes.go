@@ -51,6 +51,10 @@ type Deps struct {
 	// span context; O2's request-log enrichment reads it. Enable it whenever
 	// a TracerProvider is configured — it is a no-op provider when unset.
 	Tracing bool
+	// CORSAllowedOrigins is the strict browser-origin allowlist for
+	// cross-origin API calls (web frontends, test harnesses). Empty = no
+	// CORS behavior.
+	CORSAllowedOrigins []string
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -67,6 +71,12 @@ func Register(deps Deps) *gin.Engine {
 	// list restricts header trust to exactly those peers.
 	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
+	// Browser clients (frontends, test harnesses) on another origin need the
+	// allowlisted CORS headers, and their preflight OPTIONS must never fall
+	// through to a 404.
+	if len(deps.CORSAllowedOrigins) > 0 {
+		r.Use(middleware.CORS(deps.CORSAllowedOrigins))
+	}
 	// O1 — the span must start BEFORE requestLogger so the log line (emitted
 	// after c.Next()) can carry the span's trace_id/span_id (O2).
 	if deps.Tracing {
