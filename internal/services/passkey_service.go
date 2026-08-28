@@ -67,6 +67,7 @@ type passkeyService struct {
 	kv           store.Store
 	tokens       PasskeyTokenIssuer
 	challengeTTL time.Duration
+	pref         protocol.ConveyancePreference
 }
 
 // NewPasskeyService builds the WebAuthn core. RP ID must be the registrable
@@ -92,6 +93,7 @@ func NewPasskeyService(repo PasskeyRepo, users UserRepo, audits AuditRepo, kv st
 	return &passkeyService{
 		web: w, repo: repo, users: users, audits: audits, kv: kv, tokens: tokens,
 		challengeTTL: 60 * time.Second, // W3: challenge/session TTL
+		pref:         pref,
 	}, nil
 }
 
@@ -117,7 +119,8 @@ func (s *passkeyService) BeginRegistration(ctx context.Context, userID uint, in 
 			UserVerification: protocol.VerificationPreferred,
 			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
 		}),
-		webauthn.WithConveyancePreference(protocol.PreferNoAttestation),
+		// W7 — operator-selected attestation conveyance (none|indirect|direct).
+		webauthn.WithConveyancePreference(s.pref),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("passkey: begin registration: %w", err)

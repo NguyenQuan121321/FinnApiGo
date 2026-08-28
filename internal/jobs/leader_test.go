@@ -55,19 +55,27 @@ func TestLeaderRunner_TwoContenders_OneRunner_S2(t *testing.T) {
 	a := run("instance-A")
 	b := run("instance-B")
 	time.Sleep(300 * time.Millisecond)
+
+	// Snapshot BEFORE any Stop: stopping a leader releases its lock, which
+	// legitimately lets the survivor take over mid-teardown.
+	rec.mu.Lock()
+	byID := map[string]int{}
+	for k, v := range rec.byID {
+		byID[k] = v
+	}
+	overlapped := rec.overlapped.Load()
+	rec.mu.Unlock()
 	a.Stop()
 	b.Stop()
 
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if rec.overlapped.Load() {
+	if overlapped {
 		t.Fatal("S2: job executed concurrently by two contenders")
 	}
-	if len(rec.byID) != 1 {
+	if len(byID) != 1 {
 		t.Fatalf("S2: %d distinct instances ran the job (%v), want exactly 1 while the leader is healthy",
-			len(rec.byID), rec.byID)
+			len(byID), byID)
 	}
-	for id, n := range rec.byID {
+	for id, n := range byID {
 		if n < 3 {
 			t.Fatalf("S2: leader %s ran only %d times over the window", id, n)
 		}
