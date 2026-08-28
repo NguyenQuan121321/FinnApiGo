@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -103,8 +104,20 @@ func TestMigrationUpDown_T1(t *testing.T) {
 	if dirty {
 		t.Fatalf("schema DIRTY after up (version %d)", v)
 	}
-	if v != 1 {
-		t.Fatalf("version = %d, want 1 (the single init migration)", v)
+	// The applied version must equal the number of embedded migration files —
+	// every migration in the binary applies cleanly and nothing is left pending.
+	entries, err := fs.ReadDir(migrations.FS, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".up.sql") {
+			want++
+		}
+	}
+	if v != uint(want) {
+		t.Fatalf("version = %d, want %d (all embedded migrations applied)", v, want)
 	}
 
 	// Down all the way, then re-up: proves the down-script drops everything

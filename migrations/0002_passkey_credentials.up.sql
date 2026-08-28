@@ -4,7 +4,7 @@
 -- hard delete so re-presenting a cloned credential stays detectable and
 -- auditable (same pattern as refresh_tokens.revoked).
 CREATE TABLE IF NOT EXISTS `passkey_credentials` (
-    `id` BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `user_id` BIGINT UNSIGNED NOT NULL,
     `credential_id` VARBINARY(512) NOT NULL,
     `public_key` BLOB NOT NULL,
