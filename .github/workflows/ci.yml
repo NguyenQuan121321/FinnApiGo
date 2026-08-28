@@ -159,7 +159,7 @@ jobs:
       # T4b — container/config scan: Dockerfile + compose misconfigurations
       # and dependency-lock vulnerabilities (go.mod/go.sum).
       - name: Trivy filesystem/config scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scanners: vuln,misconfig
