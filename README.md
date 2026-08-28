@@ -10,6 +10,7 @@ Authentication & MFA backend written in **Go**, built as a reusable module (`han
 
 - **Core auth** — register, login, logout, logout-all, refresh-token (with rotation + reuse detection), forgot/reset password, change password, set-password (OAuth-only accounts), email verification, resend verification, profile (`/me`)
 - **MFA — TOTP** — RFC 6238 time-based one-time passwords with QR provisioning, single-use recovery codes, brute-force protection, and concurrency-gated CPU-bound verification
+- **MFA — Passkeys (WebAuthn)** — register platform/roaming authenticators, step-up authenticate with a passkey, sign-count clone detection (a cloned credential is revoked and audited automatically), sudo-gated device revocation
 - **Session & device management** — list all active devices (IP, user-agent, device name, location estimate, last active), revoke individual sessions, IDOR-protected revocation, metadata populated on every login and refresh
 - **Security hardening**
   - Passwords hashed with bcrypt (72-byte cap enforced), never stored or logged in plaintext
@@ -233,6 +234,20 @@ Base path: `/api/v1/auth`. MFA endpoints are nested under `/api/v1/auth/mfa`.
 | POST | `/mfa/totp/recovery-codes` | Yes | Re-view codes (requires current TOTP); mints sudo token |
 | POST | `/mfa/totp/recovery-codes/regenerate` | X-Sudo-Token | Regenerate codes |
 
+### MFA (Passkeys / WebAuthn) — registered only when `WEBAUTHN_RP_ID` is set
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | `/mfa/passkey/register/challenge` | Yes | PKC creation options (challenge staged, 60s TTL, single use) |
+| POST | `/mfa/passkey/register/verify` | Yes | Verify attestation + persist credential |
+| POST | `/mfa/passkey/authenticate/challenge` | Yes | PKC assertion options (step-up login) |
+| POST | `/mfa/passkey/authenticate/verify` | Yes | Verify assertion → fresh token pair; clone detection enforced |
+| GET | `/mfa/passkeys` | Yes | List registered passkeys (device management) |
+| DELETE | `/mfa/passkeys/{id}` | X-Sudo-Token | Revoke a passkey |
+
+The full request/response shapes live in `docs/openapi.yaml` — the verify
+bodies are verbatim WebAuthn `PublicKeyCredential` JSON from the browser API.
+
 ### Operational
 
 | Method | Endpoint | Description |
@@ -265,11 +280,13 @@ A few decisions worth knowing if you're extending this:
 - **Refresh tokens are hashed with SHA-256**, not bcrypt — they're already high-entropy random values, so bcrypt's deliberately slow KDF isn't needed (unlike user-chosen passwords, which are lower-entropy and benefit from that slowness). The same logic applies to recovery codes; both consumption paths are compare-and-set so parallel double-use is impossible.
 - **The `store.Store` interface is the seam for horizontal scaling.** Nothing above it knows whether counters live in a Go map or Redis — swapping is a config change (`REDIS_URL`), not a code change. Failure semantics are deliberate: counters fail open, single-use guards fail closed.
 - **TOTP shared secrets are sealed at rest with AES-256-GCM** (`totp_devices.secret_encrypted`). Rows written before this column existed keep their plaintext `secret` and keep validating (lazy migration on read); the next enrollment or sudo-gated rotation re-writes them sealed and blanks the plaintext column. Rotating `RECOVERY_CODE_KEY` (or the dev derivation from `JWT_SECRET`) orphans existing sealed secrets — affected users must re-enroll TOTP, exactly like recovery codes.
+- **Passkey recovery policy (W8).** Passkeys are a second factor here, not a passwordless replacement: passwordless accounts MUST keep email verification, TOTP, and recovery codes as fallback paths, and losing every passkey never locks an account (password + recovery codes always recover it). A passkey whose sign counter regresses is treated as cloned: it is revoked and `passkey.clone_detected` is audited.
+- **Passkey HTTPS enforcement (W7).** Browsers only expose WebAuthn on secure contexts — `https://` origins (or `localhost` for development). `WEBAUTHN_RP_ID` must be the registrable domain suffix of every entry in `WEBAUTHN_RP_ORIGINS`; the server rejects ceremonies bound to any other origin. There is no HTTP passkey deployment mode.
 - **Data layer (D1/D2).** All hot-path queries are index-served — verified by EXPLAIN assertions that run against real MySQL in CI and fail on a full-scan plan. The rotation repository stays on GORM: the measured ~14 ms/rotation is dominated by three network round-trips, not ORM overhead (a raw-SQL rewrite was rejected with this evidence).
 
 ## Operational notes
 
-- **`GET /metrics` (Prometheus) is unauthenticated by design** so scrapers need no credentials. It exposes process/Go runtime metrics plus `finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`, `finnapigo_rate_limited_requests_total`, and `finnapigo_audit_buffer_depth`. **Never expose it publicly** — bind the server to an internal interface or restrict it at the load balancer; the payload reveals internals useful to an attacker.
+- **`GET /metrics` (Prometheus).** Set `METRICS_ADDR` to serve it on a dedicated internal listener (optionally bearer-gated via `METRICS_TOKEN`); without it, `/metrics` rides the public listener (loudly warned about in release mode). **Never expose it publicly.** Metrics (all label-free — no user-identifying data): `finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`, `finnapigo_rate_limited_requests_total`, `finnapigo_audit_buffer_depth`, and the auth outcomes `finnapigo_login_success_total`, `finnapigo_login_failure_total`, `finnapigo_refresh_rotations_total`, `finnapigo_token_reuse_detections_total`, `finnapigo_totp_failure_total`. Suggested alert starting points: token-reuse detections > 0 over 5m (possible theft), login failure rate > 1/s for 10m per replica (credential stuffing or outage), store errors > 0 (Redis health), audit drops > 0 (audit pipeline sizing).
 - **Schema migrations (R1).** Schema changes ship as golang-migrate SQL files under `migrations/` and are applied as a DEPLOY STEP: `go run ./cmd/migrate up` (also `down N`, `force V`, `version`). The up/down/re-up cycle is proven continuously by the CI integration job against a real MySQL service container.
 - **Log redaction guarantee (G2).** The default logger is wrapped in a redacting handler: attributes keyed like `password`, `token`, `code`, `secret`, `recovery_code`, `authorization`, cookies, and their case variants are replaced with `[REDACTED]` before output, at any nesting depth. Metrics never carry user-identifying labels.
 - **Audit & PII retention policy (G1).** `audit_logs` rows contain PII (email addresses, client IPs, usernames). Release mode without `AUDIT_RETENTION_DAYS` emits a boot warning (a deliberate warning, not a failure — retention is a governance choice; some deployments must keep evidence long). Set `AUDIT_RETENTION_DAYS` (e.g. `90`) to have the cleanup job batch-delete older rows every 15 minutes. Pick a posture deliberately — "keep evidence long" or "minimize PII" — and document it internally. The future durable audit queue is designed (not implemented) in `docs/audit-durable-queue-design.md`.
@@ -277,13 +294,10 @@ A few decisions worth knowing if you're extending this:
 
 ## Known limitations / roadmap
 
-The enterprise-readiness reconciliation (`docs/enterprise-review-reconciliation.md`) tracks these open items:
+The enterprise-readiness reconciliation (`docs/enterprise-review-reconciliation.md`) tracks the full OPEN/DONE table. Remaining open items:
 
-- `/metrics` still rides the public listener; binding it (and pprof) behind a dedicated internal listener with optional bearer auth is planned (`METRICS_ADDR`).
-- Background cleanup jobs run on every replica; leader election via the shared store (or an explicit `RUN_JOBS` flag) is planned.
-- Distributed tracing (OpenTelemetry) and trace-ID log correlation are not wired yet.
-- A KMS seam (`crypto.KeyProvider`, `KEY_PROVIDER=env|file`) is designed but not implemented; keys live in env config today.
-- Passkeys / WebAuthn is designed (catalog W1–W8) but not implemented.
+- Passkey authentication is implemented as a second factor (step-up on an active session); fully passwordless login (discoverable credentials without a session) is a possible next step.
+- `RUN_JOBS=true` single-replica pinning and store-based leader election both exist; a distributed lock with fencing tokens is the next hardening step.
 - `go test -race` requires cgo — CI runs it on Linux; Windows hosts without a C compiler cannot.
 
 ---

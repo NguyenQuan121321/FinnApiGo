@@ -532,6 +532,141 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimited'
 
+  /api/v1/auth/mfa/passkey/register/challenge:
+    post:
+      tags: [mfa]
+      summary: Begin passkey registration (WebAuthn PKC creation options)
+      description: Stages the ceremony challenge in the shared store (60s TTL, single use). Requires WEBAUTHN_RP_ID to be configured; otherwise the endpoint does not exist.
+      security:
+        - bearerAuth: []
+      operationId: passkeyRegisterChallenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasskeyBeginRequest'
+      responses:
+        '200':
+          description: PKC creation options (pass to navigator.credentials.create)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeyOptionsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkey/register/verify:
+    post:
+      tags: [mfa]
+      summary: Complete passkey registration (verify attestation, persist credential)
+      description: The request body is the verbatim WebAuthn attestation response (PublicKeyCredential JSON) — do not wrap or rebind it.
+      security:
+        - bearerAuth: []
+      operationId: passkeyRegisterVerify
+      responses:
+        '201':
+          description: Passkey registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeyRegisteredResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkey/authenticate/challenge:
+    post:
+      tags: [mfa]
+      summary: Begin passkey authentication (step-up login, PKC assertion options)
+      security:
+        - bearerAuth: []
+      operationId: passkeyAuthenticateChallenge
+      responses:
+        '200':
+          description: PKC assertion options (pass to navigator.credentials.get)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeyOptionsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkey/authenticate/verify:
+    post:
+      tags: [mfa]
+      summary: Complete passkey authentication and receive a fresh token pair
+      description: |
+        Verifies the assertion; a sign-count regression (cloned credential) revokes
+        the credential, records the `passkey.clone_detected` audit event, and refuses
+        the login. On success a standard token pair is issued.
+      security:
+        - bearerAuth: []
+      operationId: passkeyAuthenticateVerify
+      responses:
+        '200':
+          description: Login successful (same envelope as /login)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkeys:
+    get:
+      tags: [mfa]
+      summary: List the caller's registered passkeys (device management)
+      security:
+        - bearerAuth: []
+      operationId: listPasskeys
+      responses:
+        '200':
+          description: Passkeys fetched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeysListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/mfa/passkeys/{id}:
+    delete:
+      tags: [mfa]
+      summary: Revoke one passkey (sudo-gated)
+      security:
+        - sudoAuth: []
+      operationId: revokePasskey
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/auth/mfa/totp/recovery-codes/regenerate:
     post:
       tags: [mfa]
@@ -711,6 +846,22 @@ components:
       description: Accepts a 6-digit TOTP code or a recovery code (6..128 chars).
       properties:
         code: { type: string, minLength: 6, maxLength: 128 }
+    PasskeyBeginRequest:
+      type: object
+      properties:
+        displayName: { type: string, maxLength: 255, description: Human label for the new credential. }
+    PasskeyCredentialInfo:
+      type: object
+      properties:
+        id: { type: integer }
+        userId: { type: integer }
+        displayName: { type: string }
+        transports: { type: string, description: 'JSON array of transports, e.g. ["internal"].' }
+        attestationType: { type: string }
+        lastUsedAt: { type: string, format: date-time, nullable: true }
+        revoked: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
 
     # ---- payloads (services/dto.go) ----
     UserProfile:
@@ -816,6 +967,37 @@ components:
                 recoveryCodes:
                   type: array
                   items: { type: string }
+    PasskeyOptionsResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              description: Raw WebAuthn PublicKeyCredentialCreation / CredentialAssertion options — pass verbatim to the WebAuthn browser API.
+    PasskeyRegisteredResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                id: { type: integer }
+                displayName: { type: string }
+                transports: { type: string }
+                createdAt: { type: string, format: date-time }
+    PasskeysListResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                passkeys:
+                  type: array
+                  items: { $ref: '#/components/schemas/PasskeyCredentialInfo' }
     RecoveryCodesViewResponse:
       allOf:
         - $ref: '#/components/schemas/Envelope'

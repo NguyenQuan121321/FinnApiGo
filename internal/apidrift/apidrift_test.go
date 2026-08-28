@@ -60,6 +60,7 @@ func buildRealRouter() *gin.Engine {
 		OAuth:               handlers.NewOAuthHandler(nil),
 		MFA:                 handlers.NewMFAHandler(nil, nil, 15*time.Minute),
 		Sessions:            handlers.NewSessionHandler(nil),
+		Passkey:             handlers.NewPasskeyHandler(nil),
 		RateLimit:           middleware.NewRateLimiter(100, 200, time.Minute),
 		MaxRequestBodyBytes: 1 << 20,
 		Metrics:             metrics.Handler(nil),
