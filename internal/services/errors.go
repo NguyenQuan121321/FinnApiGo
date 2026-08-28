@@ -28,8 +28,12 @@ var (
 	ErrCaptchaRequired = errors.New("captcha verification required")
 
 	// 404
-	ErrUserNotFound    = errors.New("user not found")
-	ErrSessionNotFound = errors.New("session not found")
+	ErrUserNotFound = errors.New("user not found")
+	// ErrTOTPUnrecoverable means the device's sealed TOTP secret cannot be
+	// opened with the active key and no legacy fallback exists — the user
+	// must re-enroll MFA (mapped to a 4xx, never an opaque 500).
+	ErrTOTPUnrecoverable = errors.New("totp configuration is invalid; please re-enroll MFA")
+	ErrSessionNotFound   = errors.New("session not found")
 
 	// 409
 	ErrEmailExists    = errors.New("email already registered")

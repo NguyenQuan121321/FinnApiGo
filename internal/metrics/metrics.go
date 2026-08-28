@@ -38,6 +38,27 @@ func Handler(auditDepth func() float64) http.Handler {
 			Namespace: "finnapigo", Name: "rate_limited_requests_total",
 			Help: "Requests rejected with 429 by the shared or local rate limiter.",
 		}, func() float64 { return float64(middleware.RateLimitedRequests.Load()) }),
+		// O3 — fine-grained auth outcomes (label-free per G2).
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: "finnapigo", Name: "login_success_total",
+			Help: "Logins whose credentials verified (token pair or mfa_pending issued). Policy throttles excluded.",
+		}, func() float64 { return float64(services.LoginSuccesses.Load()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: "finnapigo", Name: "login_failure_total",
+			Help: "Credential checks that rejected (unknown user, bad password, disabled account). Throttles excluded.",
+		}, func() float64 { return float64(services.LoginFailures.Load()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: "finnapigo", Name: "refresh_rotations_total",
+			Help: "Successful refresh-token rotations.",
+		}, func() float64 { return float64(services.RefreshRotations.Load()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: "finnapigo", Name: "token_reuse_detections_total",
+			Help: "Already-revoked refresh tokens presented (theft response triggered). Alert on any sustained growth.",
+		}, func() float64 { return float64(services.TokenReuseDetections.Load()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: "finnapigo", Name: "totp_failure_total",
+			Help: "Failed TOTP code or recovery-code validations (bad code, replay, lockout guard).",
+		}, func() float64 { return float64(services.TOTPFailures.Load()) }),
 	)
 	if auditDepth != nil {
 		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{

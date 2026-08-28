@@ -170,6 +170,25 @@ func (s *InMemoryStore) Delete(key string) {
 	s.mu.Unlock()
 }
 
+// Renew extends the TTL of an existing key without touching its value
+// (jobs.Renewer capability). Returns false when the key is absent — callers
+// must re-acquire rather than assume ownership.
+func (s *InMemoryStore) Renew(key string, ttl time.Duration) bool {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.data[key]
+	if !ok || e.expired(now) {
+		return false
+	}
+	var exp time.Time
+	if ttl > 0 {
+		exp = now.Add(ttl)
+	}
+	s.data[key] = entry{value: e.value, exp: exp}
+	return true
+}
+
 // sweepLoop periodically drops expired keys to bound memory.
 func (s *InMemoryStore) sweepLoop(interval time.Duration) {
 	t := time.NewTicker(interval)

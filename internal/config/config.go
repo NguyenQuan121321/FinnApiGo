@@ -25,6 +25,7 @@ type Config struct {
 	Security    SecurityConfig
 	Captcha     CaptchaConfig
 	GoogleOAuth GoogleOAuthConfig
+	WebAuthn    WebAuthnConfig
 	Audit       AuditConfig
 }
 
@@ -41,10 +42,30 @@ type ServerConfig struct {
 	// address when non-empty (P3). Empty (default) = disabled. Bind to an
 	// internal address — pprof must never be publicly reachable.
 	PProfAddr string
+	// MetricsAddr (env METRICS_ADDR) moves the Prometheus /metrics endpoint
+	// OFF the public router onto a dedicated internal listener (X1). Empty
+	// keeps the legacy behavior — /metrics on the public listener — which is
+	// acceptable in dev and loudly warned about in release mode. Never expose
+	// this listener publicly.
+	MetricsAddr string
+	// MetricsToken (env METRICS_TOKEN) optionally gates the internal /metrics
+	// listener with Bearer auth. Empty = open on the internal interface (the
+	// listener binding is the control).
+	MetricsToken string
+	// CORSAllowedOrigins (env CORS_ALLOWED_ORIGINS, comma-separated) is the
+	// strict browser-origin allowlist for cross-origin API calls. Empty = no
+	// CORS behavior at all (native clients are unaffected either way).
+	CORSAllowedOrigins []string
 	// HSTSSeconds (env HSTS_SECONDS) enables the Strict-Transport-Security
 	// header on HTTPS responses when > 0 (A3). 0 (default) sends no HSTS —
 	// correct for plain-HTTP dev setups behind no TLS terminator.
 	HSTSSeconds int
+	// RunJobs (env RUN_JOBS) controls background jobs (S2). Unset (nil,
+	// default) = leader election via the shared store — exactly one replica
+	// runs cleanup; single-instance deployments are always their own leader.
+	// true = this replica runs jobs unconditionally (the minimal variant:
+	// pin it to exactly one replica). false = jobs disabled on this replica.
+	RunJobs *bool
 }
 
 type DBConfig struct {
@@ -81,13 +102,18 @@ func (d DBConfig) DSN() string {
 }
 
 type JWTConfig struct {
-	Secret        string
-	Issuer        string
-	AccessTTL     time.Duration
-	RefreshTTL    time.Duration
-	ResetTTL      time.Duration
-	VerifyTTL     time.Duration
-	MFAPendingTTL time.Duration
+	Secret string
+	// PreviousSecret (env JWT_SECRET_PREVIOUS) optionally holds the prior
+	// JWT secret during a rotation (K2): new tokens are signed with Secret,
+	// while tokens carrying the previous kid keep verifying until they
+	// expire. Empty = single-key mode.
+	PreviousSecret string
+	Issuer         string
+	AccessTTL      time.Duration
+	RefreshTTL     time.Duration
+	ResetTTL       time.Duration
+	VerifyTTL      time.Duration
+	MFAPendingTTL  time.Duration
 	// SudoTTL is the lifetime of the short-lived "sudo" token minted after a
 	// successful TOTP verification on the recovery-codes view endpoint.
 	// Within this window the user may regenerate codes without re-entering
@@ -179,6 +205,14 @@ type SecurityConfig struct {
 	// with 429 immediately, so a flood of validations cannot starve worker
 	// threads. 0 disables the gate (keeps legacy behavior for tests).
 	TOTPMaxConcurrent int
+	// KeyProvider selects the key-management backend (K3): "env" (default —
+	// keys from environment variables) or "file" (hex key files under
+	// KeyDir, e.g. mounted secrets). A cloud KMS plugs in behind the same
+	// crypto.KeyProvider interface.
+	KeyProvider string
+	// KeyDir is the directory holding <name>.key files when
+	// KeyProvider == "file".
+	KeyDir string
 }
 
 // CaptchaConfig drives the optional CAPTCHA on /register and post-fail /login.
@@ -196,6 +230,18 @@ type GoogleOAuthConfig struct {
 	ClientID     string // GOOGLE_CLIENT_ID
 	ClientSecret string // GOOGLE_CLIENT_SECRET
 	RedirectURL  string // GOOGLE_REDIRECT_URL
+}
+
+// WebAuthnConfig holds the WebAuthn relying-party identity (W7). When RPID
+// is empty, passkey endpoints are disabled entirely (the handler is not
+// wired). RPOrigins is the exact-origin allowlist (scheme + host [+ port]);
+// browsers enforce HTTPS on non-localhost origins.
+type WebAuthnConfig struct {
+	RPDisplayName string   // WEBAUTHN_RP_DISPLAY_NAME
+	RPID          string   // WEBAUTHN_RP_ID
+	RPOrigins     []string // WEBAUTHN_RP_ORIGINS (comma-separated)
+	// AttestationPreference: none (default) | indirect | direct (W7).
+	AttestationPreference string // WEBAUTHN_ATTESTATION
 }
 
 // AuditConfig drives async audit logging (§7).
@@ -221,11 +267,15 @@ func Load() (*Config, error) {
 	l := &loader{}
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:           l.env("SERVER_PORT", "8080"),
-			GinMode:        l.env("GIN_MODE", "debug"),
-			TrustedProxies: l.envCSV("TRUSTED_PROXIES"),
-			PProfAddr:      l.env("PPROF_ADDR", ""),
-			HSTSSeconds:    l.envInt("HSTS_SECONDS", 0),
+			Port:               l.env("SERVER_PORT", "8080"),
+			GinMode:            l.env("GIN_MODE", "debug"),
+			TrustedProxies:     l.envCSV("TRUSTED_PROXIES"),
+			PProfAddr:          l.env("PPROF_ADDR", ""),
+			MetricsAddr:        l.env("METRICS_ADDR", ""),
+			MetricsToken:       l.env("METRICS_TOKEN", ""),
+			CORSAllowedOrigins: l.envCSV("CORS_ALLOWED_ORIGINS"),
+			HSTSSeconds:        l.envInt("HSTS_SECONDS", 0),
+			RunJobs:            l.envOptionalBool("RUN_JOBS"),
 		},
 		DB: DBConfig{
 			Host:         l.env("DB_HOST", "127.0.0.1"),
@@ -239,14 +289,15 @@ func Load() (*Config, error) {
 			MigrateAuto:  l.envBool("MIGRATE_AUTO", false),
 		},
 		JWT: JWTConfig{
-			Secret:        l.env("JWT_SECRET", ""),
-			Issuer:        l.env("JWT_ISSUER", "finnapigo"),
-			AccessTTL:     l.envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
-			RefreshTTL:    l.envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
-			ResetTTL:      l.envDuration("RESET_TOKEN_TTL", 15*time.Minute),
-			VerifyTTL:     l.envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
-			MFAPendingTTL: l.envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
-			SudoTTL:       l.envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
+			Secret:         l.env("JWT_SECRET", ""),
+			PreviousSecret: l.env("JWT_SECRET_PREVIOUS", ""),
+			Issuer:         l.env("JWT_ISSUER", "finnapigo"),
+			AccessTTL:      l.envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
+			RefreshTTL:     l.envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
+			ResetTTL:       l.envDuration("RESET_TOKEN_TTL", 15*time.Minute),
+			VerifyTTL:      l.envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
+			MFAPendingTTL:  l.envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
+			SudoTTL:        l.envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
 		},
 		Auth: AuthConfig{
 			MaxLoginAttempts:     l.envInt("MAX_LOGIN_ATTEMPTS", 5),
@@ -289,6 +340,8 @@ func Load() (*Config, error) {
 			MaxPasswordLength:   l.envInt("MAX_PASSWORD_LENGTH", 72),
 			RateLimiterEntryTTL: l.envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
 			TOTPMaxConcurrent:   l.envInt("TOTP_MAX_CONCURRENT", 64),
+			KeyProvider:         l.env("KEY_PROVIDER", "env"),
+			KeyDir:              l.env("KEY_DIR", ""),
 		},
 		Captcha: CaptchaConfig{
 			Provider: l.env("CAPTCHA_PROVIDER", ""),
@@ -299,6 +352,12 @@ func Load() (*Config, error) {
 			ClientID:     l.env("GOOGLE_CLIENT_ID", ""),
 			ClientSecret: l.env("GOOGLE_CLIENT_SECRET", ""),
 			RedirectURL:  l.env("GOOGLE_REDIRECT_URL", ""),
+		},
+		WebAuthn: WebAuthnConfig{
+			RPDisplayName:         l.env("WEBAUTHN_RP_DISPLAY_NAME", "FinnApiGo"),
+			RPID:                  l.env("WEBAUTHN_RP_ID", ""),
+			RPOrigins:             l.envCSV("WEBAUTHN_RP_ORIGINS"),
+			AttestationPreference: l.env("WEBAUTHN_ATTESTATION", "none"),
 		},
 		Audit: AuditConfig{
 			BufferSize:    l.envInt("AUDIT_BUFFER_SIZE", 1024),
@@ -317,6 +376,25 @@ func Load() (*Config, error) {
 	case "", "true", "skip-verify", "preferred":
 	default:
 		return nil, fmt.Errorf("config: DB_TLS=%q is invalid (want \"\", true, skip-verify, or preferred)", cfg.DB.TLS)
+	}
+	// K3 — the key-management seam: "env" (default) or "file"; file mode
+	// is meaningless without a directory to read from.
+	switch cfg.Security.KeyProvider {
+	case "env", "file":
+	default:
+		return nil, fmt.Errorf("config: KEY_PROVIDER=%q is invalid (want env or file)", cfg.Security.KeyProvider)
+	}
+	if cfg.Security.KeyProvider == "file" && cfg.Security.KeyDir == "" {
+		return nil, errors.New("config: KEY_PROVIDER=file requires KEY_DIR")
+	}
+	// W7 — attestation conveyance accepts only the WebAuthn enum values.
+	switch cfg.WebAuthn.AttestationPreference {
+	case "", "none", "indirect", "direct":
+	default:
+		return nil, fmt.Errorf("config: WEBAUTHN_ATTESTATION=%q is invalid (want none, indirect, or direct)", cfg.WebAuthn.AttestationPreference)
+	}
+	if cfg.WebAuthn.RPID != "" && len(cfg.WebAuthn.RPOrigins) == 0 {
+		return nil, errors.New("config: WEBAUTHN_RP_ID set but WEBAUTHN_RP_ORIGINS is empty — passkey ceremonies would always fail")
 	}
 	if err := errors.Join(l.errs...); err != nil {
 		return nil, err
@@ -392,6 +470,22 @@ func (l *loader) envDuration(key string, fallback time.Duration) time.Duration {
 		l.fail(key, v, "duration (e.g. 15m)")
 	}
 	return fallback
+}
+
+// envOptionalBool reads a boolean flag that distinguishes UNSET (nil) from
+// an explicit false — RUN_JOBS semantics depend on the tri-state (S2). An
+// explicitly set but unparseable value fails the boot (R2 semantics).
+func (l *loader) envOptionalBool(key string) *bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		l.fail(key, v, "boolean")
+		return nil
+	}
+	return &b
 }
 
 // TrimSpace centralises whitespace cleanup for request fields.

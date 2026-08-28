@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -939,5 +940,77 @@ func TestTOTPService_SuccessDoesNotFeedBruteForceWindow_C9(t *testing.T) {
 	}
 	if err := svc.Validate(context.Background(), 1, "wrong-code-final"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("6th failure in the window must trip the cap, got %v", err)
+	}
+}
+
+// TestTOTP_SealedKeyMismatch_FallsBackToLegacyAndReseals — a device whose
+// sealed secret was written under a DIFFERENT key (the K1/C7 rotation
+// consequence) must NOT turn login-verify into an opaque 500: the legacy
+// plaintext column holds the SAME shared secret, validation succeeds against
+// it, and the row is re-sealed under the CURRENT key (lazy migration on read).
+func TestTOTP_SealedKeyMismatch_FallsBackToLegacyAndReseals(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(t, repo, nil, nil)
+
+	legacyKey, err := totp.Generate(totp.GenerateOpts{Issuer: "TestIssuer", AccountName: "stale@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a row sealed under an OLDER key: plaintext (same secret) plus
+	// a sealed copy the CURRENT key can no longer open.
+	oldKey := sha256.Sum256([]byte("a-forgotten-previous-jwt-secret"))
+	oldEnc, err := crypto.NewEncryptor(oldKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	bogus, err := oldEnc.Encrypt("definitely-not-the-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Upsert(context.Background(), &models.TOTPDevice{
+		UserID: 9, Secret: legacyKey.Secret(), SecretEncrypted: bogus, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.Validate(context.Background(), 9, totpCode(t, legacyKey.Secret())); err != nil {
+		t.Fatalf("legacy fallback must keep the account working: %v", err)
+	}
+
+	// The row is healed: the sealed copy now opens with the CURRENT key.
+	d, err := repo.FindByUserID(context.Background(), 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.enc.Decrypt(d.SecretEncrypted); err != nil {
+		t.Fatalf("row must be re-sealed with the current key: %v", err)
+	}
+}
+
+// TestTOTP_SealedUnrecoverable_MappedError — a device with an unreadable
+// sealed secret and NO legacy plaintext surfaces ErrTOTPUnrecoverable (4xx in
+// the handler layer) instead of a raw crypto error (500).
+func TestTOTP_SealedUnrecoverable_MappedError(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(t, repo, nil, nil)
+
+	oldKey := sha256.Sum256([]byte("a-forgotten-previous-jwt-secret"))
+	oldEnc, err := crypto.NewEncryptor(oldKey[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	bogus, err := oldEnc.Encrypt("definitely-not-the-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Upsert(context.Background(), &models.TOTPDevice{
+		UserID: 10, SecretEncrypted: bogus, Enabled: true, // Secret: "" — no fallback
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = svc.Validate(context.Background(), 10, "123456")
+	if !errors.Is(err, ErrTOTPUnrecoverable) {
+		t.Fatalf("want ErrTOTPUnrecoverable, got %v", err)
 	}
 }

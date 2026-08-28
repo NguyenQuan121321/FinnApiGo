@@ -5,28 +5,145 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — enterprise readiness (branch `feat/enterprise-readiness`)
 
-### Removed
-- Removed the legacy email-OTP MFA feature entirely (model, repository, service, `/mfa/send-otp`, `/mfa/verify-otp`, OTP config knobs). TOTP is the only MFA mechanism.
+Execution of the enterprise-readiness program. Catalog items K3, X1–X2,
+S1–S3, O1–O3 and W1–W8 (key-provider seam, internal metrics listener, leader
+election, distributed tracing, passkeys/WebAuthn) are scoped and pending —
+see `docs/enterprise-review-reconciliation.md` for the full OPEN/DONE table.
+
+### Added
+- **JWT key rotation (K2)** — issued tokens carry a `kid` header (SHA-256
+  fingerprint of the signing secret); `JWT_SECRET_PREVIOUS` enables a
+  versioned keyset so rotation no longer invalidates every live session.
+  HS256-only verification (C5) preserved; kid-less legacy tokens are accepted
+  during the grace window. (`internal/jwt`)
+- **Release-mode key policy (K1)** — booting with `GIN_MODE=release` without
+  an explicit `RECOVERY_CODE_KEY` now refuses to start; dev mode keeps the
+  JWT-secret derivation with a loud warning. Silent derivation is gone.
+- **Log redaction (G2)** — a redacting `slog.Handler` wrapper
+  (`internal/logging`) replaces values of known secret-shaped attribute keys
+  (passwords, tokens, codes, cookies…) with `[REDACTED]` before they reach
+  the sink, at any nesting depth, including pre-attached `logger.With` attrs.
+- **Audit retention policy (G1)** — release mode with `AUDIT_RETENTION_DAYS`
+  unset emits a boot warning (policy decision: warning, not failure —
+  retention is a governance choice). Durable-audit-queue design note added at
+  `docs/audit-durable-queue-design.md` (implementation remains a non-goal).
+- **OpenAPI contract (A1)** — `docs/openapi.yaml` documents every public
+  endpoint (envelope, request/response schemas, security schemes) and is the
+  contract of record. The `internal/apidrift` test builds the real router and
+  fails CI on any path/method drift between spec and code.
+- **MySQL/Redis integration layer (T1)** — integration-tagged tests
+  (`-tags=integration`) run against real service containers in CI:
+  migration up/down + re-up proof (`TestMigrationUpDown_T1`), EXPLAIN plan
+  assertions for every hot-path query (`TestRefreshRotationQueryPlan_D1`),
+  and Redis fixed-window/guard semantics
+  (`TestRedisStore_Integration_FixedWindowAndGuards_T1`).
+- **Fuzz targets (T2)** — `FuzzJWTVerify` (parsing never panics, forged
+  types rejected), `FuzzTOTPCodeValidation` (accepted codes are exactly
+  well-formed 6-digit ASCII), `FuzzRecoveryCodeConsumption` (acceptance
+  agrees with exact match against the active set). 30-second smoke per target
+  in CI.
+- **Coverage floors (T3)** — CI fails below 73.0% (`internal/services`) and
+  91.0% (`internal/jwt`); ratchet up as coverage improves, never down.
+- **Security scans (T4)** — dedicated blocking `gosec` run (0 findings) and
+  a Trivy filesystem scan (go.mod vulnerabilities + Dockerfile/compose
+  misconfiguration, HIGH/CRITICAL) in CI.
+
+### Changed
+- Phase-0 reconciliation committed at
+  `docs/enterprise-review-reconciliation.md`: every external-review finding
+  marked OPEN / ALREADY-DONE with symbol-level evidence; six review claims
+  confirmed already fixed by the v2 hardening (CAS refresh revoke, used-token
+  index, AutoMigrate gating, retention job, fail-fast config, DSN UTC).
+
+### Verified (D1–D2, evidence in the enterprise phase report)
+- All refresh-rotation and audit-purge queries are index-served on MySQL 8
+  (EXPLAIN: `const` on `uni_refresh_tokens_token_hash`, `range` on
+  `PRIMARY`, `ref`/`range` on the user/created-at indexes — zero full scans;
+  asserted continuously by the integration suite).
+- Rotation hot path (Create + FindByHash + CAS Revoke) benchmarks at ~14 ms
+  per rotation against a local MySQL container, dominated by three sequential
+  network round-trips; the raw-SQL rewrite was REJECTED with this evidence
+  (GORM overhead is microseconds; query shapes are already optimal).
+
+## [1.7] — v2 hardening (PR #4, `refactor/p0-correctness` and follow-ups)
+
+Correctness, hardening, performance and reliability program (catalog
+C1–C11, A1–A8, P1–P4, R1–R4).
 
 ### Security
-- Redis store now fails CLOSED: `IncrBy` returns `math.MaxInt64` on Redis errors so every rate limiter denies instead of failing open; `SetNX` returns false. INCRBY+PEXPIRE run as one atomic Lua script.
-- Request IDs are UUIDv4 (the previous generator's last 8 chars were always `00000000`).
-- `recordFailedLogin` logs `IncrementFailedAttempts` failures instead of silently dropping them (silent failures meant lockouts never triggered).
-- New `DB_TLS` config appends `&tls=...` to the MySQL DSN for encrypted DB connections.
+- **C1** Refresh-token revocation via compare-and-set (`revoked = false`
+  guard + RowsAffected) — of two concurrent refreshes exactly one wins;
+  reuse is detected and audited.
+- **C2** Recovery-code consumption compare-and-set — a code cannot be
+  double-consumed by parallel requests.
+- **C3** Atomic failed-login counter — parallel failures all persist toward
+  lockout.
+- **C4** Fixed-window `IncrBy` with TTL anchored at the first increment —
+  counters reset under sustained load instead of staying locked.
+- **C5** JWT verification enforces issuer, required `exp`, HS256-only.
+- **C6** Sudo-gated re-enrollment can no longer disable active TOTP.
+- **C7** TOTP shared secrets sealed at rest with AES-256-GCM (legacy
+  plaintext rows lazily re-sealed on read).
+- **C8** Durable single-use token enforcement survives a store flush
+  (DB-backed jti guard as the backstop).
+- **C9** Login/TOTP successes no longer feed the failure windows.
+- **C10** Lockout cleared on password change; registration survives an email
+  outage (account persisted, audit records the send failure).
+- **C11** Re-registration of a stale unverified account completes instead of
+  leaking existence.
+- **A1** Store failure semantics split — counters fail OPEN (a Redis outage
+  must not become an auth outage), single-use guards fail CLOSED.
+- **A2** SMTP client: deadlines, context propagation, mandatory TLS transport.
+- **A3** Baseline security headers on every response (nosniff, no-referrer,
+  `Cache-Control: no-store`, optional HSTS via `HSTS_SECONDS`).
+- **A4** Auth denials log client IP + request id; request log gains
+  `client_ip`.
+- **A5** Rate limiting on the public token-consumption endpoints (refresh,
+  reset, verify).
+- **A6** Audit writer: dropped-entry metric, `Detail` truncation, insert-loss
+  visibility.
+- **A7** Access tokens embed the password version (`pwdver`) and are revoked
+  on credential change.
+- **A8** Console notifier refuses to log live tokens in release mode.
+- Shared global and per-IP verification-email resend circuit breakers;
+  blocked abuse is audited.
+- Passwords rejected above bcrypt's 72-byte limit during hashing and
+  comparison, preventing credential confusion from bcrypt truncation.
 
 ### Performance
-- AES-256-GCM cipher block is computed once at startup (`crypto.Encryptor`) instead of per Encrypt/Decrypt call.
-- In-memory store sweeper deletes expired keys in bounded batches (1000) instead of holding the global lock across the whole map.
-- Fixed an off-by-one that rejected request bodies of exactly 1 KiB on sonic-bound TOTP endpoints.
-- Graceful shutdown now drains the async audit writer before closing the DB pool (ordered flush).
+- **P1** Indexed, LIMIT-batched purge jobs replace OR-scan deletes.
+- **P2** Prometheus `/metrics` with process + custom availability metrics
+  (`finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`,
+  `finnapigo_rate_limited_requests_total`, `finnapigo_audit_buffer_depth`).
+- **P3** `net/http/pprof` on an internal port gated by `PPROF_ADDR`.
+- **P4** k6 load scenarios for login + refresh rotation with documented
+  baselines.
+- AES-256-GCM cipher block computed once at startup instead of per call;
+  in-memory store sweeper deletes expired keys in bounded batches; graceful
+  shutdown drains the async audit writer before closing the DB pool.
+
+### Reliability
+- **R1** golang-migrate replaces boot-time AutoMigrate (`MIGRATE_AUTO=true`
+  is the dev-only escape hatch; production migrates via `cmd/migrate`).
+- **R2** Fail-fast config loader — invalid numeric/duration/bool env values
+  refuse to boot; `DB_TLS` values validated.
+- **R3** DSN pins `loc=UTC` — DATETIME round-trips normalize to UTC.
+- **R4** Audit retention purge job behind `AUDIT_RETENTION_DAYS`.
+- Redis store failure semantics split (counters fail open, `SetNX` guards
+  fail closed); INCRBY+PEXPIRE run as one atomic Lua script.
+- Request IDs are UUIDv4 (the previous generator always emitted `00000000`
+  as the tail); `recordFailedLogin` failures are logged, not dropped.
 
 ### Quality
-- Structured logging via `log/slog` with a JSON default handler; request logs emit method/path/status/latency_ms/rid as fields.
-- Audit write and batch-insert failures are logged instead of silently dropped.
-- Hardened `.golangci.yml` (gosec, gocritic, exhaustive, nilerr, errorlint, unused, ineffassign) — 0 issues.
-- Removed the services-local `StoreProvider` interface; services now consume `store.Store` directly so the KV contract has one definition.
+- Structured `log/slog` JSON logging with observable audit writes; hardened
+  `.golangci.yml` (gosec, gocritic, exhaustive, nilerr, errorlint, unused,
+  ineffassign) — 0 issues.
+- Removed the legacy email-OTP MFA feature entirely — TOTP is the only MFA
+  mechanism.
+- Services consume `store.Store` directly; the KV contract has one
+  definition.
 
 ## [1.6] - 2026-08-07
 
@@ -74,7 +191,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 11 dedicated hardening tests in `hardening_test.go`
 - §7: Async audit logging via `AsyncAuditWriter` (buffered channel + background batch worker; sync fallback when `AUDIT_BUFFER_SIZE=0`)
 - §7: `ARCHITECTURE.md` documenting extension patterns for future modules
-- §8: `.github/workflows/ci.yml` — Go 1.24 CI pipeline (`go vet`, `golangci-lint`, `go test -race -cover`, `go build`, `govulncheck`)
+- §8: `.github/workflows/ci.yml` — CI pipeline (`go vet`, `golangci-lint`, `go test -race -cover`, `go build`, `govulncheck`)
 - §8: `.golangci.yml` — linter config (govet, staticcheck, errcheck, gosec, depguard)
 - §8: `CHANGELOG.md`
 - 7 new `AuthMiddleware` / `RequireRole` tests in `internal/middleware/auth_test.go`
@@ -86,11 +203,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `AuthService` and `MFAService` constructors accept `RateLimitConfig` and `CaptchaVerifier`
 - Velocity limiters now use `store.IncrBy` (shared when Redis is configured)
 - `isMySQLDup` uses `errors.As` instead of string matching
-- Bumped `gin-gonic/gin` from v1.10.0 to **v1.12.0**
+- Bumped `gin-gonic/gin`
 - Audit logging is now asynchronous via `AsyncAuditWriter` (wraps `AuditRepository`); wired in `main.go` with graceful flush on shutdown
 
 ### Removed
 - Dead code `var _ = errors.New` compile-time guard (replaced by depguard linter rule)
 
-### Notes
-- The per-IP token-bucket limiter (`internal/middleware/rate_limit.go`) stays in-memory even when Redis is configured — only the newer velocity/lockout counters are Redis-backed
+## [1.0.0] — initial public release
+
+Core auth (register, login, refresh rotation, password reset, email
+verification), TOTP MFA with single-use recovery codes, session & device
+management, Google OAuth sign-in, per-IP/per-account rate limiting, lockout
+with exponential backoff, audit logging, in-memory/Redis store seam, Bruno
+collection, k6 load scripts.

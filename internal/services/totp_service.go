@@ -1,6 +1,8 @@
 package services
 
 import (
+	"log/slog"
+
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -181,7 +183,7 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 		if secret, err = s.enc.Decrypt(secret); err != nil {
 			return nil, fmt.Errorf("open pending totp secret: %w", err)
 		}
-	} else if secret, err = s.openActiveSecret(d); err != nil {
+	} else if secret, err = s.openActiveSecret(ctx, d); err != nil {
 		return nil, err
 	}
 	if !totpValid(code, secret) {
@@ -234,7 +236,7 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 
 	// ---- 6-digit TOTP fast path ----
 	if len(code) == 6 {
-		secret, err := s.openActiveSecret(d)
+		secret, err := s.openActiveSecret(ctx, d)
 		if err != nil {
 			return err
 		}
@@ -298,7 +300,7 @@ func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code s
 		s.recordFailure(ctx, userID, "view codes: device not enabled")
 		return nil, ErrInvalidCode
 	}
-	secret, err := s.openActiveSecret(d)
+	secret, err := s.openActiveSecret(ctx, d)
 	if err != nil {
 		return nil, err
 	}
@@ -384,15 +386,39 @@ func (s *TOTPService) newRecoveryCodes(ctx context.Context, userID uint) ([]stri
 // openActiveSecret returns the device's active secret, decrypting the sealed
 // copy; rows written before encrypted storage existed fall back to their
 // plaintext Secret (lazy migration on read — C7).
-func (s *TOTPService) openActiveSecret(d *models.TOTPDevice) (string, error) {
+// openActiveSecret resolves the device's TOTP shared secret. The sealed copy
+// is authoritative; when it cannot be opened with the current key (key
+// rotated / JWT_SECRET-derived key changed — the K1/C7 rotation consequence)
+// the legacy plaintext column, if present, keeps the SAME secret valid and is
+// re-sealed under the current key immediately (lazy migration on read). A row
+// with neither a readable seal nor plaintext is unrecoverable and surfaces as
+// ErrTOTPUnrecoverable so the handler answers 4xx with a re-enroll hint
+// instead of an opaque 500.
+func (s *TOTPService) openActiveSecret(ctx context.Context, d *models.TOTPDevice) (string, error) {
 	if d.SecretEncrypted == "" {
 		return d.Secret, nil
 	}
 	plain, err := s.enc.Decrypt(d.SecretEncrypted)
-	if err != nil {
-		return "", fmt.Errorf("open totp secret: %w", err)
+	if err == nil {
+		return plain, nil
 	}
-	return plain, nil
+	// Sealed copy is unreadable under the current key.
+	if d.Secret == "" {
+		return "", fmt.Errorf("%w: sealed TOTP secret cannot be opened with the active key", ErrTOTPUnrecoverable)
+	}
+	// Legacy plaintext holds the same shared secret — heal the row. Best
+	// effort: a failed re-seal must not block the login; the plaintext path
+	// stays active and the next read retries.
+	resealed, sealErr := s.enc.Encrypt(d.Secret)
+	if sealErr == nil {
+		d.SecretEncrypted = resealed
+		if upsertErr := s.repo.Upsert(ctx, d); upsertErr != nil {
+			slog.Warn("totp: re-seal of legacy secret failed; plaintext path stays active", "user_id", d.UserID, "err", upsertErr)
+		}
+	} else {
+		slog.Warn("totp: could not re-seal legacy secret; plaintext path stays active", "user_id", d.UserID, "err", sealErr)
+	}
+	return d.Secret, nil //nolint:nilerr // plaintext keeps the ceremony working; healing is best-effort
 }
 
 // replayGuard enforces that a 6-digit TOTP code is consumed at most once per
@@ -447,6 +473,7 @@ func (s *TOTPService) recordSuccess(ctx context.Context, userID uint, event, det
 // place the per-user brute-force counter grows (C9: failures only). Wrapped
 // in a defer/recover because audit logging must NEVER break the auth flow.
 func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail string) {
+	TOTPFailures.Add(1)
 	if s.store != nil {
 		s.store.IncrBy(fmt.Sprintf("totp:fail:%d", userID), 1, s.cfg.TOTPAttemptWindow)
 	}

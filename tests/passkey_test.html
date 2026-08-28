@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FinnApiGo — Passkey Test Harness</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  h2 { border-bottom: 2px solid #333; padding-bottom: 6px; margin-top: 32px; }
+  button { padding: 10px 16px; margin: 6px 6px 6px 0; cursor: pointer; font-size: 14px; }
+  input { padding: 8px; width: 100%; box-sizing: border-box; margin: 4px 0; }
+  pre { background: #111; color: #0f0; padding: 12px; overflow-x: auto; font-size: 12px; border-radius: 6px; }
+  .ok { color: green; font-weight: bold; }
+  .err { color: red; font-weight: bold; }
+  label { font-size: 13px; color: #555; }
+</style>
+</head>
+<body>
+
+<h1>🔑 FinnApiGo — Passkey Test Harness</h1>
+<p>Standalone test page — NOT a real frontend; only for verifying the real WebAuthn flow in a browser.</p>
+
+<h2>0. Configuration</h2>
+<label>Base URL</label>
+<input id="baseUrl" value="http://localhost:8081">
+<label>Access Token (log in via Bruno first, paste it here)</label>
+<input id="accessToken" placeholder="eyJhbGciOi...">
+
+<h2>1. Register a new passkey (Registration)</h2>
+<label>Display name for this device (optional)</label>
+<input id="displayName" value="Laptop Windows Hello / macOS Touch ID">
+<button onclick="registerPasskey()">🆕 Register Passkey</button>
+
+<h2>2. Authenticate with a passkey (Step-up Authentication)</h2>
+<p style="font-size:13px;color:#555">The backend treats passkeys as a second factor on an ALREADY-authenticated session — an accessToken is required (same as step 1). Returns a fresh token pair on success.</p>
+<button onclick="authenticatePasskey()">🔓 Authenticate with Passkey</button>
+
+<h2>3. Registered passkeys</h2>
+<button onclick="listPasskeys()">📋 List passkeys</button>
+
+<h2>Output log</h2>
+<pre id="log">Ready...</pre>
+
+<script>
+const $ = id => document.getElementById(id);
+function log(msg, isErr) {
+  const el = $('log');
+  const cls = isErr ? 'err' : 'ok';
+  el.innerHTML += `\n<span class="${cls}">[${new Date().toLocaleTimeString()}] ${msg}</span>`;
+  el.scrollTop = el.scrollHeight;
+}
+function api(path) { return $('baseUrl').value.replace(/\/$/, '') + path; }
+function authHeaders() {
+  return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + $('accessToken').value.trim() };
+}
+
+// --- base64url <-> ArrayBuffer helpers (WebAuthn uses base64url, not plain base64) ---
+function b64urlToBuf(b64url) {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/').padEnd(b64url.length + (4 - b64url.length % 4) % 4, '=');
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
+function bufToB64url(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Convert the options JSON from the server (base64url strings) into real ArrayBuffers for the browser
+function decodeCreationOptions(opts) {
+  opts.challenge = b64urlToBuf(opts.challenge);
+  opts.user.id = b64urlToBuf(opts.user.id);
+  if (opts.excludeCredentials) {
+    opts.excludeCredentials = opts.excludeCredentials.map(c => ({ ...c, id: b64urlToBuf(c.id) }));
+  }
+  return opts;
+}
+function decodeRequestOptions(opts) {
+  opts.challenge = b64urlToBuf(opts.challenge);
+  if (opts.allowCredentials) {
+    opts.allowCredentials = opts.allowCredentials.map(c => ({ ...c, id: b64urlToBuf(c.id) }));
+  }
+  return opts;
+}
+
+// Convert the browser result (ArrayBuffers) back into base64url JSON for the server
+function credentialToJSON(cred, type) {
+  const out = {
+    id: cred.id,
+    rawId: bufToB64url(cred.rawId),
+    type: cred.type,
+  };
+  if (type === 'registration') {
+    out.response = {
+      clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+      attestationObject: bufToB64url(cred.response.attestationObject),
+    };
+  } else {
+    out.response = {
+      clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+      authenticatorData: bufToB64url(cred.response.authenticatorData),
+      signature: bufToB64url(cred.response.signature),
+      userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
+    };
+  }
+  return out;
+}
+
+async function registerPasskey() {
+  try {
+    log('Step 1/2: requesting challenge from server (BeginRegistration)...');
+    const beginRes = await fetch(api('/api/v1/auth/mfa/passkey/register/challenge'), {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ displayName: $('displayName').value }),
+    });
+    const beginData = await beginRes.json();
+    if (!beginRes.ok) throw new Error(JSON.stringify(beginData));
+    log('Received options: ' + JSON.stringify(beginData.data).slice(0, 200) + '...');
+
+    const options = decodeCreationOptions(beginData.data.publicKey || beginData.data);
+    log('Opening browser dialog (fingerprint/FaceID/Windows Hello)...');
+
+    const credential = await navigator.credentials.create({ publicKey: options });
+    log('Browser created the credential, sending verify to the server...');
+
+    const payload = credentialToJSON(credential, 'registration');
+    const finishRes = await fetch(api('/api/v1/auth/mfa/passkey/register/verify'), {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify(payload),
+    });
+    const finishData = await finishRes.json();
+    if (!finishRes.ok) throw new Error(JSON.stringify(finishData));
+    log('✅ PASSKEY REGISTRATION SUCCESSFUL: ' + JSON.stringify(finishData));
+  } catch (e) {
+    log('❌ ERROR: ' + e.message, true);
+    console.error(e);
+  }
+}
+
+async function authenticatePasskey() {
+  try {
+    log('Step 1/2: requesting challenge from server (BeginAuthentication)...');
+    const beginRes = await fetch(api('/api/v1/auth/mfa/passkey/authenticate/challenge'), {
+      method: 'POST', headers: authHeaders(), body: '{}',
+    });
+    const beginData = await beginRes.json();
+    if (!beginRes.ok) throw new Error(JSON.stringify(beginData));
+
+    const options = decodeRequestOptions(beginData.data.publicKey || beginData.data);
+    log('Opening browser dialog for authentication...');
+
+    const assertion = await navigator.credentials.get({ publicKey: options });
+    log('Browser assertion succeeded, sending verify to the server...');
+
+    const payload = credentialToJSON(assertion, 'authentication');
+    const finishRes = await fetch(api('/api/v1/auth/mfa/passkey/authenticate/verify'), {
+      method: 'POST', headers: authHeaders(), body: JSON.stringify(payload),
+    });
+    const finishData = await finishRes.json();
+    if (!finishRes.ok) throw new Error(JSON.stringify(finishData));
+    log('✅ PASSKEY AUTHENTICATION SUCCESSFUL: ' + JSON.stringify(finishData));
+    if (finishData.data && finishData.data.accessToken) {
+      $('accessToken').value = finishData.data.accessToken;
+      log('→ New accessToken automatically filled into the field above.');
+    }
+  } catch (e) {
+    log('❌ ERROR: ' + e.message, true);
+    console.error(e);
+  }
+}
+
+async function listPasskeys() {
+  try {
+    const res = await fetch(api('/api/v1/auth/mfa/passkeys'), { headers: authHeaders() });
+    const data = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(data));
+    log('📋 Registered passkeys: ' + JSON.stringify(data.data, null, 2));
+  } catch (e) {
+    log('❌ ERROR: ' + e.message, true);
+  }
+}
+</script>
+</body>
+</html>

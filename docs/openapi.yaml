@@ -1,0 +1,1013 @@
+openapi: 3.0.3
+info:
+  title: FinnApiGo Auth API
+  version: 1.0.0
+  description: |
+    Contract of record for the FinnApiGo authentication API.
+
+    - All responses use a common envelope: `{ "code": <http status>, "message": <text>, "data": <payload|null> }`.
+    - Access tokens are JWTs (HS256, `type: access`) sent as `Authorization: Bearer <accessToken>`.
+    - Refresh tokens are opaque strings, rotated on every use (the old token is consumed).
+    - Sudo-gated endpoints require the short-lived `X-Sudo-Token` minted by
+      `POST /api/v1/auth/mfa/totp/recovery-codes` (GitHub-style sudo mode).
+    - The Bruno collection (`Bruno/`) is the executable companion; this spec is the contract.
+
+    Drift between this file and the registered routes is flagged by the
+    `internal/apidrift` test (runs in CI). Validate manually with:
+    `python -c "import yaml,sys; yaml.safe_load(open('docs/openapi.yaml'))"`
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: health
+  - name: auth
+  - name: sessions
+  - name: mfa
+  - name: oauth
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness probe (no DB dependency)
+      operationId: healthz
+      responses:
+        '200':
+          description: Process alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthData'
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness probe (pings the database)
+      operationId: readyz
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthData'
+        '503':
+          description: Database unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthData'
+  /metrics:
+    get:
+      tags: [health]
+      summary: Prometheus scrape endpoint (operational)
+      description: |
+        Unauthenticated process metrics. MUST NOT be exposed publicly —
+        bind to an internal listener (see README operations section).
+      operationId: metrics
+      responses:
+        '200':
+          description: Prometheus text exposition
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Create an account
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created (verification email sent when SMTP configured)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Log in with email and password
+      description: |
+        Returns a full token pair, or an `mfaRequired` payload carrying a
+        short-lived `mfaToken` when TOTP is enabled (complete the login via
+        `/api/v1/auth/mfa/login-verify`). CAPTCHA may be required after
+        repeated failures from one IP.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful, or MFA required
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/LoginResponse'
+                  - $ref: '#/components/schemas/MFAPendingResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/refresh-token:
+    post:
+      tags: [auth]
+      summary: Rotate the refresh token
+      description: Consumes the presented refresh token (single use) and returns a fresh pair. Reuse of an already-rotated token is rejected and audited.
+      operationId: refreshToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPairResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/forgot-password:
+    post:
+      tags: [auth]
+      summary: Request a password-reset email
+      description: Always responds identically whether or not the account exists (no enumeration).
+      operationId: forgotPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/reset-password:
+    post:
+      tags: [auth]
+      summary: Reset the password with a single-use reset token
+      operationId: resetPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/verify-email:
+    post:
+      tags: [auth]
+      summary: Verify an email address with a single-use token
+      operationId: verifyEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyEmailRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/resend-verification:
+    post:
+      tags: [auth]
+      summary: Re-send the verification email
+      description: Rate-limited per email, per IP, and globally (anti-automation).
+      operationId: resendVerification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResendVerifyEmailRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/google/login:
+    get:
+      tags: [oauth]
+      summary: Start the Google OAuth flow (redirects to Google)
+      operationId: googleLogin
+      responses:
+        '302':
+          description: Redirect to Google consent
+        '500':
+          $ref: '#/components/responses/ServerError'
+        '501':
+          description: Google sign-in not configured
+
+  /api/v1/auth/google/callback:
+    get:
+      tags: [oauth]
+      summary: Google OAuth callback
+      operationId: googleCallback
+      parameters:
+        - in: query
+          name: code
+          schema: { type: string }
+        - in: query
+          name: state
+          schema: { type: string }
+      responses:
+        '200':
+          description: Login successful (token pair), or MFA required
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/LoginResponse'
+                  - $ref: '#/components/schemas/MFAPendingResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '501':
+          description: Google sign-in not configured
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoke one refresh token
+      security:
+        - bearerAuth: []
+      operationId: logout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/logout-all:
+    post:
+      tags: [auth]
+      summary: Revoke every active session of the caller
+      security:
+        - bearerAuth: []
+      operationId: logoutAll
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/change-password:
+    post:
+      tags: [auth]
+      summary: Change the password (revokes all sessions)
+      security:
+        - bearerAuth: []
+      operationId: changePassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/set-password:
+    post:
+      tags: [auth]
+      summary: First password for an OAuth-only account
+      description: Rejects 409 when the account already has a password (use change-password).
+      security:
+        - bearerAuth: []
+      operationId: setPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetPasswordRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Current user profile
+      security:
+        - bearerAuth: []
+      operationId: me
+      responses:
+        '200':
+          description: Profile fetched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/sessions:
+    get:
+      tags: [sessions]
+      summary: List the caller's active devices
+      security:
+        - bearerAuth: []
+      operationId: listSessions
+      responses:
+        '200':
+          description: Sessions fetched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/sessions/{id}:
+    delete:
+      tags: [sessions]
+      summary: Revoke one session by id (scoped to the caller)
+      security:
+        - bearerAuth: []
+      operationId: revokeSession
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/auth/mfa/login-verify:
+    post:
+      tags: [mfa]
+      summary: Complete a login pending TOTP
+      description: Requires the `mfaToken` (type mfa_pending) from /login as the bearer credential — a full access token is rejected here.
+      security:
+        - bearerAuth: []
+      operationId: mfaLoginVerify
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TOTPCodeRequest'
+      responses:
+        '200':
+          description: Login completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/totp/enable:
+    post:
+      tags: [mfa]
+      summary: Begin TOTP enrollment (returns secret + provisioning URI)
+      security:
+        - bearerAuth: []
+      operationId: enableTOTP
+      responses:
+        '200':
+          description: Enrollment pending verification
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TOTPEnableResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/totp/verify:
+    post:
+      tags: [mfa]
+      summary: Confirm enrollment with a current code (activates TOTP)
+      security:
+        - bearerAuth: []
+      operationId: verifyTOTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TOTPCodeRequest'
+      responses:
+        '200':
+          description: TOTP enabled — recovery codes displayed once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodesResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/totp/validate:
+    post:
+      tags: [mfa]
+      summary: Validate a TOTP code (re-authentication on an active session)
+      security:
+        - bearerAuth: []
+      operationId: validateTOTP
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TOTPCodeRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/totp/recovery-codes:
+    post:
+      tags: [mfa]
+      summary: Re-view saved recovery codes (requires a current TOTP code)
+      description: Also mints a short-lived sudo token for the regenerate endpoint.
+      security:
+        - bearerAuth: []
+      operationId: viewRecoveryCodes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TOTPCodeRequest'
+      responses:
+        '200':
+          description: Recovery codes + sudo token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodesViewResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkey/register/challenge:
+    post:
+      tags: [mfa]
+      summary: Begin passkey registration (WebAuthn PKC creation options)
+      description: Stages the ceremony challenge in the shared store (60s TTL, single use). Requires WEBAUTHN_RP_ID to be configured; otherwise the endpoint does not exist.
+      security:
+        - bearerAuth: []
+      operationId: passkeyRegisterChallenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasskeyBeginRequest'
+      responses:
+        '200':
+          description: PKC creation options (pass to navigator.credentials.create)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeyOptionsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkey/register/verify:
+    post:
+      tags: [mfa]
+      summary: Complete passkey registration (verify attestation, persist credential)
+      description: The request body is the verbatim WebAuthn attestation response (PublicKeyCredential JSON) — do not wrap or rebind it.
+      security:
+        - bearerAuth: []
+      operationId: passkeyRegisterVerify
+      responses:
+        '201':
+          description: Passkey registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeyRegisteredResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkey/authenticate/challenge:
+    post:
+      tags: [mfa]
+      summary: Begin passkey authentication (step-up login, PKC assertion options)
+      security:
+        - bearerAuth: []
+      operationId: passkeyAuthenticateChallenge
+      responses:
+        '200':
+          description: PKC assertion options (pass to navigator.credentials.get)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeyOptionsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkey/authenticate/verify:
+    post:
+      tags: [mfa]
+      summary: Complete passkey authentication and receive a fresh token pair
+      description: |
+        Verifies the assertion; a sign-count regression (cloned credential) revokes
+        the credential, records the `passkey.clone_detected` audit event, and refuses
+        the login. On success a standard token pair is issued.
+      security:
+        - bearerAuth: []
+      operationId: passkeyAuthenticateVerify
+      responses:
+        '200':
+          description: Login successful (same envelope as /login)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/passkeys:
+    get:
+      tags: [mfa]
+      summary: List the caller's registered passkeys (device management)
+      security:
+        - bearerAuth: []
+      operationId: listPasskeys
+      responses:
+        '200':
+          description: Passkeys fetched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PasskeysListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/mfa/passkeys/{id}:
+    delete:
+      tags: [mfa]
+      summary: Revoke one passkey (sudo-gated)
+      security:
+        - sudoAuth: []
+      operationId: revokePasskey
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageOnly'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/auth/mfa/totp/recovery-codes/regenerate:
+    post:
+      tags: [mfa]
+      summary: Regenerate recovery codes (sudo-gated)
+      security:
+        - sudoAuth: []
+      operationId: regenerateRecoveryCodes
+      responses:
+        '200':
+          description: New recovery codes displayed once
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecoveryCodesResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    sudoAuth:
+      type: apiKey
+      in: header
+      name: X-Sudo-Token
+
+  responses:
+    MessageOnly:
+      description: Operation acknowledged (data is null)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+    ValidationError:
+      description: Invalid request / validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+    Unauthorized:
+      description: Missing, invalid, expired, or wrong-type credential
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+    Forbidden:
+      description: Credential valid but insufficient (e.g. missing/expired sudo token)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+    NotFound:
+      description: Resource not found for the caller
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+    Conflict:
+      description: State conflict (e.g. account already has a password)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+    RateLimited:
+      description: Too many requests (rate limit)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+    ServerError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NullDataResponse'
+
+  schemas:
+    # ---- envelope ----
+    Envelope:
+      type: object
+      required: [code, message, data]
+      properties:
+        code:
+          type: integer
+          description: Mirrors the HTTP status code.
+        message:
+          type: string
+        data:
+          nullable: true
+    NullDataResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              nullable: true
+              default: null
+    HealthData:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                status:
+                  type: string
+                  example: ok
+                db:
+                  type: string
+                  enum: [up, skipped, error]
+
+    # ---- requests (handlers/dto.go) ----
+    RegisterRequest:
+      type: object
+      required: [username, email, password, fullName]
+      properties:
+        username: { type: string, minLength: 3, maxLength: 50 }
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, minLength: 8, maxLength: 128 }
+        fullName: { type: string, maxLength: 255 }
+        captchaToken: { type: string, description: Required only when CAPTCHA is configured. }
+        website: { type: string, description: Honeypot — must stay empty. }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+        password: { type: string, maxLength: 128 }
+        captchaToken: { type: string }
+    RefreshRequest:
+      type: object
+      required: [refreshToken]
+      properties:
+        refreshToken: { type: string }
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+    ResetPasswordRequest:
+      type: object
+      required: [token, newPassword]
+      properties:
+        token: { type: string }
+        newPassword: { type: string, minLength: 8, maxLength: 128 }
+    ChangePasswordRequest:
+      type: object
+      required: [oldPassword, newPassword]
+      properties:
+        oldPassword: { type: string, maxLength: 128 }
+        newPassword: { type: string, minLength: 8, maxLength: 128 }
+    SetPasswordRequest:
+      type: object
+      required: [password]
+      properties:
+        password: { type: string, minLength: 8, maxLength: 128 }
+    VerifyEmailRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string }
+    ResendVerifyEmailRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email, maxLength: 255 }
+    TOTPCodeRequest:
+      type: object
+      required: [code]
+      description: Accepts a 6-digit TOTP code or a recovery code (6..128 chars).
+      properties:
+        code: { type: string, minLength: 6, maxLength: 128 }
+    PasskeyBeginRequest:
+      type: object
+      properties:
+        displayName: { type: string, maxLength: 255, description: Human label for the new credential. }
+    PasskeyCredentialInfo:
+      type: object
+      properties:
+        id: { type: integer }
+        userId: { type: integer }
+        displayName: { type: string }
+        transports: { type: string, description: 'JSON array of transports, e.g. ["internal"].' }
+        attestationType: { type: string }
+        lastUsedAt: { type: string, format: date-time, nullable: true }
+        revoked: { type: boolean }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    # ---- payloads (services/dto.go) ----
+    UserProfile:
+      type: object
+      properties:
+        id: { type: integer }
+        username: { type: string }
+        email: { type: string }
+        fullName: { type: string }
+        role: { type: string }
+        isActive: { type: boolean }
+        isEmailVerified: { type: boolean }
+        createdAt: { type: string, format: date-time }
+    TokenPair:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresAt: { type: string, format: date-time, description: Access-token expiry. }
+    MFAPending:
+      type: object
+      properties:
+        mfaRequired: { type: boolean, enum: [true] }
+        mfaToken: { type: string, description: Short-lived mfa_pending JWT for login-verify. }
+    SessionInfo:
+      type: object
+      properties:
+        id: { type: integer }
+        ipAddress: { type: string }
+        userAgent: { type: string }
+        deviceName: { type: string }
+        locationEstimate: { type: string }
+        createdAt: { type: string, format: date-time }
+        lastActiveAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+
+    # ---- typed envelopes ----
+    RegisterResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                profile: { $ref: '#/components/schemas/UserProfile' }
+    LoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/UserProfile'
+                - $ref: '#/components/schemas/TokenPair'
+    MFAPendingResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/MFAPending' }
+    TokenPairResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/TokenPair' }
+    UserProfileResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/UserProfile' }
+    SessionsResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                sessions:
+                  type: array
+                  items: { $ref: '#/components/schemas/SessionInfo' }
+    TOTPEnableResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                secret: { type: string, description: Base32 TOTP shared secret — shown once. }
+                provisioningURI: { type: string }
+    RecoveryCodesResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                recoveryCodes:
+                  type: array
+                  items: { type: string }
+    PasskeyOptionsResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              description: Raw WebAuthn PublicKeyCredentialCreation / CredentialAssertion options — pass verbatim to the WebAuthn browser API.
+    PasskeyRegisteredResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                id: { type: integer }
+                displayName: { type: string }
+                transports: { type: string }
+                createdAt: { type: string, format: date-time }
+    PasskeysListResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                passkeys:
+                  type: array
+                  items: { $ref: '#/components/schemas/PasskeyCredentialInfo' }
+    RecoveryCodesViewResponse:
+      allOf:
+        - $ref: '#/components/schemas/Envelope'
+        - type: object
+          properties:
+            data:
+              type: object
+              properties:
+                recoveryCodes:
+                  type: array
+                  items: { type: string }
+                sudoToken: { type: string }
+                sudoExpiresInSec: { type: integer }

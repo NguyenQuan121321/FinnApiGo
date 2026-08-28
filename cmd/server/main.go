@@ -23,7 +23,9 @@ import (
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
+	"github.com/finnapigo/finnapigo/internal/jobs"
 	"github.com/finnapigo/finnapigo/internal/jwt"
+	"github.com/finnapigo/finnapigo/internal/logging"
 	"github.com/finnapigo/finnapigo/internal/metrics"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/models"
@@ -31,14 +33,17 @@ import (
 	"github.com/finnapigo/finnapigo/internal/routes"
 	"github.com/finnapigo/finnapigo/internal/services"
 	"github.com/finnapigo/finnapigo/internal/store"
+	"github.com/finnapigo/finnapigo/internal/tracing"
 )
 
 func main() {
 	// Structured JSON logs for the whole process — every slog call (including
 	// from libraries that use the default logger) emits machine-parseable JSON.
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+	// The redacting handler (G2) guarantees secret-shaped attributes never
+	// reach stdout, regardless of call-site discipline.
+	slog.SetDefault(slog.New(logging.NewRedactingHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	})))
+	}))))
 	if err := run(); err != nil {
 		slog.Error("finnapigo fatal", "err", err)
 		os.Exit(1)
@@ -51,6 +56,23 @@ func run() error {
 		return err
 	}
 	gin.SetMode(cfg.Server.GinMode)
+
+	// O1 — distributed tracing: no-op provider (and zero export overhead)
+	// unless OTEL_EXPORTER_OTLP_ENDPOINT is set. Flushed at shutdown.
+	setupTracing, err := tracing.Setup(context.Background())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = setupTracing(context.Background()) }()
+
+	// G1 — release mode must acknowledge the audit PII retention policy.
+	if msg := auditRetentionWarning(cfg); msg != "" {
+		slog.Warn(msg)
+	}
+	// X1 — release mode must acknowledge the metrics exposure policy.
+	if cfg.Server.MetricsAddr == "" && cfg.Server.GinMode == gin.ReleaseMode {
+		slog.Warn("metrics: METRICS_ADDR is unset in release mode — /metrics is served on the PUBLIC listener; set METRICS_ADDR to an internal address (e.g. 127.0.0.1:9090)")
+	}
 
 	// --- Database ---
 	db, err := database.Connect(cfg.DB)
@@ -69,7 +91,7 @@ func run() error {
 		if err := db.AutoMigrate(
 			&models.User{}, &models.RefreshToken{},
 			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
-			&models.OAuthIdentity{},
+			&models.OAuthIdentity{}, &models.PasskeyCredential{},
 		); err != nil {
 			return errors.Join(errors.New("auto-migrate failed"), err)
 		}
@@ -107,8 +129,11 @@ func run() error {
 		slog.Info("store: in-memory (single-instance mode)")
 	}
 
-	// --- JWT ---
-	jwtMgr := jwt.NewJWTManager(cfg.JWT.Secret, cfg.JWT.Issuer)
+	// --- JWT (K2: versioned keyset when JWT_SECRET_PREVIOUS is set) ---
+	jwtMgr := jwt.NewRotatingJWTManager(cfg.JWT.Secret, cfg.JWT.PreviousSecret, cfg.JWT.Issuer)
+	if cfg.JWT.PreviousSecret != "" && cfg.JWT.PreviousSecret != cfg.JWT.Secret {
+		slog.Info("jwt: rotation active — current + previous secrets accepted until legacy tokens expire")
+	}
 
 	// --- Notifier (§1.2: SMTP when configured, Console fallback) ---
 	smtpNotif := services.NewSMTPNotifier(cfg.SMTP.Host, cfg.SMTP.Port,
@@ -167,6 +192,27 @@ func run() error {
 		slog.Info("oauth: GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URL not set — Google sign-in disabled")
 	}
 
+	// --- Passkeys / WebAuthn (Phase 9) — enabled only when RP configured ---
+	var passkeyHandler *handlers.PasskeyHandler
+	if cfg.WebAuthn.RPID != "" {
+		passkeySvc, err := services.NewPasskeyService(
+			repositories.NewPasskeyRepository(db), userRepo, auditRepo, kvStore,
+			authSvc, services.PasskeyConfig{
+				RPDisplayName:         cfg.WebAuthn.RPDisplayName,
+				RPID:                  cfg.WebAuthn.RPID,
+				RPOrigins:             cfg.WebAuthn.RPOrigins,
+				AttestationPreference: cfg.WebAuthn.AttestationPreference,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("passkey: %w", err)
+		}
+		passkeyHandler = handlers.NewPasskeyHandler(passkeySvc)
+		slog.Info("passkey: WebAuthn enabled", "rp_id", cfg.WebAuthn.RPID)
+	} else {
+		slog.Info("passkey: WEBAUTHN_RP_ID not set — passkey endpoints disabled")
+	}
+
 	// --- Handlers ---
 	authHandler := handlers.NewAuthHandler(authSvc, captchaVerifier)
 	mfaHandler := handlers.NewMFAHandler(totpSvc, jwtMgr, cfg.JWT.SudoTTL)
@@ -176,8 +222,15 @@ func run() error {
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
 	defer rateLimiter.Close()
 
-	// P3 — optional pprof listener on a separate internal port.
-	defer startPProf(cfg.Server.PProfAddr)()
+	// --- Internal-only endpoints (X1/X2): metrics + pprof off the public API ---
+	metricsH := metrics.Handler(func() float64 { return float64(auditRepo.Buffered()) })
+	// X1 — when METRICS_ADDR is set, metrics leave the public router and are
+	// served on the dedicated internal listener below.
+	publicMetricsHandler := metricsH
+	if cfg.Server.MetricsAddr != "" {
+		publicMetricsHandler = nil
+	}
+	defer startInternalServers(cfg.Server.MetricsAddr, cfg.Server.PProfAddr, cfg.Server.MetricsToken, metricsH)()
 
 	// --- TOTP concurrency limiter (caps CPU-bound validations) ---
 	totpCluster := middleware.NewConcurrencyLimiter(cfg.Security.TOTPMaxConcurrent)
@@ -188,6 +241,7 @@ func run() error {
 		OAuth:               oauthHandler,
 		MFA:                 mfaHandler,
 		Sessions:            sessionHandler,
+		Passkey:             passkeyHandler,
 		JWT:                 jwtMgr,
 		RateLimit:           rateLimiter,
 		TOTPCluster:         totpCluster,
@@ -196,7 +250,9 @@ func run() error {
 		TrustedProxies:      cfg.Server.TrustedProxies,
 		HSTSSeconds:         cfg.Server.HSTSSeconds,
 		PwdVersion:          authSvc.CurrentPwdVersion,
-		Metrics:             metrics.Handler(func() float64 { return float64(auditRepo.Buffered()) }),
+		Metrics:             publicMetricsHandler,
+		Tracing:             true,
+		CORSAllowedOrigins:  cfg.Server.CORSAllowedOrigins,
 	})
 
 	// --- HTTP server with graceful shutdown ---
@@ -209,8 +265,11 @@ func run() error {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// Run token/used-token/audit-retention cleanup in the background.
-	go startCleanup(tokenRepo, usedTokenRepo, baseAuditRepo, cfg.Audit.RetentionDays)
+	// Run token/used-token/audit-retention cleanup in the background (S2):
+	// leader-elected via the shared store by default (exactly one replica
+	// runs it), with the RUN_JOBS tri-state as the explicit override.
+	stopJobs := startJobs(cfg, tokenRepo, usedTokenRepo, baseAuditRepo, kvStore)
+	defer stopJobs()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -251,12 +310,17 @@ func run() error {
 }
 
 // recoveryEncryptionKey resolves the AES-256 key that seals the re-viewable
-// copy of MFA recovery codes: RECOVERY_CODE_KEY (64-char hex) when provided,
-// otherwise a domain-separated SHA-256 derivation of JWT_SECRET. The fallback
-// keeps deployments without the extra variable working; a dedicated key is
-// still preferred so the two secrets rotate independently. Rotating either
-// orphans previously sealed codes — affected users regenerate a fresh set.
+// copy of MFA recovery codes (K1/K3): KEY_PROVIDER=file reads
+// <KEY_DIR>/recovery_codes.key; otherwise RECOVERY_CODE_KEY (64-char hex)
+// wins. Without either, release mode refuses to boot — silently deriving the
+// key from JWT_SECRET couples the two secrets: one leaked secret unravels
+// both token integrity and recovery-code confidentiality. Dev mode keeps the
+// derivation with a loud warning so local setups stay zero-config. Rotating
+// the key orphans previously sealed codes — users regenerate a fresh set.
 func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
+	if cfg.Security.KeyProvider == "file" {
+		return crypto.NewFileKeyProvider(cfg.Security.KeyDir).Retrieve(crypto.KeyNameRecoveryCodes)
+	}
 	if cfg.Auth.RecoveryCodeKey != "" {
 		key, err := hex.DecodeString(cfg.Auth.RecoveryCodeKey)
 		if err != nil || len(key) != crypto.KeyLen {
@@ -264,27 +328,47 @@ func recoveryEncryptionKey(cfg *config.Config) ([]byte, error) {
 		}
 		return key, nil
 	}
+	if cfg.Server.GinMode == gin.ReleaseMode {
+		return nil, errors.New("RECOVERY_CODE_KEY is required in release mode (set a dedicated 64-hex-char AES-256 key; deriving it from JWT_SECRET is disabled)")
+	}
 	if cfg.JWT.Secret == "" {
 		return nil, errors.New("cannot derive recovery-code key: JWT_SECRET is empty")
 	}
-	slog.Warn("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (configure a dedicated key for production)")
+	slog.Warn("recovery codes: RECOVERY_CODE_KEY not set — deriving key from JWT_SECRET (dev only; release mode refuses to boot without it)")
 	sum := sha256.Sum256([]byte(cfg.JWT.Secret + ":finnapigo:recovery-codes:v1"))
 	return sum[:], nil
 }
 
-// startCleanup periodically purges expired refresh tokens, used-token rows,
-// and — when auditRetentionDays > 0 — audit rows older than the retention
-// window (R4). Failures are logged but never fatal.
-func startCleanup(
+// auditRetentionWarning implements the G1 policy decision: retention is a
+// release-mode WARNING, not a boot failure. Retention is a data-governance
+// CHOICE (some deployments are contractually required to keep history), so
+// refusing to boot would force that choice under rollout pressure; instead
+// the operator gets an explicit, loud notice that audit rows — which carry
+// PII (email, IP) — are being kept forever. Dev mode stays silent.
+func auditRetentionWarning(cfg *config.Config) string {
+	if cfg.Server.GinMode != gin.ReleaseMode || cfg.Audit.RetentionDays > 0 {
+		return ""
+	}
+	return "audit retention: AUDIT_RETENTION_DAYS is unset in release mode — audit rows (PII: email, IP) are kept forever; set a retention window (see README PII/retention policy)"
+}
+
+// startJobs runs the token/used-token/audit-retention purge on a cadence
+// under the S2 policy: leader election via the shared store by default (a
+// single instance is always its own leader), RUN_JOBS=true to run
+// unconditionally on this replica, RUN_JOBS=false to disable here. Returns
+// the stop function for graceful shutdown.
+func startJobs(
+	cfg *config.Config,
 	tokenRepo *repositories.RefreshTokenRepository,
 	usedTokenRepo *repositories.UsedTokenRepository,
 	auditRepo *repositories.AuditRepository,
-	auditRetentionDays int,
-) {
-	ticker := time.NewTicker(15 * time.Minute)
-	defer ticker.Stop()
-	ctx := context.Background()
-	for range ticker.C {
+	kv store.Store,
+) (stop func()) {
+	const (
+		interval = 5 * time.Minute
+		lockTTL  = 15 * time.Minute // >= 2x interval: the claim outlives a missed tick
+	)
+	runOnce := func(ctx context.Context) {
 		now := time.Now()
 		if n, err := tokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			slog.Info("cleanup: purged expired refresh tokens", "count", n)
@@ -292,44 +376,91 @@ func startCleanup(
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			slog.Info("cleanup: purged expired used tokens", "count", n)
 		}
-		if auditRetentionDays > 0 {
-			cutoff := now.AddDate(0, 0, -auditRetentionDays)
+		if cfg.Audit.RetentionDays > 0 {
+			cutoff := now.AddDate(0, 0, -cfg.Audit.RetentionDays)
 			if n, err := auditRepo.PurgeOlderThan(ctx, cutoff); err == nil && n > 0 {
-				slog.Info("cleanup: purged audit rows past retention", "days", auditRetentionDays, "count", n)
+				slog.Info("cleanup: purged audit rows past retention", "days", cfg.Audit.RetentionDays, "count", n)
 			} else if err != nil {
 				slog.Error("cleanup: audit retention purge failed", "err", err)
 			}
 		}
 	}
+	switch {
+	case cfg.Server.RunJobs != nil && *cfg.Server.RunJobs:
+		slog.Warn("jobs: RUN_JOBS=true — background jobs run unconditionally on this replica (pin to exactly ONE replica)")
+		ctx, cancel := context.WithCancel(context.Background())
+		go jobs.RunWhileLeader(ctx, interval, runOnce)
+		return cancel
+	case cfg.Server.RunJobs != nil && !*cfg.Server.RunJobs:
+		slog.Info("jobs: RUN_JOBS=false — background jobs disabled on this replica")
+		return func() {}
+	default:
+		runner := jobs.NewLeaderRunner(kv, "cleanup", interval, lockTTL, runOnce)
+		runner.Start()
+		slog.Info("jobs: leader-elected background jobs active", "lock", "jobs:leader:cleanup", "interval", interval.String())
+		return runner.Stop
+	}
 }
 
-// startPProf serves net/http/pprof on a separate listener gated by
-// PPROF_ADDR (P3); empty address = disabled. It uses a private mux so the
-// pprof handlers are never reachable through the main API engine, and must
-// be bound to an internal address — pprof leaks runtime internals.
-func startPProf(addr string) func() {
-	if addr == "" {
-		return func() {}
+// startInternalServers binds the internal-only endpoints (X1/X2) on private
+// listeners that are never part of the public API engine:
+//
+//   - METRICS_ADDR → Prometheus /metrics (optionally Bearer-gated by
+//     METRICS_TOKEN). Empty = metrics stay on the public router (legacy dev
+//     behavior; warned about in release mode — see run()).
+//   - PPROF_ADDR → net/http/pprof under /debug/pprof/ (P3). Empty = disabled.
+//   - Both set to the SAME address → ONE internal server mounts both.
+//
+// Each listener uses a private mux and a bounded header timeout (G112).
+func startInternalServers(metricsAddr, pprofAddr, metricsToken string, metricsH http.Handler) (stopAll func()) {
+	var shutdowns []func()
+	mountPProf := func(mux *http.ServeMux) {
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/debug/pprof/", pprof.Index)
-	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
-	srv := &http.Server{
-		Addr: addr, Handler: mux,
-		ReadHeaderTimeout: 5 * time.Second, // gosec G112 — bound slow clients
-	}
-	go func() {
-		slog.Info("pprof: debug server listening", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("pprof: debug server failed", "addr", addr, "err", err)
+	startListener := func(name, addr string, mux *http.ServeMux) func() {
+		srv := &http.Server{
+			Addr: addr, Handler: mux,
+			ReadHeaderTimeout: 5 * time.Second, // gosec G112 — bound slow clients
 		}
-	}()
+		go func() {
+			slog.Info("internal server listening", "name", name, "addr", addr)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("internal server failed", "name", name, "addr", addr, "err", err)
+			}
+		}()
+		return func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(ctx)
+		}
+	}
+	switch {
+	case metricsAddr != "" && metricsAddr == pprofAddr:
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.BearerAuth(metricsToken, metricsH))
+		mountPProf(mux)
+		shutdowns = append(shutdowns, startListener("internal", metricsAddr, mux))
+	case metricsAddr != "":
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metrics.BearerAuth(metricsToken, metricsH))
+		shutdowns = append(shutdowns, startListener("metrics", metricsAddr, mux))
+		if pprofAddr != "" {
+			pprofMux := http.NewServeMux()
+			mountPProf(pprofMux)
+			shutdowns = append(shutdowns, startListener("pprof", pprofAddr, pprofMux))
+		}
+	case pprofAddr != "":
+		mux := http.NewServeMux()
+		mountPProf(mux)
+		shutdowns = append(shutdowns, startListener("pprof", pprofAddr, mux))
+	}
 	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(ctx)
+		for _, s := range shutdowns {
+			s()
+		}
 	}
 }

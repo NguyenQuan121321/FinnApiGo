@@ -1,6 +1,8 @@
 package jwt
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -33,16 +35,64 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-// JWTManager signs and parses tokens using a single HMAC-SHA256 secret.
+// JWTManager signs and parses tokens with HMAC-SHA256 over a versioned keyset
+// (K2). Signing always uses the current key and stamps its kid (a short
+// SHA-256 fingerprint of the key material) into the header; verification
+// resolves the key by kid so the previous secret stays valid during a
+// rotation (JWT_SECRET + JWT_SECRET_PREVIOUS). HS256-only enforcement (C5)
+// is unchanged.
 type JWTManager struct {
-	secret []byte
-	issuer string
+	issuer     string
+	current    []byte
+	currentKid string
+	keys       map[string][]byte // kid -> secret
+	// tryOrder lists kids current-first; it drives the fallback path for
+	// legacy tokens issued before kid headers existed.
+	tryOrder []string
 }
 
-// NewJWTManager constructs a JWTManager. The secret is captured as bytes so it
-// is not accidentally logged via %s formatting of a struct.
+// NewJWTManager constructs a single-key JWTManager. The secret is captured as
+// bytes so it is not accidentally logged via %s formatting of a struct.
 func NewJWTManager(secret, issuer string) *JWTManager {
-	return &JWTManager{secret: []byte(secret), issuer: issuer}
+	return newJWTManager([]byte(secret), nil, issuer)
+}
+
+// NewRotatingJWTManager constructs a manager that signs with current and
+// verifies tokens signed by current OR previous (K2). An empty or identical
+// previous secret degrades to a single-key keyset.
+func NewRotatingJWTManager(current, previous, issuer string) *JWTManager {
+	var prev []byte
+	if previous != "" && previous != current {
+		prev = []byte(previous)
+	}
+	return newJWTManager([]byte(current), prev, issuer)
+}
+
+func newJWTManager(current, previous []byte, issuer string) *JWTManager {
+	m := &JWTManager{
+		issuer:     issuer,
+		current:    current,
+		currentKid: kidFor(current),
+		keys:       make(map[string][]byte, 2),
+	}
+	m.keys[m.currentKid] = current
+	m.tryOrder = append(m.tryOrder, m.currentKid)
+	if len(previous) > 0 {
+		kid := kidFor(previous)
+		if _, dup := m.keys[kid]; !dup {
+			m.keys[kid] = previous
+			m.tryOrder = append(m.tryOrder, kid)
+		}
+	}
+	return m
+}
+
+// kidFor derives a stable, non-secret key identifier: the first 8 hex chars
+// of SHA-256(key). It fingerprints the key without exposing any key material
+// and needs no extra configuration.
+func kidFor(secret []byte) string {
+	sum := sha256.Sum256(secret)
+	return hex.EncodeToString(sum[:4])
 }
 
 // Issue builds and signs a token of the given type with the requested lifetime.
@@ -55,7 +105,7 @@ func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.
 	case TokenTypeReset, TokenTypeEmailVerify:
 		claims.ID = uuid.New().String()
 	}
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+	return m.sign(claims)
 }
 
 // IssueAccess issues an ACCESS token embedding the user's current password
@@ -64,7 +114,14 @@ func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.
 func (m *JWTManager) IssueAccess(userID uint, role, email string, ttl time.Duration, pwdVer int64) (string, error) {
 	claims := m.baseClaims(userID, role, email, TokenTypeAccess, ttl)
 	claims.PwdVer = pwdVer
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(m.secret)
+	return m.sign(claims)
+}
+
+// sign stamps the current kid and signs with the current key only.
+func (m *JWTManager) sign(claims *Claims) (string, error) {
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tok.Header["kid"] = m.currentKid
+	return tok.SignedString(m.current)
 }
 
 // baseClaims assembles the registered + custom claims shared by every token.
@@ -87,16 +144,41 @@ func (m *JWTManager) baseClaims(userID uint, role, email, tokenType string, ttl 
 
 // Verify validates the signature, expiry, and issuer. exp is REQUIRED (a
 // token without one never verifies) and the only accepted algorithm is
-// HS256 — the keyfunc additionally rejects the non-HMAC families. On success
+// HS256 — the keyfunc additionally rejects the non-HMAC families. Key
+// resolution (K2): a kid header selects exactly one key from the versioned
+// keyset (unknown kid ⇒ reject); kid-less legacy tokens are tried against
+// each keyset key, current first, for the rotation grace window. On success
 // it returns the typed claims. Callers must additionally check claims.Type
 // matches the expected purpose (Verify does not assume a single type).
 func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
+	if kid := peekKid(tokenStr); kid != "" {
+		key, ok := m.keys[kid]
+		if !ok {
+			return nil, fmt.Errorf("verify token: %w: %q", ErrUnknownKeyID, kid)
+		}
+		return m.parse(tokenStr, key)
+	}
+	var firstErr error
+	for i, kid := range m.tryOrder {
+		claims, err := m.parse(tokenStr, m.keys[kid])
+		if err == nil {
+			return claims, nil
+		}
+		if i == 0 {
+			firstErr = err
+		}
+	}
+	return nil, firstErr
+}
+
+// parse runs the full golang-jwt validation against one specific key.
+func (m *JWTManager) parse(tokenStr string, key []byte) (*Claims, error) {
 	claims := &Claims{}
 	tok, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrUnexpectedSigningMethod
 		}
-		return m.secret, nil
+		return key, nil
 	},
 		jwt.WithIssuer(m.issuer),
 		jwt.WithExpirationRequired(),
@@ -111,8 +193,21 @@ func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
 	return claims, nil
 }
 
+// peekKid reads the kid header WITHOUT verifying anything. The value is never
+// trusted for auth — Verify uses it only to pick a candidate key and then
+// validates the full signature against it.
+func peekKid(tokenStr string) string {
+	tok, _, err := jwt.NewParser().ParseUnverified(tokenStr, &jwt.MapClaims{})
+	if err != nil {
+		return ""
+	}
+	kid, _ := tok.Header["kid"].(string)
+	return kid
+}
+
 // Sentinel errors for JWT operations.
 var (
 	ErrUnexpectedSigningMethod = errors.New("unexpected jwt signing method")
 	ErrInvalidToken            = errors.New("invalid token")
+	ErrUnknownKeyID            = errors.New("unknown jwt key id (kid)")
 )

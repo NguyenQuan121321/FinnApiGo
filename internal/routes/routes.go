@@ -9,6 +9,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	otelgin "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
@@ -42,6 +44,17 @@ type Deps struct {
 	// credential change (A7); typically services.AuthService.CurrentPwdVersion.
 	// Nil disables the check.
 	PwdVersion middleware.VersionSource
+	// Passkey serves the WebAuthn ceremonies (Phase 9). Nil = endpoints not
+	// registered (passkeys disabled — the only approved API extension).
+	Passkey *handlers.PasskeyHandler
+	// Tracing installs the otelgin middleware (O1) so every request carries a
+	// span context; O2's request-log enrichment reads it. Enable it whenever
+	// a TracerProvider is configured — it is a no-op provider when unset.
+	Tracing bool
+	// CORSAllowedOrigins is the strict browser-origin allowlist for
+	// cross-origin API calls (web frontends, test harnesses). Empty = no
+	// CORS behavior.
+	CORSAllowedOrigins []string
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -58,6 +71,17 @@ func Register(deps Deps) *gin.Engine {
 	// list restricts header trust to exactly those peers.
 	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
+	// Browser clients (frontends, test harnesses) on another origin need the
+	// allowlisted CORS headers, and their preflight OPTIONS must never fall
+	// through to a 404.
+	if len(deps.CORSAllowedOrigins) > 0 {
+		r.Use(middleware.CORS(deps.CORSAllowedOrigins))
+	}
+	// O1 — the span must start BEFORE requestLogger so the log line (emitted
+	// after c.Next()) can carry the span's trace_id/span_id (O2).
+	if deps.Tracing {
+		r.Use(otelgin.Middleware("finnapigo"))
+	}
 	r.Use(requestLogger())
 	// A3 — baseline security headers on every response: nosniff, no-referrer,
 	// Cache-Control: no-store (this is an auth API — nothing is cacheable),
@@ -176,6 +200,23 @@ func Register(deps Deps) *gin.Engine {
 		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.MFA.ViewRecoveryCodes)
 	}
 
+	// ---- Passkey / WebAuthn (Phase 9 — the ONLY approved API extension) ----
+	// POST /api/v1/auth/mfa/passkey/register/challenge + /verify — the
+	// registration ceremony (W4). The verify body is the verbatim WebAuthn
+	// attestation response, so no body-binding middleware may consume it.
+	if deps.Passkey != nil {
+		mfa.POST("/passkey/register/challenge", deps.RateLimit.Handler(), deps.Passkey.BeginRegistration)
+		mfa.POST("/passkey/register/verify", deps.RateLimit.Handler(), deps.Passkey.FinishRegistration)
+		// Authentication ceremony (W5): step-up login with a registered
+		// passkey; issues a fresh standard token pair on success.
+		mfa.POST("/passkey/authenticate/challenge", deps.RateLimit.Handler(), deps.Passkey.BeginAuthentication)
+		mfa.POST("/passkey/authenticate/verify", deps.RateLimit.Handler(), deps.Passkey.FinishAuthentication)
+		// Device management (W6): list, and sudo-gated revoke — a stolen
+		// access token alone cannot strip a user's credentials.
+		mfa.GET("/passkeys", deps.Passkey.List)
+		mfa.DELETE("/passkeys/:id", deps.RateLimit.Handler(), middleware.SudoMiddleware(deps.JWT), deps.Passkey.Revoke)
+	}
+
 	// ---- Recovery-code regeneration (GitHub-style sudo mode) ----
 	// POST /api/v1/auth/mfa/totp/recovery-codes/regenerate — requires the
 	// X-Sudo-Token minted by the view endpoint above (which itself demands a
@@ -207,14 +248,30 @@ func requestLogger() gin.HandlerFunc {
 		// particular) read the same resolution via c.ClientIP() themselves.
 		status := c.Writer.Status()
 		latency := time.Since(start)
-		slog.Info("request",
+		// O2 — correlate the log line with the request span. With tracing
+		// enabled (or an incoming traceparent) the fields carry the same
+		// trace/span IDs the span exports; otherwise they are omitted.
+		args := []any{
 			"method", c.Request.Method,
 			"path", c.Request.URL.Path,
 			"status", status,
 			"latency_ms", latency.Milliseconds(),
 			"client_ip", c.ClientIP(),
 			"rid", requestID,
-		)
+		}
+		if sc := oteltrace.SpanContextFromContext(c.Request.Context()); sc.IsValid() {
+			args = append(args, "trace_id", sc.TraceID().String(), "span_id", sc.SpanID().String())
+		}
+		// 5xx responses carry the server-side reason — surface it, otherwise
+		// an internal failure is invisible behind the bare status code.
+		if status >= 500 {
+			if len(c.Errors) > 0 {
+				args = append(args, "err", c.Errors.String())
+			}
+			slog.Error("request", args...)
+			return
+		}
+		slog.Info("request", args...)
 	}
 }
 

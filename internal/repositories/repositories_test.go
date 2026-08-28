@@ -29,7 +29,7 @@ func testDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}, &models.PasskeyCredential{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
