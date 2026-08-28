@@ -55,6 +55,8 @@ type PasskeyService interface {
 	FinishRegistration(ctx context.Context, userID uint, r *http.Request) (*models.PasskeyCredential, error)
 	BeginAuthentication(ctx context.Context, userID uint) (any, error)
 	FinishAuthentication(ctx context.Context, userID uint, r *http.Request) (*PasskeyAuthResult, error)
+	List(ctx context.Context, userID uint) ([]models.PasskeyCredential, error)
+	Revoke(ctx context.Context, id, userID uint) error
 }
 
 type passkeyService struct {
@@ -370,6 +372,27 @@ func (s *passkeyService) completeAuthentication(ctx context.Context, userID uint
 		return nil, err
 	}
 	return &PasskeyAuthResult{TokenPair: pair, Profile: profile}, nil
+}
+
+// ----- 9D — device management (W6) -----
+
+// List returns the caller's registered passkeys (active only). last_used_at
+// and the sign counter are maintained by the authentication ceremony.
+func (s *passkeyService) List(ctx context.Context, userID uint) ([]models.PasskeyCredential, error) {
+	return s.repo.ListByUser(ctx, userID, false)
+}
+
+// Revoke removes a credential from active use (user-initiated device
+// removal). The row stays for clone forensics; IDOR scoping is in the repo.
+func (s *passkeyService) Revoke(ctx context.Context, id, userID uint) error {
+	if err := s.repo.RevokeByID(ctx, id, userID); err != nil {
+		return ErrSessionNotFound // uniform "no such device" semantics
+	}
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &userID, Event: models.AuditEventPasskeyRevoked,
+		Success: true, Detail: "device revoked by user",
+	})
+	return nil
 }
 
 // rowIDByCredential resolves the DB row id for a verified credential.

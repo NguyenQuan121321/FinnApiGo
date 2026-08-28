@@ -3,10 +3,12 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/response"
 	"github.com/finnapigo/finnapigo/internal/services"
 )
@@ -117,4 +119,42 @@ func (h *PasskeyHandler) FinishAuthentication(c *gin.Context) {
 		Profile:   result.Profile,
 		TokenPair: result.TokenPair,
 	})
+}
+
+// List returns the caller's registered passkeys (device management, W6).
+func (h *PasskeyHandler) List(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	rows, err := h.svc.List(c.Request.Context(), uid)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	if rows == nil {
+		rows = []models.PasskeyCredential{}
+	}
+	response.Respond(c, http.StatusOK, "passkeys fetched", gin.H{"passkeys": rows})
+}
+
+// Revoke removes one passkey. The route mounts SudoMiddleware: a stolen
+// access token alone cannot strip a user's credentials (W6).
+func (h *PasskeyHandler) Revoke(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Respond(c, http.StatusBadRequest, "invalid passkey id", nil)
+		return
+	}
+	if err := h.svc.Revoke(c.Request.Context(), uint(id), uid); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "passkey revoked", nil)
 }

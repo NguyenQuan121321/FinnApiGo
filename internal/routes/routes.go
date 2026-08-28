@@ -201,6 +201,10 @@ func Register(deps Deps) *gin.Engine {
 		// passkey; issues a fresh standard token pair on success.
 		mfa.POST("/passkey/authenticate/challenge", deps.RateLimit.Handler(), deps.Passkey.BeginAuthentication)
 		mfa.POST("/passkey/authenticate/verify", deps.RateLimit.Handler(), deps.Passkey.FinishAuthentication)
+		// Device management (W6): list, and sudo-gated revoke — a stolen
+		// access token alone cannot strip a user's credentials.
+		mfa.GET("/passkeys", deps.Passkey.List)
+		mfa.DELETE("/passkeys/:id", deps.RateLimit.Handler(), middleware.SudoMiddleware(deps.JWT), deps.Passkey.Revoke)
 	}
 
 	// ---- Recovery-code regeneration (GitHub-style sudo mode) ----

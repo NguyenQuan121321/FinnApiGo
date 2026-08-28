@@ -275,3 +275,43 @@ func TestPasskey_CloneDetection_RevokesAndAudits_W5(t *testing.T) {
 		t.Fatalf("W5: usage maintenance missing: %+v", freshRow)
 	}
 }
+
+// TestPasskey_DeviceManagement_ListAndRevoke_W6 — the W6 gate: the device
+// list shows only active credentials; revocation is user-scoped (IDOR-safe)
+// and audited; the previously used fake repo drives the semantics.
+func TestPasskey_DeviceManagement_ListAndRevoke_W6(t *testing.T) {
+	svc, repo, users, _ := newPasskeyTestService(t)
+	u := pkUser(t, users, "pk-devices")
+	other := pkUser(t, users, "pk-other")
+	ctx := context.Background()
+
+	keep := &models.PasskeyCredential{UserID: u.ID, CredentialID: []byte("cred-keep"), PublicKey: []byte{1}, DisplayName: "Keep"}
+	drop := &models.PasskeyCredential{UserID: u.ID, CredentialID: []byte("cred-drop"), PublicKey: []byte{1}, DisplayName: "Drop"}
+	alien := &models.PasskeyCredential{UserID: other.ID, CredentialID: []byte("cred-alien"), PublicKey: []byte{1}}
+	for _, row := range []*models.PasskeyCredential{keep, drop, alien} {
+		if err := repo.Create(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := svc.List(ctx, u.ID)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("W6: list = %d rows, err %v; want 2 (only the caller's)", len(rows), err)
+	}
+
+	// IDOR: revoking another user's credential fails uniformly.
+	if err := svc.Revoke(ctx, alien.ID, u.ID); err == nil {
+		t.Fatal("W6: cross-user revoke must fail")
+	}
+	if err := svc.Revoke(ctx, drop.ID, u.ID); err != nil {
+		t.Fatalf("W6: own revoke failed: %v", err)
+	}
+	rows, _ = svc.List(ctx, u.ID)
+	if len(rows) != 1 || rows[0].DisplayName != "Keep" {
+		t.Fatalf("W6: revoked credential must leave the list: %+v", rows)
+	}
+	// Double revoke fails.
+	if err := svc.Revoke(ctx, drop.ID, u.ID); err == nil {
+		t.Fatal("W6: double revoke must fail")
+	}
+}
