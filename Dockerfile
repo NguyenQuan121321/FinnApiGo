@@ -10,12 +10,16 @@ COPY . .
 # Static-ish build; CGO disabled so the binary runs on the slim final image.
 ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -ldflags="-s -w" -o /out/finnapigo ./cmd/server
+# The deploy-step binary: Render Release Command runs `/app/migrate up` before
+# the new release serves traffic (R1 — production never auto-migrates).
+RUN go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -u 10001 app
 WORKDIR /app
 COPY --from=builder /out/finnapigo /app/finnapigo
+COPY --from=builder /out/migrate /app/migrate
 USER app
 EXPOSE 8080
 ENTRYPOINT ["/app/finnapigo"]
