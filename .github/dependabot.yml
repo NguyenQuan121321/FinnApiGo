@@ -1,0 +1,33 @@
+# Automated dependency freshness (anti-technical-debt policy).
+# Weekly review cadence: minor/patch bumps are grouped into a single PR to keep
+# review noise low; majors land as individual PRs so breaking changes are
+# reviewed one at a time. Security updates are always opened immediately,
+# independent of the schedule.
+version: 2
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

@@ -12,19 +12,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
           cache: true
 
       - name: Go Vet
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0 (SHA-pinned)
+        with:
+          version: v2.12.2 # pinned to match the local dev toolchain
 
       - name: Go Test
         run: go test ./... -race -cover
@@ -67,12 +69,12 @@ jobs:
           --health-retries=10
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
           cache: true
 
       # T1 — the integration-tagged suite against REAL service containers:
@@ -89,12 +91,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
           cache: true
 
       # T2 — 30-second smoke per fuzz target. Full-time runs are local/nightly.
@@ -112,12 +114,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
           cache: true
 
       # T3 — ratchet floors set at the current measured coverage (services
@@ -141,12 +143,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.25.13'
+          go-version: '1.26.7'
           cache: true
 
       # T4a — dedicated gosec run (the linter already includes gosec; this
@@ -159,10 +161,28 @@ jobs:
       # T4b — container/config scan: Dockerfile + compose misconfigurations
       # and dependency-lock vulnerabilities (go.mod/go.sum).
       - name: Trivy filesystem/config scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (SHA-pinned)
         with:
           scan-type: fs
           scanners: vuln,misconfig
           severity: HIGH,CRITICAL
           exit-code: '1'
           ignore-unfixed: true
+
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
+
+      # Supply-chain transparency (NIST SSDF PS.3.2, SLSA): every push emits a
+      # CycloneDX SBOM of the module graph (go.mod + go.sum) as a build
+      # artifact. Consumers and incident response can diff component inventories
+      # release over release.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2 (SHA-pinned)
+        with:
+          format: cyclonedx-json
+          artifact-name: finnapigo-sbom.cdx.json
+          upload-artifact: true
