@@ -71,14 +71,20 @@ func (a *softAuthenticator) authData(flags byte, counter uint32, attested bool) 
 		}
 		_ = binary.Write(buf, binary.BigEndian, uint16(credLen)) // #nosec G115 -- bounded above
 		buf.Write(a.credID)
-		// COSE EC2 P-256 public key (algorithm -7).
-		pub := a.priv.PublicKey
+		// COSE EC2 P-256 public key (algorithm -7). PublicKey.Bytes() is the
+		// SEC1 uncompressed encoding 0x04 || X || Y (Go 1.26+); the raw X/Y
+		// big.Int accessors are deprecated because they invite coordinate
+		// munging on cryptographic values.
+		raw, err := a.priv.PublicKey.Bytes()
+		if err != nil {
+			panic(err) // P-256 is always supported
+		}
 		cose := map[int64]any{
-			1:  int64(2), // kty: EC2
+			1:  int64(2),  // kty: EC2
 			3:  int64(-7), // alg: ES256
 			-1: int64(1),  // crv: P-256
-			-2: pad32(pub.X.Bytes()),
-			-3: pad32(pub.Y.Bytes()),
+			-2: raw[1:33],  // x: fixed-width 32-byte coordinate
+			-3: raw[33:65], // y: fixed-width 32-byte coordinate
 		}
 		coseBytes, err := webauthncbor.Marshal(cose)
 		if err != nil {
@@ -87,15 +93,6 @@ func (a *softAuthenticator) authData(flags byte, counter uint32, attested bool) 
 		buf.Write(coseBytes)
 	}
 	return buf.Bytes()
-}
-
-func pad32(b []byte) []byte {
-	if len(b) == 32 {
-		return b
-	}
-	out := make([]byte, 32)
-	copy(out[32-len(b):], b)
-	return out
 }
 
 func (a *softAuthenticator) attestationObject(authData []byte) []byte {

@@ -1,5 +1,7 @@
 # Multi-stage build for FinnApiGo.
-FROM golang:1.25-alpine AS builder
+# Builder pins an exact supported Go patch release (1.25 is EOL since Go 1.27
+# shipped); Dependabot keeps both pins current.
+FROM golang:1.26.7-alpine AS builder
 WORKDIR /src
 
 # Cache deps first.
@@ -14,7 +16,8 @@ RUN go build -ldflags="-s -w" -o /out/finnapigo ./cmd/server
 # the new release serves traffic (R1 — production never auto-migrates).
 RUN go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
-FROM alpine:3.20
+# Runtime base must stay inside Alpine's support window (3.20 EOL 2026-04).
+FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -u 10001 app
 WORKDIR /app
