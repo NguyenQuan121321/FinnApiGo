@@ -16,6 +16,11 @@ import (
 const (
 	smtpDialTimeout = 10 * time.Second
 	smtpCmdTimeout  = 10 * time.Second
+	// smtpTotalTimeout bounds the WHOLE delivery — the per-command deadline
+	// alone lets a relay that accepts then stalls each of the ~7 SMTP steps
+	// pin a request goroutine for ~70s. One overall cap keeps the worst case
+	// predictable regardless of how many commands the relay dribbles out.
+	smtpTotalTimeout = 45 * time.Second
 )
 
 // SMTPNotifier is a real Notifier backed by net/smtp (§1.2). It is selected
@@ -53,6 +58,9 @@ func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error
 	if !n.Enabled() {
 		return fmt.Errorf("smtp notifier not configured")
 	}
+	// Overall delivery cap (on top of the per-command deadlines below).
+	ctx, cancel := context.WithTimeout(ctx, smtpTotalTimeout)
+	defer cancel()
 	addr := net.JoinHostPort(n.host, n.port)
 	msg := strings.Join([]string{
 		"From: " + n.from,
@@ -136,4 +144,18 @@ func (n *SMTPNotifier) SendPasswordReset(ctx context.Context, to, resetToken str
 func (n *SMTPNotifier) SendEmailVerification(ctx context.Context, to, verifyToken string) error {
 	return n.send(ctx, to, "Verify your email",
 		"Use this token to verify your email: "+verifyToken+"\n\nIf you did not create an account, ignore this email.")
+}
+
+// SendNewLoginAlert delivers the transparency notification for a sign-in from
+// a previously unseen IP. The message intentionally carries no tokens or
+// links — it is informational (and unactionable links train users to click
+// email links).
+func (n *SMTPNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceName string) error {
+	body := "A new sign-in to your account was detected.\n\n" +
+		"IP address: " + ip + "\n" +
+		"Device:     " + deviceName + "\n" +
+		"Time (UTC): " + time.Now().UTC().Format(time.RFC3339) + "\n\n" +
+		"If this was you, no action is needed. If you do not recognize this " +
+		"sign-in, change your password immediately and revoke unknown sessions."
+	return n.send(ctx, to, "New sign-in to your account", body)
 }

@@ -80,5 +80,5 @@ func TestMetrics_AuthOutcomeCountersExposed_O3(t *testing.T) {
 	}
 }
 
-func itoa(n int) string { return strconv.FormatInt(int64(n), 10) }
+func itoa(n int) string  { return strconv.FormatInt(int64(n), 10) }
 func name(string) string { return "" }

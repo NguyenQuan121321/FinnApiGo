@@ -50,6 +50,11 @@ type LeaderRunner struct {
 	stopOnce sync.Once
 	stopCh   chan struct{}
 	doneCh   chan struct{}
+	// jobCtx drives fn and is canceled by Stop so an in-flight tick aborts
+	// promptly instead of running to completion (its documented contract).
+	jobCtx      context.Context
+	jobCancel   context.CancelFunc
+	startedOnce sync.Once
 }
 
 // NewLeaderRunner builds a runner named name (the lock key derives from it).
@@ -69,30 +74,44 @@ func NewLeaderRunner(kv store.Store, name string, interval, lockTTL time.Duratio
 	}
 }
 
-// Start launches the election + tick loop. Non-blocking.
+// Start launches the election + tick loop. Non-blocking; safe to call once.
 func (r *LeaderRunner) Start() {
-	go r.loop()
+	r.startedOnce.Do(func() {
+		r.jobCtx, r.jobCancel = context.WithCancel(context.Background())
+		go r.loop()
+	})
 }
 
-// Stop cancels the loop and waits for it to exit. Safe to call multiple times.
+// Stop cancels the tick loop AND the in-flight job context, then waits for
+// the loop to exit. Safe to call multiple times.
 func (r *LeaderRunner) Stop() {
-	r.stopOnce.Do(func() { close(r.stopCh) })
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+		if r.jobCancel != nil {
+			r.jobCancel()
+		}
+	})
 	<-r.doneCh
 }
 
 // isLeader claims or refreshes the job lock and reports whether this instance
-// may run the tick.
+// may run the tick. Renewal prefers the atomic compare-and-renew capability
+// (OwnerLockManager): a bare Get→Renew sequence can extend ANOTHER instance's
+// freshly acquired lock after our own claim expires between the two calls —
+// a split-brain window where two leaders run the job.
 func (r *LeaderRunner) isLeader() bool {
 	if r.kv.SetNX(r.lockKey, r.self, r.lockTTL) {
 		return true // freshly acquired
 	}
-	// Already locked — if it is OUR lock, renew it (keeps leadership stable).
+	// Already locked — renew ONLY if the lock is still verifiably ours.
+	if olm, canCAS := r.kv.(store.OwnerLockManager); canCAS {
+		return olm.RenewIfOwner(r.lockKey, r.self, r.lockTTL)
+	}
+	// Legacy fallback: check-then-renew (test fakes without the capability).
 	if owner, ok := r.kv.Get(r.lockKey); ok && owner == r.self {
 		if renewer, canRenew := r.kv.(Renewer); canRenew {
 			return renewer.Renew(r.lockKey, r.lockTTL)
 		}
-		// Without Renew the claim lapses at lockTTL and re-acquisition races
-		// cleanly: exactly one SetNX wins.
 	}
 	return false
 }
@@ -104,20 +123,30 @@ func (r *LeaderRunner) loop() {
 	for {
 		select {
 		case <-r.stopCh:
-			if r.isSelfLeader() {
-				r.kv.Delete(r.lockKey) // release promptly so failover is fast
-			}
+			r.releaseLock()
 			return
 		case <-ticker.C:
 			if !r.isLeader() {
 				continue
 			}
-			func() {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				r.fn(ctx)
-			}()
+			// fn runs on the runner-scoped context: Stop() cancels it, so a
+			// long-running purge aborts at the next ctx-aware checkpoint
+			// instead of outliving shutdown.
+			r.fn(r.jobCtx)
 		}
+	}
+}
+
+// releaseLock drops our claim so failover is fast — via compare-and-delete
+// when the store supports it (deleting only a lock we still own), else the
+// legacy check-then-delete.
+func (r *LeaderRunner) releaseLock() {
+	if olm, canCAS := r.kv.(store.OwnerLockManager); canCAS {
+		olm.DeleteIfOwner(r.lockKey, r.self)
+		return
+	}
+	if r.isSelfLeader() {
+		r.kv.Delete(r.lockKey)
 	}
 }
 

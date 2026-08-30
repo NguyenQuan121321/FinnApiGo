@@ -36,6 +36,8 @@ var secretKeys = map[string]struct{}{
 	"pwd":           {},
 	"secret":        {},
 	"client_secret": {},
+	"secret_key":    {},
+	"private_key":   {},
 	"api_key":       {},
 	"apikey":        {},
 	"token":         {},
@@ -46,6 +48,8 @@ var secretKeys = map[string]struct{}{
 	"recovery_code": {},
 	"cookie":        {},
 	"set_cookie":    {},
+	"credentials":   {},
+	"dsn":           {},
 }
 
 // RedactingHandler wraps any slog.Handler and strips secret-shaped values.

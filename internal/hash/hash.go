@@ -80,3 +80,17 @@ func GenerateOpaqueToken() (string, error) {
 func ConstantTimeCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
+
+// MatchRecoveryCode hashes the candidate and returns the index of the stored
+// code hash it matches, or -1. This IS the acceptance logic the TOTP recovery
+// path uses (SHA-256 + constant-time compare) — extracted so the service and
+// its fuzz target exercise the same function and can never drift apart.
+func MatchRecoveryCode(candidate string, codeHashes []string) int {
+	want := HashRecoveryCode(candidate)
+	for i := range codeHashes {
+		if ConstantTimeCompare(codeHashes[i], want) {
+			return i
+		}
+	}
+	return -1
+}

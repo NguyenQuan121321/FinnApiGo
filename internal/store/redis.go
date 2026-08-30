@@ -32,6 +32,42 @@ var incrWithExpireScript = redis.NewScript(`
     return n
 `)
 
+// getDelScript atomically returns and deletes a key (Redis >= 6.2 GETDEL is
+// available, but scripting keeps the version floor the same as the rest of
+// this file). The single-use consumption primitive for staged data: two
+// concurrent Takes — exactly one sees the value.
+var getDelScript = redis.NewScript(`
+    local v = redis.call('GET', KEYS[1])
+    if v then
+        redis.call('DEL', KEYS[1])
+    end
+    return v
+`)
+
+// renewIfOwnerScript extends a key's TTL only when its value still matches
+// the claimed owner — the compare-and-renew leader locks need. A bare EXPIRE
+// could extend ANOTHER instance's freshly acquired lock after our own lock
+// expired between the read and the renew (split-brain race).
+var renewIfOwnerScript = redis.NewScript(`
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+        if tonumber(ARGV[2]) > 0 then
+            return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+        end
+        return 1
+    end
+    return 0
+`)
+
+// deleteIfOwnerScript deletes a key only when its value still matches the
+// claimed owner — a stopped leader can no longer delete a lock another
+// instance just acquired.
+var deleteIfOwnerScript = redis.NewScript(`
+    if redis.call('GET', KEYS[1]) == ARGV[1] then
+        return redis.call('DEL', KEYS[1])
+    end
+    return 0
+`)
+
 // RedisStore is the multi-instance Store backend (§1.3 better-fix, §7).
 //
 // It implements the same Store contract as InMemoryStore but keeps all state
@@ -83,6 +119,21 @@ func (s *RedisStore) Get(key string) (any, bool) {
 		if !errors.Is(err, redis.Nil) {
 			StoreErrors.Add(1)
 			slog.Error("store: redis get failed", "key", key, "err", err)
+		}
+		return nil, false
+	}
+	return v, true
+}
+
+// Take atomically returns AND deletes the value at key. On backend failure it
+// reports absent — fail CLOSED: a consumer of staged single-use data
+// (challenges, OAuth state) treats "unknown" as "not fresh".
+func (s *RedisStore) Take(key string) (any, bool) {
+	v, err := getDelScript.Run(s.ctx, s.client, []string{key}).Result()
+	if err != nil {
+		if !errors.Is(err, redis.Nil) {
+			StoreErrors.Add(1)
+			slog.Error("store: redis take failed", "key", key, "err", err)
 		}
 		return nil, false
 	}
@@ -158,6 +209,31 @@ func (s *RedisStore) Renew(key string, ttl time.Duration) bool {
 		return false
 	}
 	return ok
+}
+
+// RenewIfOwner extends the TTL only when the stored value matches owner
+// (compare-and-renew, atomic via Lua).
+func (s *RedisStore) RenewIfOwner(key, owner string, ttl time.Duration) bool {
+	ok, err := renewIfOwnerScript.Run(s.ctx, s.client, []string{key},
+		owner, ttl.Milliseconds()).Int()
+	if err != nil {
+		StoreErrors.Add(1)
+		slog.Error("store: redis renew-if-owner failed", "key", key, "err", err)
+		return false
+	}
+	return ok == 1
+}
+
+// DeleteIfOwner deletes the key only when the stored value matches owner
+// (compare-and-delete, atomic via Lua).
+func (s *RedisStore) DeleteIfOwner(key, owner string) bool {
+	n, err := deleteIfOwnerScript.Run(s.ctx, s.client, []string{key}, owner).Int()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		StoreErrors.Add(1)
+		slog.Error("store: redis delete-if-owner failed", "key", key, "err", err)
+		return false
+	}
+	return n == 1
 }
 
 // toRedisValue coerces an arbitrary value into a string Redis can store. int64

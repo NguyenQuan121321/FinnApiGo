@@ -26,6 +26,12 @@ type BatchInserter interface {
 	BatchInsert(ctx context.Context, entries []*models.AuditLog) int
 }
 
+// flushTimeout bounds a single batch INSERT so a wedged MySQL (LB silently
+// dropping, TCP retransmitting for minutes) can never park the worker — or
+// hang process shutdown — indefinitely. A flush that hits the cap counts the
+// whole batch as dropped (visible in AuditDroppedEntries).
+const flushTimeout = 10 * time.Second
+
 // AsyncAuditWriter wraps an AuditRepo to provide asynchronous, non-blocking
 // buffered writes. It satisfies the AuditRepo interface.
 type AsyncAuditWriter struct {
@@ -33,8 +39,10 @@ type AsyncAuditWriter struct {
 	inserter   BatchInserter
 	buffer     chan *models.AuditLog
 	flushBatch int
-	done       chan struct{}
+	stopCh     chan struct{} // Close signals shutdown here; the buffer is NEVER closed
+	doneCh     chan struct{} // closed by the worker when it has fully drained
 	syncMode   bool
+	closing    atomic.Bool // Record consults this to avoid racing a shutdown drain
 }
 
 // NewAsyncAuditWriter creates a new AsyncAuditWriter. If cfg.BufferSize is 0,
@@ -52,7 +60,8 @@ func NewAsyncAuditWriter(repo AuditRepo, inserter BatchInserter, cfg config.Audi
 		inserter:   inserter,
 		buffer:     make(chan *models.AuditLog, cfg.BufferSize),
 		flushBatch: cfg.FlushBatch,
-		done:       make(chan struct{}),
+		stopCh:     make(chan struct{}),
+		doneCh:     make(chan struct{}),
 	}
 
 	if w.flushBatch <= 0 {
@@ -67,11 +76,18 @@ func NewAsyncAuditWriter(repo AuditRepo, inserter BatchInserter, cfg config.Audi
 // Record queues the audit log for asynchronous insertion. If the buffer is full,
 // the entry is dropped to prevent blocking the request; the drop is counted in
 // AuditDroppedEntries and logged (A6). Detail is truncated to the column size
-// here — the single choke point both modes flow through.
+// here — the single choke point both modes flow through. After Close, the
+// entry is written synchronously (best effort) instead of panicking on a
+// drained channel — straggler handlers that finish after srv.Shutdown keep
+// producing audit rows, and they must not die for it.
 func (w *AsyncAuditWriter) Record(ctx context.Context, entry *models.AuditLog) {
 	truncateDetail(entry)
 	if w.syncMode {
 		w.repo.Record(ctx, entry)
+		return
+	}
+	if w.closing.Load() {
+		w.repo.Record(ctx, entry) // shutdown drain in progress — write direct
 		return
 	}
 
@@ -98,8 +114,16 @@ func truncateDetail(entry *models.AuditLog) {
 }
 
 // worker reads from the buffer and batch-inserts when flushBatch is reached
-// or every 500ms.
+// or every 500ms. It exits when Close signals stopCh and the buffer has been
+// drained; a panic inside the insert path is recovered so the worker (and
+// with it the shutdown drain) can never die silently.
 func (w *AsyncAuditWriter) worker() {
+	defer close(w.doneCh)
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("audit worker panicked", "panic", r)
+		}
+	}()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -107,7 +131,9 @@ func (w *AsyncAuditWriter) worker() {
 
 	flush := func() {
 		if len(batch) > 0 {
-			n := w.inserter.BatchInsert(context.Background(), batch)
+			ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+			n := w.inserter.BatchInsert(ctx, batch)
+			cancel()
 			if lost := len(batch) - n; lost > 0 {
 				// A6 — partial/failed inserts must be visible, not silent
 				// gaps in the audit trail.
@@ -119,21 +145,34 @@ func (w *AsyncAuditWriter) worker() {
 		}
 	}
 
-	for {
-		select {
-		case entry, ok := <-w.buffer:
-			if !ok {
-				// Channel closed, flush remaining and exit
+	drainAndExit := func() {
+		// Non-blocking drain of whatever remains buffered.
+		for {
+			select {
+			case entry := <-w.buffer:
+				batch = append(batch, entry)
+				if len(batch) >= w.flushBatch {
+					flush()
+				}
+			default:
 				flush()
-				close(w.done)
 				return
 			}
+		}
+	}
+
+	for {
+		select {
+		case entry := <-w.buffer:
 			batch = append(batch, entry)
 			if len(batch) >= w.flushBatch {
 				flush()
 			}
 		case <-ticker.C:
 			flush()
+		case <-w.stopCh:
+			drainAndExit()
+			return
 		}
 	}
 }
@@ -147,12 +186,23 @@ func (w *AsyncAuditWriter) Buffered() int {
 	return len(w.buffer)
 }
 
-// Close gracefully shuts down the worker by closing the channel and waiting
-// for remaining entries to be flushed.
+// Close stops accepting new async entries, signals the worker to drain, and
+// waits — bounded by closeWaitTimeout so a wedged DB cannot hang process
+// shutdown forever (the orchestrator would SIGKILL and the buffered rows
+// would be lost anyway; a loud log beats a silent hang).
 func (w *AsyncAuditWriter) Close() {
 	if w.syncMode {
 		return
 	}
-	close(w.buffer)
-	<-w.done
+	w.closing.Store(true)
+	close(w.stopCh)
+	select {
+	case <-w.doneCh:
+	case <-time.After(closeWaitTimeout):
+		slog.Error("audit worker did not drain in time — buffered entries may be lost",
+			"buffered", len(w.buffer))
+	}
 }
+
+// closeWaitTimeout bounds the shutdown wait in Close.
+const closeWaitTimeout = 10 * time.Second

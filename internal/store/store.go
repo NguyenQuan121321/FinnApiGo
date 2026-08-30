@@ -1,17 +1,19 @@
 // Package store defines a small key-value abstraction with TTL support.
 //
-// It is the seam that lets rate-limit counters (middleware) and the
-// single-use-token store (services) work in two modes:
+// It is the seam that lets rate-limit counters (middleware), the
+// single-use-token store (services), and leader-election locks (jobs) work in
+// two modes:
 //
 //   - single-instance development / CI:  InMemoryStore (this package)
-//   - multi-instance production:        a future RedisStore implementing Store
+//   - multi-instance production:        RedisStore (redis.go, REDIS_URL)
 //
-// Nothing in the app calls Redis directly. A Redis-backed implementation can
-// be added later without touching any call site — it only has to satisfy this
-// interface. Activating it is driven by config (REDIS_URL).
+// Nothing in the app calls Redis directly. Both implementations satisfy the
+// Store interface (plus optional capability interfaces: Renewer,
+// OwnerLockManager); activating the Redis mode is driven by config (REDIS_URL).
 package store
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -21,6 +23,9 @@ import (
 //
 // Semantics:
 //   - Get returns the value and whether the key existed (and was not expired).
+//   - Take atomically returns AND deletes the value — the single-use
+//     consumption primitive for staged data (WebAuthn challenges, OAuth
+//     state). Two concurrent Takes: exactly one wins.
 //   - Set writes a value with a TTL; a zero TTL means "no expiry".
 //   - SetNX sets only if absent and returns whether it performed the write —
 //     this is the atomic primitive used for single-use token enforcement and
@@ -32,10 +37,25 @@ import (
 //   - Delete removes a key (idempotent).
 type Store interface {
 	Get(key string) (any, bool)
+	Take(key string) (any, bool)
 	Set(key string, value any, ttl time.Duration)
 	SetNX(key string, value any, ttl time.Duration) bool
 	IncrBy(key string, delta int64, ttl time.Duration) int64
 	Delete(key string)
+}
+
+// OwnerLockManager is an OPTIONAL store capability for leader-election locks:
+// compare-and-set TTL renewal and compare-and-set release, both verified
+// against the lock OWNER value. Without it, a Get→Renew sequence is a TOCTOU
+// race that can extend another instance's freshly acquired lock (split brain).
+// Both production stores implement it; minimal test fakes may not, in which
+// case the runner falls back to lock expiry + re-acquisition.
+type OwnerLockManager interface {
+	// RenewIfOwner extends the key's TTL only when the stored value equals
+	// owner. Reports whether the renewal happened.
+	RenewIfOwner(key, owner string, ttl time.Duration) bool
+	// DeleteIfOwner deletes the key only when the stored value equals owner.
+	DeleteIfOwner(key, owner string) bool
 }
 
 // ----- InMemoryStore -----
@@ -99,6 +119,22 @@ func (s *InMemoryStore) Get(key string) (any, bool) {
 	}
 	if e.expired(now) {
 		delete(s.data, key)
+		return nil, false
+	}
+	return e.value, true
+}
+
+// Take atomically returns AND deletes the value for key — one consumer wins.
+func (s *InMemoryStore) Take(key string) (any, bool) {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.data[key]
+	if !ok {
+		return nil, false
+	}
+	delete(s.data, key)
+	if e.expired(now) {
 		return nil, false
 	}
 	return e.value, true
@@ -186,6 +222,44 @@ func (s *InMemoryStore) Renew(key string, ttl time.Duration) bool {
 		exp = now.Add(ttl)
 	}
 	s.data[key] = entry{value: e.value, exp: exp}
+	return true
+}
+
+// RenewIfOwner extends the TTL only when the stored value matches owner —
+// the atomic compare-and-renew leader locks need (no extend-someone-else's-
+// lock race). Returns false when the key is absent or owned by someone else.
+func (s *InMemoryStore) RenewIfOwner(key, owner string, ttl time.Duration) bool {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.data[key]
+	if !ok || e.expired(now) {
+		return false
+	}
+	if fmt.Sprint(e.value) != owner {
+		return false
+	}
+	if ttl > 0 {
+		e.exp = now.Add(ttl)
+		s.data[key] = e
+	}
+	return true
+}
+
+// DeleteIfOwner deletes the key only when the stored value matches owner —
+// the atomic compare-and-delete release for leader locks (a stopped instance
+// can no longer delete a lock another instance just acquired).
+func (s *InMemoryStore) DeleteIfOwner(key, owner string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.data[key]
+	if !ok {
+		return false
+	}
+	if fmt.Sprint(e.value) != owner {
+		return false
+	}
+	delete(s.data, key)
 	return true
 }
 

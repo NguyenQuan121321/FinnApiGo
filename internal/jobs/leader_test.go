@@ -13,9 +13,9 @@ import (
 // tickRecorder captures which instance IDs executed the job and whether any
 // two executions ever overlapped.
 type tickRecorder struct {
-	mu        sync.Mutex
-	byID      map[string]int
-	inFlight  atomic.Int64
+	mu         sync.Mutex
+	byID       map[string]int
+	inFlight   atomic.Int64
 	overlapped atomic.Bool
 }
 
