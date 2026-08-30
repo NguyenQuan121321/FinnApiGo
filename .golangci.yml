@@ -17,12 +17,16 @@ linters:
     - nilerr      # returning nil when err != nil
     - errorlint   # proper error wrapping (errors.Is/As over == / type asserts)
     - depguard    # import restrictions
+  # Lines carrying a #nosec annotation are suppressed for gosec across BOTH
+  # gates: the standalone gosec step in the security job reads #nosec natively,
+  # and this exclusion makes golangci-lint agree with it. One justified
+  # annotation (e.g. the HIBP protocol-defined SHA-1 digest), one verdict.
+  exclusions:
+    rules:
+      - linters:
+          - gosec
+        source: "#nosec"
   settings:
-    # Honor #nosec annotations — the SAME suppression mechanism the standalone
-    # gosec CI gate (security job) uses: one annotation satisfies both tools,
-    # and it lives only where the protocol genuinely requires the construct.
-    gosec:
-      nosec: true
     depguard:
       rules:
         services:
