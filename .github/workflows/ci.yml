@@ -2,14 +2,24 @@ name: CI
 
 on:
   push:
-    branches: [ "main", "feat/enterprise-readiness" ]
+    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+
+# Cancel superseded runs on the same ref — a new push invalidates the older
+# run's verdict, so burning runners on it is waste, not safety.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build:
     name: Build and Test
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
@@ -35,7 +45,9 @@ jobs:
         run: go build ./...
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        # Pinned — an unpinned @latest scanner is a non-reproducible supply
+        # chain hole of exactly the class this pipeline exists to close.
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
 
       - name: Run govulncheck
         run: govulncheck ./...
@@ -43,6 +55,7 @@ jobs:
   integration:
     name: Integration (MySQL + Redis)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       mysql:
         image: mysql:8
@@ -78,8 +91,10 @@ jobs:
           cache: true
 
       # T1 — the integration-tagged suite against REAL service containers:
-      # migration up/down proof, EXPLAIN plan assertions (D1), and Redis
-      # fixed-window/guard semantics.
+      # migration up/down proof, EXPLAIN plan assertions (D1), Redis
+      # fixed-window/guard semantics, and concurrent-rotation single-winner.
+      # The suite carries its own guard test: a missing env var in CI FAILS
+      # the job instead of silently skipping every test to green.
       - name: Go Test (integration tag)
         env:
           TEST_MYSQL_DSN: 'test:testpw@tcp(127.0.0.1:3306)/finnapigo_test'
@@ -89,6 +104,7 @@ jobs:
   fuzz:
     name: Fuzz smoke (30s per target)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
@@ -112,6 +128,7 @@ jobs:
   coverage:
     name: Coverage floors (T3)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
@@ -122,25 +139,46 @@ jobs:
           go-version: '1.26.7'
           cache: true
 
-      # T3 — ratchet floors set at the current measured coverage (services
-      # 73.1%, jwt 91.1%). Raise the numbers as tests improve; never lower.
-      - name: internal/services floor (73.0%)
+      # T3 — per-package ratchet floors set at the measured coverage of the
+      # 2026-08 remediation batch. Raise the numbers as tests improve; NEVER
+      # lower them. (Previously only services/jwt were floored — a PR could
+      # gut middleware tests and every gate stayed green.)
+      - name: Per-package coverage floors
         run: |
-          go test ./internal/services/ -count=1 -coverprofile=services.out
-          pct=$(go tool cover -func=services.out | awk '/^total:/ {gsub("%","",$3); print $3}')
-          echo "internal/services coverage: ${pct}% (floor 73.0)"
-          awk -v p="$pct" 'BEGIN { exit (p+0 < 73.0) ? 1 : 0 }'
-
-      - name: internal/jwt floor (91.0%)
-        run: |
-          go test ./internal/jwt/ -count=1 -coverprofile=jwt.out
-          pct=$(go tool cover -func=jwt.out | awk '/^total:/ {gsub("%","",$3); print $3}')
-          echo "internal/jwt coverage: ${pct}% (floor 91.0)"
-          awk -v p="$pct" 'BEGIN { exit (p+0 < 91.0) ? 1 : 0 }'
+          set -euo pipefail
+          floors=(
+            "internal/services:73.0"
+            "internal/jwt:91.0"
+            "internal/middleware:80.0"
+            "internal/crypto:88.5"
+            "internal/logging:94.5"
+            "internal/device:82.0"
+            "internal/config:79.0"
+            "internal/response:100.0"
+            "internal/jobs:64.0"
+            "internal/routes:64.0"
+            "internal/repositories:66.0"
+            "internal/store:54.5"
+            "internal/handlers:45.0"
+            "internal/hash:38.0"
+          )
+          fail=0
+          for entry in "${floors[@]}"; do
+            pkg="${entry%%:*}"; floor="${entry##*:}"
+            go test "./$pkg/" -count=1 -coverprofile=cover.out > /dev/null
+            pct=$(go tool cover -func=cover.out | awk '/^total:/ {gsub("%","",$3); print $3}')
+            echo "$pkg coverage: ${pct}% (floor $floor)"
+            if ! awk -v p="$pct" -v f="$floor" 'BEGIN { exit (p+0 < f+0) ? 1 : 0 }'; then
+              echo "::error::$pkg coverage ${pct}% is below floor ${floor}%"
+              fail=1
+            fi
+          done
+          exit $fail
 
   security:
     name: Security scans (T4)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
@@ -153,9 +191,10 @@ jobs:
 
       # T4a — dedicated gosec run (the linter already includes gosec; this
       # standalone run is the explicit gate with its own failure signal).
+      # Pinned version — see the govulncheck note in the build job.
       - name: gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
           gosec -exclude-generated -quiet ./...
 
       # T4b — container/config scan: Dockerfile + compose misconfigurations
@@ -169,9 +208,35 @@ jobs:
           exit-code: '1'
           ignore-unfixed: true
 
+  image:
+    name: Container image build + scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)
+
+      # The Dockerfile was previously NEVER executed in CI — Render built it
+      # first. Building here proves the deploy artifact compiles and closes
+      # the base-image blind spot below.
+      - name: Build production image
+        run: docker build -t finnapigo:ci .
+
+      - name: Trivy image scan (HIGH,CRITICAL fail the build)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0 (SHA-pinned)
+        with:
+          image-ref: finnapigo:ci
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+
   sbom:
     name: SBOM (CycloneDX)
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write # artifact upload
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (SHA-pinned)

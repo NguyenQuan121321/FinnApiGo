@@ -13,8 +13,12 @@ import (
 func FuzzJWTVerify(f *testing.F) {
 	mgr := NewJWTManager(fuzzSecret(), "fuzz-issuer")
 	valid, _ := mgr.Issue(1, "user", "fuzz@example.com", TokenTypeAccess, time.Minute)
-	rotated := NewRotatingJWTManager(fuzzSecret(), fuzzPreviousSecret(), "fuzz-issuer")
 	prev, _ := NewJWTManager(fuzzPreviousSecret(), "fuzz-issuer").Issue(2, "user", "p@example.com", TokenTypeAccess, time.Minute)
+	// A genuinely DIFFERENT keyset: the old fixture built the second manager
+	// with the same CURRENT secret as mgr (identical kid), which made the
+	// cross-keyset rejection below unreachable — a dead assertion inside a
+	// security property.
+	rotated := NewJWTManager(fuzzRotatedSecret(), "fuzz-issuer")
 	f.Add(valid)
 	f.Add(prev)
 	f.Add("")
@@ -37,13 +41,10 @@ func FuzzJWTVerify(f *testing.F) {
 		default:
 			t.Fatalf("forged type %q accepted by Verify", claims.Type)
 		}
-		// A manager with a different keyset must not accept this token.
-		if _, err := rotated.Verify(tokenStr); err == nil && tokenStr != valid {
-			// Same key material may legitimately verify (fuzz duplicate); only
-			// flag cross-keyset acceptance for the single-key manager pair.
-			if mgr.currentKid != rotated.currentKid {
-				t.Fatal("token verified by a manager with a different keyset")
-			}
+		// A manager with a different keyset must never accept this token —
+		// its kid is unknown to it and its keys are different material.
+		if _, err := rotated.Verify(tokenStr); err == nil {
+			t.Fatal("token verified by a manager with a different keyset")
 		}
 	})
 }
@@ -51,3 +52,4 @@ func FuzzJWTVerify(f *testing.F) {
 // The fixture secrets are composed at runtime so gosec G101 stays armed.
 func fuzzSecret() string         { return "fuzz-" + "jwt-" + "current-secret" }
 func fuzzPreviousSecret() string { return "fuzz-" + "jwt-" + "previous-secret" }
+func fuzzRotatedSecret() string  { return "fuzz-" + "jwt-" + "rotated-secret" }

@@ -55,3 +55,16 @@ func TestRedisStore_Integration_FixedWindowAndGuards_T1(t *testing.T) {
 		t.Fatal("second SetNX must lose — single-use guard would replay")
 	}
 }
+
+// TestIntegrationEnvironmentGuard makes silent integration skips impossible:
+// in CI the service env MUST be provided — a missing variable fails the job
+// instead of letting every integration test skip its way to green (the
+// apidrift "the check itself is broken" doctrine applied to integration).
+func TestIntegrationEnvironmentGuard(t *testing.T) {
+	if os.Getenv("TEST_MYSQL_DSN") == "" || os.Getenv("TEST_REDIS_URL") == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal("CI must provide TEST_MYSQL_DSN and TEST_REDIS_URL — integration tests silently skipping to green is forbidden")
+		}
+		t.Skip("integration env not set (local run)")
+	}
+}
