@@ -45,7 +45,7 @@ Authentication & MFA backend written in **Go**, built as a reusable module (`han
 
 | Layer | Choice |
 |---|---|
-| Language | Go 1.25 |
+| Language | Go 1.26 (pinned in go.mod `go`/`toolchain`; CI and Docker build the same patch) |
 | HTTP framework | [Gin](https://github.com/gin-gonic/gin) |
 | ORM / DB | [GORM](https://gorm.io) + MySQL 8 (golang-migrate SQL migrations) |
 | Auth tokens | [golang-jwt/jwt](https://github.com/golang-jwt/jwt) v5 (HS256, `kid`-keyed rotation) |
@@ -175,14 +175,14 @@ Everything is read from environment variables (`.env` supported). See `.env.exam
 | Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS`, `DB_TLS`, `MIGRATE_AUTO` | `DB_TLS` appends `&tls=...` to the DSN; `MIGRATE_AUTO` is the dev-only AutoMigrate escape hatch |
 | JWT | `JWT_SECRET` (required, no default), `JWT_SECRET_PREVIOUS`, `JWT_ISSUER`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `RESET_TOKEN_TTL`, `EMAIL_VERIFY_TOKEN_TTL`, `MFA_PENDING_TOKEN_TTL`, `SUDO_TOKEN_TTL` | `JWT_SECRET_PREVIOUS` enables zero-downtime rotation |
 | Keys & secrets | `RECOVERY_CODE_KEY` (**required in release mode**), `KEY_PROVIDER` (`env`\|`file`), `KEY_DIR` | AES-256 key sealing recovery codes and TOTP secrets |
-| Account security | `MAX_LOGIN_ATTEMPTS`, `LOGIN_LOCKOUT_DURATION`, `MAX_LOCKOUT_MULTIPLIER`, `REQUIRE_EMAIL_VERIFIED` | `MAX_LOCKOUT_MULTIPLIER` scales lockout duration for repeat offenders |
+| Account security | `MAX_LOGIN_ATTEMPTS`, `LOGIN_LOCKOUT_DURATION`, `MAX_LOCKOUT_MULTIPLIER`, `REQUIRE_EMAIL_VERIFIED`, `LOGIN_NOTIFY_NEW_IP` | `MAX_LOCKOUT_MULTIPLIER` scales lockout duration for repeat offenders; `LOGIN_NOTIFY_NEW_IP` sends a transparency email on first login from a new IP (deliberately NOT risk-based auth — no step-up) |
 | MFA / TOTP | `TOTP_MAX_ATTEMPTS`, `TOTP_ATTEMPT_WINDOW`, `TOTP_MAX_CONCURRENT`, `RECOVERY_CODE_COUNT`, `RECOVERY_CODE_BYTES` | Brute-force lockout + concurrency gate on CPU-bound verification |
 | Rate limiting | `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `LOGIN_PER_ACCOUNT_MAX`, `LOGIN_WINDOW`, `REGISTER_PER_IP_MAX`, `REGISTER_WINDOW`, `VERIFY_RESEND_PER_EMAIL_MAX`, `VERIFY_RESEND_PER_IP_MAX`, `VERIFY_RESEND_GLOBAL_MAX`, `LOGIN_CAPTCHA_AFTER_FAILS` | Resend limits are shared when `REDIS_URL` is configured |
 | Email | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Empty `SMTP_HOST` -> console notifier (no live tokens in release mode) |
 | CAPTCHA | `CAPTCHA_PROVIDER` (`turnstile` \| empty), `CAPTCHA_SECRET`, `CAPTCHA_SITE_KEY` | Off unless a provider + secret are set |
 | Shared store | `REDIS_URL` | Empty -> in-memory store (single instance only) |
 | Audit | `AUDIT_BUFFER_SIZE`, `AUDIT_FLUSH_BATCH`, `AUDIT_RETENTION_DAYS` | Release mode warns when `AUDIT_RETENTION_DAYS` is unset — see the PII/retention policy below |
-| Hardening | `MAX_REQUEST_BODY_BYTES`, `MAX_PASSWORD_LENGTH`, `RATE_LIMITER_ENTRY_TTL` | |
+| Hardening | `MAX_REQUEST_BODY_BYTES`, `MAX_PASSWORD_LENGTH`, `RATE_LIMITER_ENTRY_TTL`, `TOTP_MAX_CONCURRENT`, `BREACHED_PASSWORD_CHECK`, `BREACHED_PASSWORD_TIMEOUT` | `BREACHED_PASSWORD_CHECK` screens new passwords against the Pwned Passwords corpus (k-anonymity, fails OPEN on outage) |
 
 ### JWT secret rotation procedure
 
@@ -304,7 +304,7 @@ The enterprise-readiness reconciliation (`docs/enterprise-review-reconciliation.
 
 ## Testing with Bruno / Postman
 
-Import the Bruno collection (`Bruno/`) or any REST client and point it at `http://localhost:8080` (use `{{baseUrl}}` in the collection). A typical flow:
+Import the Bruno collection (`Bruno/`) or any REST client and point it at the configured base URL (the collection's `{{baseUrl}}` — `http://localhost:8081` in `Bruno/environments/Local.yml`, matching `SERVER_PORT` in your `.env`). A typical flow:
 
 1. `POST /register`
 2. `POST /login` → save `accessToken` and `refreshToken` from the response

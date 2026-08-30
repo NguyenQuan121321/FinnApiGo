@@ -1,0 +1,32 @@
+info:
+  name: passkey-register-verify
+  type: http
+  seq: 2
+
+# Body is the verbatim browser attestation response (clientDataJSON,
+# attestationObject...). Generate it with tests/passkey_test.html in a real
+# browser — this request documents the shape and checks error handling.
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/auth/mfa/passkey/register/verify"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "REPLACE_WITH_CREDENTIAL_ID",
+        "rawId": "REPLACE_WITH_CREDENTIAL_ID",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "REPLACE",
+          "attestationObject": "REPLACE"
+        }
+      }
+  auth:
+    type: bearer
+    token: "{{accessToken}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

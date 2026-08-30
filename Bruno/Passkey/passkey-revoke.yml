@@ -1,0 +1,22 @@
+info:
+  name: passkey-revoke
+  type: http
+  seq: 6
+
+# Sudo-gated: requires X-Sudo-Token minted by recovery-codes-view (a current
+# TOTP code). Set passkeyId to the credential row id from passkey-list.
+http:
+  method: DELETE
+  url: "{{baseUrl}}/api/v1/auth/mfa/passkeys/{{passkeyId}}"
+  body:
+    type: json
+    data: ""
+  auth:
+    type: bearer
+    token: "{{accessToken}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

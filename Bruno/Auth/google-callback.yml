@@ -1,0 +1,19 @@
+info:
+  name: google-callback
+  type: http
+  seq: 15
+
+# Normally invoked by Google's redirect (browser carries the state cookie).
+# For manual testing, paste the code+state from the consent redirect.
+http:
+  method: GET
+  url: "{{baseUrl}}/api/v1/auth/google/callback?code={{oauthCode}}&state={{oauthState}}"
+  body:
+    type: json
+    data: ""
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

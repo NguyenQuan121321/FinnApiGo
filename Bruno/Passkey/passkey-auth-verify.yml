@@ -1,0 +1,33 @@
+info:
+  name: passkey-auth-verify
+  type: http
+  seq: 4
+
+# Body is the verbatim browser assertion response. On success the endpoint
+# returns a fresh token pair (same shape as login).
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/auth/mfa/passkey/authenticate/verify"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "REPLACE_WITH_CREDENTIAL_ID",
+        "rawId": "REPLACE_WITH_CREDENTIAL_ID",
+        "type": "public-key",
+        "response": {
+          "clientDataJSON": "REPLACE",
+          "authenticatorData": "REPLACE",
+          "signature": "REPLACE",
+          "userHandle": "REPLACE"
+        }
+      }
+  auth:
+    type: bearer
+    token: "{{accessToken}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

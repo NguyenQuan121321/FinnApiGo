@@ -1,20 +1,14 @@
 info:
-  name: OAuth-google
+  name: logout-all
   type: http
-  seq: 13
+  seq: 12
 
 http:
   method: POST
-  url: "{{baseUrl}}/api/v1/auth/login"
-  headers:
-    - name: Content-Type
-      value: application/json
+  url: "{{baseUrl}}/api/v1/auth/logout-all"
   body:
     type: json
-    data: |-
-      {
-        "password": "Password123"
-      }
+    data: ""
   auth:
     type: bearer
     token: "{{accessToken}}"

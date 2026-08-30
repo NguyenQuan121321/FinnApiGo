@@ -1,17 +1,14 @@
 info:
-  name: send-otp-repeat
+  name: session-revoke
   type: http
-  seq: 1
+  seq: 13
 
 http:
-  method: POST
-  url: "{{baseUrl}}/api/v1/auth/mfa/send-otp"
+  method: DELETE
+  url: "{{baseUrl}}/api/v1/auth/sessions/{{sessionId}}"
   body:
     type: json
-    data: |-
-      {
-        "purpose": "login"
-      }
+    data: ""
   auth:
     type: bearer
     token: "{{accessToken}}"

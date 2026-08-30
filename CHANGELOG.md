@@ -5,6 +5,75 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — deep-review remediation (2026-08-31)
+
+Remediation of the 2026-08-31 five-stream deep review. Full finding→fix map
+in `docs/deep-review-remediation-2026-08.md`.
+
+### Fixed
+- **Passkey login no longer bypasses account deactivation** — `IsActive` is
+  enforced in the WebAuthn ceremonies AND at token issuance (H1).
+- **Adaptive CAPTCHA gate works under Redis** — the per-IP failure counter is
+  read through `storeCounterValue` instead of a bare `int64` assertion that
+  silently read every Redis counter as 0 (H2).
+- **OAuth account-linking takeover closed** — the persisted identity row
+  `(provider, sub)` resolves returning users; email-match linking is refused
+  for unverified local accounts (`ErrOAuthEmailTaken`, 409) instead of
+  promoting the verified flag.
+- **Credential changes are transactional** — password update, lockout reset,
+  pwd-version bump, and refresh-token revocation land in ONE transaction
+  (`UserRepository.CredentialChangeTx`); a crash can no longer leave the
+  password changed while attacker sessions survive.
+- **WebAuthn challenges are single-use under concurrency** (`Store.Take`) and
+  **User Verification is required** in both ceremonies.
+- **Single-use jti backstop is fail-closed** — `MarkUsed` errors propagate
+  and the volatile TTL derives from the token's own expiry instead of a
+  hardcoded 24h.
+- **Leader election is race-free** — compare-and-renew / compare-and-delete
+  (owner-verified, atomic) replace the Get→Renew TOCTOU; `Stop` cancels the
+  in-flight job context; shutdown stops jobs BEFORE the DB pool closes.
+- **Audit writer cannot hang shutdown** — bounded flush (10s), worker panic
+  recovery, safe post-Close `Record`, bounded `Close`.
+- **Store-key cardinality bounded** — IPv6 sources collapse to /64 prefixes
+  for the unauthenticated per-IP counters (reg/velocity/captcha).
+- **TOTP enrollment double-submit** no longer replaces a freshly issued
+  recovery-code set (per-user rotation lock).
+- **Enumeration timing closed** for OAuth-only accounts (empty password
+  hash) and unknown-email forgot-password.
+
+### Security
+- **Google OAuth: PKCE S256 + nonce + browser-bound state** — the state
+  cookie (HttpOnly, SameSite=Lax) closes login CSRF; state consumption is
+  atomic.
+- **Breached-password screening** (`BREACHED_PASSWORD_CHECK`, default on) —
+  Pwned Passwords k-anonymity range API on register/reset/set/change; fails
+  OPEN on outage; NIST SP 800-63B compromised-credential requirement.
+- **New-IP login notification** (`LOGIN_NOTIFY_NEW_IP`, default on) — a
+  transparency email on the first login from a previously unseen IP.
+  Deliberately NOT risk-based authentication: no step-up, no blocking.
+- **`/auth/google/login` rate-limited** (was the only unauthenticated
+  endpoint without the limiter).
+
+### Changed
+- **CI: container image is built and Trivy-scanned**; gosec/govulncheck
+  pinned (`v2.29.0` / `v1.7.0`); coverage floors extended to 14 packages;
+  integration suite is skip-proof (missing CI env fails the job); JWT and
+  recovery-code fuzz targets now exercise the real systems (dead cross-keyset
+  assertion repaired; the fuzz shares `hash.MatchRecoveryCode` with the
+  service); new `security.yml` workflow (CodeQL + PR dependency-review);
+  concurrency groups, per-job timeouts, least-privilege token permissions.
+- **Store interface gained `Take`** (atomic get-and-delete) and the
+  `OwnerLockManager` capability (compare-and-renew/delete for leader locks).
+- **`TouchLastActive` removed** — dead code; rotation already stamps the
+  fresh session row.
+- **SMTP sends bounded** by an overall 45s deadline; log redaction list
+  extended (`secret_key`, `private_key`, `credentials`, `dsn`).
+- **`.env.example` rewritten to mirror `internal/config` exactly** (5 dead
+  `OTP_*` vars removed, 9 missing vars documented, Redis critical-path
+  caveat added); **Bruno collection refreshed** to cover every registered
+  route (dead OTP requests removed, passkey/OAuth/session coverage added);
+  README tech-stack and config table refreshed.
+
 ## [Unreleased] — supply-chain & dependency hardening (2026-08-31)
 
 ### Security

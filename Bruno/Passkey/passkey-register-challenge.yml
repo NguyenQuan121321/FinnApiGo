@@ -1,0 +1,26 @@
+info:
+  name: passkey-register-challenge
+  type: http
+  seq: 1
+
+# Returns the PKC creation options for the browser WebAuthn API. The attestation
+# response itself must be produced by a browser authenticator (see
+# tests/passkey_test.html) — Bruno cannot synthesize one.
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/auth/mfa/passkey/register/challenge"
+  body:
+    type: json
+    data: |-
+      {
+        "displayName": "My Laptop"
+      }
+  auth:
+    type: bearer
+    token: "{{accessToken}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

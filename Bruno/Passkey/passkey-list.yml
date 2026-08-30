@@ -1,18 +1,14 @@
 info:
-  name: verify-otp-wrong-code
+  name: passkey-list
   type: http
-  seq: 2
+  seq: 5
 
 http:
-  method: POST
-  url: "{{baseUrl}}/api/v1/auth/mfa/verify-otp"
+  method: GET
+  url: "{{baseUrl}}/api/v1/auth/mfa/passkeys"
   body:
     type: json
-    data: |-
-      {
-        "code": "021432",
-        "purpose": "login"
-      }
+    data: ""
   auth:
     type: bearer
     token: "{{accessToken}}"

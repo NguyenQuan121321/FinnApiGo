@@ -1,0 +1,20 @@
+info:
+  name: google-login
+  type: http
+  seq: 14
+
+# Opens Google's consent screen (302). Requires OAuth to be configured.
+# The callback stores tokens in {{accessToken}}/{{refreshToken}} — run
+# google-callback next; it answers with the same shape as login.
+http:
+  method: GET
+  url: "{{baseUrl}}/api/v1/auth/google/login"
+  body:
+    type: json
+    data: ""
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: false
+  maxRedirects: 0
