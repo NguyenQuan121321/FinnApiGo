@@ -222,6 +222,17 @@ func s256Challenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+// pkceVerifier generates a fresh PKCE code verifier (S256): 64 CSPRNG bytes
+// base64url-encoded — 86 chars, inside the RFC 7636 43..128 range, with the
+// unreserved-character guarantee base64url provides.
+func pkceVerifier() (string, error) {
+	b := make([]byte, 64)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("oauth: pkce verifier: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // HandleCallback processes the Google OAuth callback: consumes the CSRF
 // state (atomic single-use), exchanges the authorization code WITH the PKCE
 // verifier, verifies the ID token (JWKS signature + audience + nonce),
