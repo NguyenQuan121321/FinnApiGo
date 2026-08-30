@@ -16,10 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
-	"github.com/gin-gonic/gin"
-
 )
 
 // softAuthenticator is a minimal software WebAuthn authenticator (9E's
@@ -80,9 +79,9 @@ func (a *softAuthenticator) authData(flags byte, counter uint32, attested bool) 
 			panic(err) // P-256 is always supported
 		}
 		cose := map[int64]any{
-			1:  int64(2),  // kty: EC2
-			3:  int64(-7), // alg: ES256
-			-1: int64(1),  // crv: P-256
+			1:  int64(2),   // kty: EC2
+			3:  int64(-7),  // alg: ES256
+			-1: int64(1),   // crv: P-256
 			-2: raw[1:33],  // x: fixed-width 32-byte coordinate
 			-3: raw[33:65], // y: fixed-width 32-byte coordinate
 		}

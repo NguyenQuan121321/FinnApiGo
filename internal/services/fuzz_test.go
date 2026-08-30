@@ -41,25 +41,17 @@ func FuzzTOTPCodeValidation(f *testing.F) {
 	})
 }
 
-// FuzzRecoveryCodeConsumption (T2) — fuzzed candidates through the exact
-// acceptance logic the Validate recovery path uses (SHA-256 hash + constant
-// time compare against the active set): only an exact seeded code may be
-// accepted, and near-miss mutations must always be rejected.
+// FuzzRecoveryCodeConsumption (T2) — fuzzed candidates through the EXACT
+// acceptance function the Validate recovery path uses (hash.MatchRecoveryCode
+// is shared by service and fuzz, so the target can never drift from the
+// system it guards): only an exact seeded code may be accepted, and near-miss
+// mutations must always be rejected.
 // Run: go test ./internal/services/ -run=^$ -fuzz=FuzzRecoveryCodeConsumption -fuzztime=30s
 func FuzzRecoveryCodeConsumption(f *testing.F) {
 	seeded := []string{"5KVB-PRRT", "M4GT-XQ2L"}
 	hashed := make([]string, len(seeded))
 	for i, c := range seeded {
 		hashed[i] = hash.HashRecoveryCode(c)
-	}
-	accept := func(candidate string) bool {
-		want := hash.HashRecoveryCode(candidate)
-		for i := range hashed {
-			if hash.ConstantTimeCompare(hashed[i], want) {
-				return true
-			}
-		}
-		return false
 	}
 	f.Add("5KVB-PRRT")
 	f.Add("M4GT-XQ2L")
@@ -69,15 +61,15 @@ func FuzzRecoveryCodeConsumption(f *testing.F) {
 	f.Add("giberish")
 
 	f.Fuzz(func(t *testing.T, candidate string) {
-		accepted := accept(candidate)
+		idx := hash.MatchRecoveryCode(candidate, hashed)
 		exact := false
 		for _, c := range seeded {
 			if c == candidate {
 				exact = true
 			}
 		}
-		if accepted != exact {
-			t.Fatalf("acceptance disagrees with exact match: candidate=%q accepted=%v exact=%v", candidate, accepted, exact)
+		if (idx >= 0) != exact {
+			t.Fatalf("acceptance disagrees with exact match: candidate=%q idx=%d exact=%v", candidate, idx, exact)
 		}
 	})
 }

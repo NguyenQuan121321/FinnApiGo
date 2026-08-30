@@ -60,3 +60,11 @@ func (n *ConsoleNotifier) SendEmailVerification(ctx context.Context, to, verifyT
 	slog.Info("[MAIL]", "to", to, "from", n.From, "subject", "Verify your email", "verify_token", verifyToken)
 	return nil
 }
+
+// SendNewLoginAlert logs the transparency alert (no secrets involved — safe
+// in every mode; the refuse flag gates only live-token delivery).
+func (n *ConsoleNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceName string) error {
+	slog.Info("[MAIL]", "to", to, "from", n.From, "subject", "New sign-in to your account",
+		"ip", ip, "device", deviceName)
+	return nil
+}

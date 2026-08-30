@@ -35,6 +35,7 @@ func (v *productionGoogleVerifier) Verify(ctx context.Context, rawIDToken string
 		EmailVerified: claimBool(payload.Claims, "email_verified"),
 		Name:          claimString(payload.Claims, "name"),
 		Picture:       claimString(payload.Claims, "picture"),
+		Nonce:         claimString(payload.Claims, "nonce"),
 	}, nil
 }
 

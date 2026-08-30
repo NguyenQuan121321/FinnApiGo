@@ -8,6 +8,9 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -46,16 +49,34 @@ func newOAuthTestEnv() *oauthTestEnv {
 }
 
 // primeCallback wires the mocks for a successful exchange+verification using
-// the given claims, and returns a freshly generated (valid) state.
+// the given claims, and returns a freshly staged (valid) state. The mock
+// verifier echoes the NONCE that BeginLogin staged for that state — the
+// production binding the ID-token check enforces.
 func (e *oauthTestEnv) primeCallback(t *testing.T, claims *GoogleIDTokenClaims) string {
 	t.Helper()
-	e.verifier.claims = claims
 	e.client.token = exchangeToken("fake-id-token")
-	state, err := e.svc.GenerateState(context.Background())
+	state, _, err := e.svc.BeginLogin(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	claims.Nonce = stagedNonce(t, e.store, state)
+	e.verifier.claims = claims
 	return state
+}
+
+// stagedNonce reads the staged challenge's nonce for a state (test mirror of
+// the store contract).
+func stagedNonce(t *testing.T, st *mockStore, state string) string {
+	t.Helper()
+	rawAny, ok := st.Get(oauthChallengeKey(state))
+	if !ok {
+		t.Fatal("challenge not staged for state")
+	}
+	var ch oauthChallenge
+	if err := json.Unmarshal([]byte(rawAny.(string)), &ch); err != nil {
+		t.Fatal(err)
+	}
+	return ch.Nonce
 }
 
 // exchangeToken builds an oauth2.Token shaped like Google's token endpoint
@@ -80,42 +101,46 @@ func googleClaims(email string, verified bool) *GoogleIDTokenClaims {
 	}
 }
 
-func TestOAuthGenerateAndValidateState(t *testing.T) {
+func TestOAuthChallengeLifecycle(t *testing.T) {
 	env := newOAuthTestEnv()
+	env.client.authURL = "https://accounts.google.com/o/oauth2/v2/auth"
 	ctx := context.Background()
 
-	s1, err := env.svc.GenerateState(ctx)
+	s1, url1, err := env.svc.BeginLogin(ctx)
 	if err != nil || len(s1) != 64 { // 32 bytes hex
-		t.Fatalf("GenerateState=%q err=%v", s1, err)
+		t.Fatalf("BeginLogin state=%q err=%v", s1, err)
 	}
-	s2, _ := env.svc.GenerateState(ctx)
+	// The consent URL must carry the state AND the S256 PKCE challenge.
+	if !strings.Contains(url1, "state="+s1) || !strings.Contains(url1, "code_challenge_method=S256") {
+		t.Fatalf("consent URL missing state/PKCE method: %q", url1)
+	}
+	s2, _, _ := env.svc.BeginLogin(ctx)
 	if s1 == s2 {
 		t.Fatal("states must be unique per generation")
 	}
-	if err := env.svc.ValidateState(ctx, s1); err != nil {
-		t.Fatalf("valid state rejected: %v", err)
+
+	// Consume: returns the staged challenge (verifier + nonce) and deletes it.
+	ch, err := env.svc.ConsumeState(ctx, s1)
+	if err != nil || ch.Verifier == "" || ch.Nonce == "" {
+		t.Fatalf("ConsumeState=%+v err=%v", ch, err)
+	}
+	sum := sha256.Sum256([]byte(ch.Verifier))
+	wantChallenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	if !strings.Contains(url1, "code_challenge="+wantChallenge) {
+		t.Fatalf("URL challenge != S256(verifier): %q vs %q", url1, wantChallenge)
 	}
 	// One-time use: replay must fail.
-	if err := env.svc.ValidateState(ctx, s1); !errors.Is(err, ErrOAuthStateInvalid) {
+	if _, err := env.svc.ConsumeState(ctx, s1); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("replayed state: err=%v", err)
 	}
 	// Unknown state rejected.
-	if err := env.svc.ValidateState(ctx, "bogus"); !errors.Is(err, ErrOAuthStateInvalid) {
+	if _, err := env.svc.ConsumeState(ctx, "bogus"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("unknown state: err=%v", err)
-	}
-}
-
-func TestOAuthAuthorizationURL(t *testing.T) {
-	env := newOAuthTestEnv()
-	env.client.authURL = "https://accounts.google.com/o/oauth2/v2/auth"
-	url := env.svc.AuthorizationURL("abc123")
-	if !strings.Contains(url, "state=abc123") {
-		t.Fatalf("URL missing state: %q", url)
 	}
 	// Nil client (unconfigured) → empty URL so the handler can 501.
 	unconfigured := NewOAuthService(newMockUserRepo(), newMockOAuthIdentityRepo(), newMockStore(), nil, nil, nil)
-	if got := unconfigured.AuthorizationURL("x"); got != "" {
-		t.Fatalf("unconfigured AuthorizationURL=%q, want empty", got)
+	if _, url, _ := unconfigured.BeginLogin(ctx); url != "" {
+		t.Fatalf("unconfigured BeginLogin URL=%q, want empty", url)
 	}
 }
 
@@ -164,11 +189,12 @@ func TestOAuthCallbackNewUser(t *testing.T) {
 	}
 }
 
-func TestOAuthCallbackLinksExistingPasswordUser(t *testing.T) {
+func TestOAuthCallbackLinksExistingVerifiedUser(t *testing.T) {
 	env := newOAuthTestEnv()
 	ctx := context.Background()
 
-	// Pre-register a password user with the same (verified-claims) email.
+	// Pre-register a password user with the same (verified-claims) email whose
+	// local email was ALREADY verified — the only shape the link accepts.
 	pwHash, err := hash.HashPassword("Password123")
 	if err != nil {
 		t.Fatal(err)
@@ -176,6 +202,7 @@ func TestOAuthCallbackLinksExistingPasswordUser(t *testing.T) {
 	existing := &models.User{
 		Username: "bob", Email: "bob@example.com", Password: pwHash,
 		FullName: "Bob Original", Role: models.RoleUser, IsActive: true,
+		IsEmailVerified: true,
 	}
 	if err := env.users.Create(ctx, existing); err != nil {
 		t.Fatal(err)
@@ -199,10 +226,6 @@ func TestOAuthCallbackLinksExistingPasswordUser(t *testing.T) {
 	if got.ID != existing.ID {
 		t.Fatalf("linked to wrong user: %d vs %d", got.ID, existing.ID)
 	}
-	// Google's verification promotes the email-verified flag on first sign-in.
-	if !got.IsEmailVerified {
-		t.Fatal("existing user's IsEmailVerified should be promoted to true")
-	}
 	// Password untouched — the user can still log in via password.
 	if got.Password != pwHash {
 		t.Fatal("existing user's password hash must not change")
@@ -219,6 +242,89 @@ func TestOAuthCallbackLinksExistingPasswordUser(t *testing.T) {
 	}
 	if n := env.idents.count(); n != 1 {
 		t.Fatalf("second sign-in created a duplicate identity link (n=%d)", n)
+	}
+}
+
+// TestOAuthCallbackUnverifiedEmailConflict pins the anti-takeover guard: a
+// Google identity matching an existing local account whose email was NEVER
+// verified must be REFUSED — no silent link, no flag promotion, no tokens.
+// (Whoever controls the address could otherwise inherit the local account.)
+func TestOAuthCallbackUnverifiedEmailConflict(t *testing.T) {
+	env := newOAuthTestEnv()
+	ctx := context.Background()
+
+	existing := &models.User{
+		Username: "carol", Email: "carol@example.com", Password: "hash",
+		Role: models.RoleUser, IsActive: true, IsEmailVerified: false,
+	}
+	if err := env.users.Create(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+
+	state := env.primeCallback(t, googleClaims("carol@example.com", true))
+	_, _, _, err := env.svc.HandleCallback(ctx, "code", state, "1.2.3.4", "UA")
+	if !errors.Is(err, ErrOAuthEmailTaken) {
+		t.Fatalf("err=%v, want ErrOAuthEmailTaken", err)
+	}
+	// The local account is untouched: not linked, not verified-promoted,
+	// no tokens issued.
+	if n := env.idents.count(); n != 0 {
+		t.Fatalf("identity linked for an unverified local account (n=%d)", n)
+	}
+	got, _ := env.users.FindByEmail(ctx, "carol@example.com")
+	if got.IsEmailVerified {
+		t.Fatal("email-verified flag must not be promoted by a refused link")
+	}
+	if len(env.issuer.users) != 0 {
+		t.Fatal("tokens must not be issued for a refused link")
+	}
+}
+
+// TestOAuthCallbackResolvesByIdentityRow pins the "sub is the source of
+// truth" rule: once linked, the login resolves through oauth_identities —
+// a DIFFERENT email on the Google identity cannot fork or hijack the login.
+func TestOAuthCallbackResolvesByIdentityRow(t *testing.T) {
+	env := newOAuthTestEnv()
+	ctx := context.Background()
+
+	pwHash, err := hash.HashPassword("Password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := &models.User{
+		Username: "dave", Email: "dave@example.com", Password: pwHash,
+		Role: models.RoleUser, IsActive: true, IsEmailVerified: true,
+	}
+	if err := env.users.Create(ctx, existing); err != nil {
+		t.Fatal(err)
+	}
+	// First sign-in links sub=google-sub-123 → dave.
+	state := env.primeCallback(t, googleClaims("dave@example.com", true))
+	env.issuer.pair = TokenPair{AccessToken: "at", RefreshToken: "rt"}
+	if _, _, _, err := env.svc.HandleCallback(ctx, "code", state, "1.2.3.4", "UA"); err != nil {
+		t.Fatal(err)
+	}
+	// The user then changes their email AT GOOGLE — same sub, new email.
+	env.issuer.pair = TokenPair{AccessToken: "at2", RefreshToken: "rt2"}
+	claims := googleClaims("dave-new@example.com", true)
+	state2 := env.primeCallback(t, claims)
+	pair, _, pending, err := env.svc.HandleCallback(ctx, "code2", state2, "1.2.3.4", "UA")
+	if err != nil {
+		t.Fatalf("identity-row resolution must survive a Google-side email change: %v", err)
+	}
+	if pair.AccessToken != "at2" {
+		t.Fatalf("expected the second pair, got %+v", pair)
+	}
+	if pending != nil {
+		t.Fatalf("unexpected mfa pending: %+v", pending)
+	}
+	// The issuer must have been handed the LINKED user (resolved via the
+	// identity row), not a fresh lookup by the changed email.
+	if len(env.issuer.users) != 2 || env.issuer.users[1].ID != existing.ID {
+		t.Fatalf("issuer users=%+v — login did not resolve to the linked user", env.issuer.users)
+	}
+	if len(env.users.users) != 1 {
+		t.Fatalf("email change at the provider forked a new user (n=%d)", len(env.users.users))
 	}
 }
 
@@ -279,7 +385,7 @@ func TestOAuthCallbackDisabledUserRejected(t *testing.T) {
 
 	disabled := &models.User{
 		Username: "banned", Email: "banned@example.com", Password: "hash",
-		Role: models.RoleUser, IsActive: false,
+		Role: models.RoleUser, IsActive: false, IsEmailVerified: true,
 	}
 	if err := env.users.Create(ctx, disabled); err != nil {
 		t.Fatal(err)
@@ -300,7 +406,7 @@ func TestOAuthCallbackBadIDTokenRejected(t *testing.T) {
 	env.verifier.claims = googleClaims("a@example.com", true)
 	env.verifier.err = ErrOAuthTokenVerificationFailed
 	env.client.token = exchangeToken("tampered-token")
-	state, _ := env.svc.GenerateState(context.Background())
+	state, _, _ := env.svc.BeginLogin(context.Background())
 
 	_, _, _, err := env.svc.HandleCallback(context.Background(), "code", state, "1.2.3.4", "UA")
 	if !errors.Is(err, ErrOAuthTokenVerificationFailed) {
@@ -327,7 +433,7 @@ func TestOAuthCallbackRealMFAEnforcement(t *testing.T) {
 	}
 	existing := &models.User{
 		Username: "mfauser", Email: "mfa@example.com", Password: pwHash,
-		Role: models.RoleUser, IsActive: true,
+		Role: models.RoleUser, IsActive: true, IsEmailVerified: true,
 	}
 	if err := users.Create(ctx, existing); err != nil {
 		t.Fatal(err)
@@ -347,14 +453,19 @@ func TestOAuthCallbackRealMFAEnforcement(t *testing.T) {
 		&mockNotifier{}, nil, nil, totpRepo, nil,
 	)
 
-	verifier := &mockGoogleIDTokenVerifier{claims: googleClaims("mfa@example.com", true)}
+	verifier := &mockGoogleIDTokenVerifier{}
 	client := &mockGoogleOAuthClient{token: exchangeToken("id-token")}
 	svc := NewOAuthService(users, idents, kvStore, authSvc, verifier, client)
 
-	state, err := svc.GenerateState(ctx)
+	state, _, err := svc.BeginLogin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Echo the staged nonce so the ID-token binding passes (the point of this
+	// test is the MFA enforcement, not the nonce).
+	claims := googleClaims("mfa@example.com", true)
+	claims.Nonce = stagedNonce(t, kvStore, state)
+	verifier.claims = claims
 	pair, _, pending, err := svc.HandleCallback(ctx, "code", state, "1.2.3.4", "UA")
 	if err != nil {
 		t.Fatal(err)
@@ -368,14 +479,14 @@ func TestOAuthCallbackRealMFAEnforcement(t *testing.T) {
 	// The pending token must be a genuine type=mfa_pending JWT — i.e. the
 	// exact same token the password flow issues, completable via the
 	// EXISTING /mfa/login-verify endpoint.
-	claims, err := jwtMgr.Verify(pending.MFAToken)
+	mfaClaims, err := jwtMgr.Verify(pending.MFAToken)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claims.Type != jwt.TokenTypeMFAPending {
-		t.Fatalf("token type=%q, want %q", claims.Type, jwt.TokenTypeMFAPending)
+	if mfaClaims.Type != jwt.TokenTypeMFAPending {
+		t.Fatalf("token type=%q, want %q", mfaClaims.Type, jwt.TokenTypeMFAPending)
 	}
-	if claims.UserID != existing.ID {
-		t.Fatalf("token uid=%d, want %d", claims.UserID, existing.ID)
+	if mfaClaims.UserID != existing.ID {
+		t.Fatalf("token uid=%d, want %d", mfaClaims.UserID, existing.ID)
 	}
 }

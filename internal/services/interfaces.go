@@ -49,9 +49,6 @@ type RefreshTokenRepo interface {
 	// treat that as token reuse, not as an error to propagate.
 	Revoke(ctx context.Context, rt *models.RefreshToken) error
 	RevokeAllForUser(ctx context.Context, userID uint) error
-	// TouchLastActive bumps last_active_at for the token — called whenever the
-	// session is used (login / refresh rotation). Bounded to the given row id.
-	TouchLastActive(ctx context.Context, id uint) error
 	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
 }
 
@@ -101,15 +98,20 @@ type UsedTokenRepo interface {
 	IsUsed(ctx context.Context, jti string) (bool, error)
 }
 
-// ---- Notifier (for reset / verify emails) ----
+// ---- Notifier (for reset / verify / alert emails) ----
 
-// Notifier delivers password-reset / email-verification messages.
-// The default implementation logs to console; swap for an SMTP-backed one
-// in production. Implementations must honor the context (A2) so request
-// cancellation and deadlines propagate into delivery.
+// Notifier delivers password-reset / email-verification messages and
+// security-transparency alerts. The default implementation logs to console;
+// swap for an SMTP-backed one in production. Implementations must honor the
+// context (A2) so request cancellation and deadlines propagate into delivery.
 type Notifier interface {
 	SendPasswordReset(ctx context.Context, to, resetToken string) error
 	SendEmailVerification(ctx context.Context, to, verifyToken string) error
+	// SendNewLoginAlert notifies the user of a sign-in from an IP not seen in
+	// the lookback window. TRANSPARENCY ONLY — deliberately not risk-based
+	// authentication: no step-up, no blocking (product decision for
+	// predictable UX across deployments). The message carries no secrets.
+	SendNewLoginAlert(ctx context.Context, to, ip, device string) error
 }
 
 // ---- CAPTCHA verifier (§2) ----

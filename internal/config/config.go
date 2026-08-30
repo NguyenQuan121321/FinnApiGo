@@ -147,6 +147,13 @@ type AuthConfig struct {
 	// seal the re-viewable copy of each recovery code. When empty the key is
 	// derived from JWT_SECRET (see cmd/server wiring).
 	RecoveryCodeKey string
+	// NotifyNewIPLogin (env LOGIN_NOTIFY_NEW_IP, default true) sends a
+	// TRANSPARENT "new sign-in" email the first time a user logs in from an
+	// IP not seen in the lookback window. Deliberately NOT risk-based
+	// authentication — no step-up, no blocking, no extra prompt (product
+	// decision: predictable one-shot login UX everywhere); the email is the
+	// user-visible audit trail.
+	NotifyNewIPLogin bool
 }
 
 type RateLimitConfig struct {
@@ -213,6 +220,15 @@ type SecurityConfig struct {
 	// KeyDir is the directory holding <name>.key files when
 	// KeyProvider == "file".
 	KeyDir string
+	// BreachedPasswordCheck (env BREACHED_PASSWORD_CHECK, default true)
+	// screens new passwords (register / reset / set / change) against the
+	// Pwned Passwords corpus via k-anonymity (only a 5-hex-char SHA-1 prefix
+	// leaves the process). The check FAILS OPEN on upstream outage — it is
+	// defense-in-depth, never a hard gate on availability.
+	BreachedPasswordCheck bool
+	// BreachedPasswordTimeout bounds each HIBP range query (inline on the
+	// password-set paths).
+	BreachedPasswordTimeout time.Duration
 }
 
 // CaptchaConfig drives the optional CAPTCHA on /register and post-fail /login.
@@ -309,6 +325,7 @@ func Load() (*Config, error) {
 			RecoveryCodeCount:    l.envInt("RECOVERY_CODE_COUNT", 10),
 			RecoveryCodeBytes:    l.envInt("RECOVERY_CODE_BYTES", 16),
 			RecoveryCodeKey:      l.env("RECOVERY_CODE_KEY", ""),
+			NotifyNewIPLogin:     l.envBool("LOGIN_NOTIFY_NEW_IP", true),
 		},
 		RateLimit: RateLimitConfig{
 			RPS:                      l.envFloat("RATE_LIMIT_RPS", 5),
@@ -336,12 +353,14 @@ func Load() (*Config, error) {
 			URL: l.env("REDIS_URL", ""),
 		},
 		Security: SecurityConfig{
-			MaxRequestBodyBytes: l.envInt64("MAX_REQUEST_BODY_BYTES", 1<<20), // 1 MiB
-			MaxPasswordLength:   l.envInt("MAX_PASSWORD_LENGTH", 72),
-			RateLimiterEntryTTL: l.envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
-			TOTPMaxConcurrent:   l.envInt("TOTP_MAX_CONCURRENT", 64),
-			KeyProvider:         l.env("KEY_PROVIDER", "env"),
-			KeyDir:              l.env("KEY_DIR", ""),
+			MaxRequestBodyBytes:     l.envInt64("MAX_REQUEST_BODY_BYTES", 1<<20), // 1 MiB
+			MaxPasswordLength:       l.envInt("MAX_PASSWORD_LENGTH", 72),
+			RateLimiterEntryTTL:     l.envDuration("RATE_LIMITER_ENTRY_TTL", 5*time.Minute),
+			TOTPMaxConcurrent:       l.envInt("TOTP_MAX_CONCURRENT", 64),
+			KeyProvider:             l.env("KEY_PROVIDER", "env"),
+			KeyDir:                  l.env("KEY_DIR", ""),
+			BreachedPasswordCheck:   l.envBool("BREACHED_PASSWORD_CHECK", true),
+			BreachedPasswordTimeout: l.envDuration("BREACHED_PASSWORD_TIMEOUT", 5*time.Second),
 		},
 		Captcha: CaptchaConfig{
 			Provider: l.env("CAPTCHA_PROVIDER", ""),

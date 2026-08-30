@@ -110,6 +110,43 @@ func (r *UserRepository) BumpPwdVersion(ctx context.Context, userID uint) error 
 		Update("pwd_version", gorm.Expr("pwd_version + 1")).Error
 }
 
+// CredentialChangeTx applies the ENTIRE credential-change sequence as ONE
+// transaction: password hash, lockout reset, pwd-version bump (A7), and the
+// caller-supplied refresh-token revocation. Without the transaction, a crash
+// between the UPDATEs could leave the password changed while an attacker's
+// refresh tokens survive — the exact state a password change exists to end.
+// Implements services.TransactionalCredentialChanger.
+func (r *UserRepository) CredentialChangeTx(ctx context.Context, userID uint, hashedPassword string, revokeRefresh func(tx *gorm.DB) error) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.User{}).
+			Where("id = ?", userID).
+			Updates(map[string]interface{}{
+				"password":              hashedPassword,
+				"failed_login_attempts": 0,
+				"locked_until":          nil,
+				"pwd_version":           gorm.Expr("pwd_version + 1"),
+			}).Error; err != nil {
+			return err
+		}
+		return revokeRefresh(tx)
+	})
+}
+
+// SetFirstPassword sets the password hash ONLY while the account has none
+// (conditional UPDATE on password = ”). Returns false when the account
+// already has a password — including when a concurrent setter won the race —
+// so the check-then-act window in SetPassword is closed.
+// Implements services.FirstPasswordSetter.
+func (r *UserRepository) SetFirstPassword(ctx context.Context, userID uint, hashedPassword string) (bool, error) {
+	res := r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ? AND password = ?", userID, "").
+		Update("password", hashedPassword)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
+}
+
 func (r *UserRepository) SetEmailVerified(ctx context.Context, user *models.User, verified bool) error {
 	user.IsEmailVerified = verified
 	return r.db.WithContext(ctx).Model(user).Update("is_email_verified", verified).Error

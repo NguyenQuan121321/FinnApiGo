@@ -44,6 +44,10 @@ var (
 
 	// 422 / policy
 	ErrDisposableEmail = errors.New("disposable email addresses are not allowed")
+	// ErrPasswordBreached — the chosen password appears in known breach
+	// corpora (NIST 800-63B compromised-credential screening). The check is
+	// best-effort and fails OPEN, so this error only fires on a confirmed hit.
+	ErrPasswordBreached = errors.New("password appears in known data breaches — choose a different one")
 
 	// 429 — store-backed velocity limits (§2 registration, §3 per-account
 	// login). Surfaced as 429 to clients.
@@ -55,4 +59,10 @@ var (
 	ErrOAuthCodeExchangeFailed      = errors.New("failed to exchange authorization code")
 	ErrOAuthTokenVerificationFailed = errors.New("failed to verify google id token")
 	ErrOAuthNotConfigured           = errors.New("google sign-in is not configured")
+	// ErrOAuthEmailTaken — a Google identity presented an email that belongs
+	// to an existing LOCAL account whose email was never verified. The link
+	// is refused (auto-linking an unverified local account is the classic
+	// account-takeover pattern); the legitimate owner must verify the email
+	// first or sign in with their password.
+	ErrOAuthEmailTaken = errors.New("an account with this email already exists — verify the email or sign in with your password")
 )

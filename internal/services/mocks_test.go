@@ -249,15 +249,8 @@ func (m *mockTokenRepo) RevokeByID(ctx context.Context, id, userID uint) error {
 	return gorm.ErrRecordNotFound
 }
 
-// TouchLastActive bumps last_active_at for the given row id (best-effort).
-func (m *mockTokenRepo) TouchLastActive(ctx context.Context, id uint) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if rt, ok := m.rows[id]; ok {
-		rt.LastActiveAt = time.Now()
-	}
-	return nil
-}
+// TouchLastActive was removed with the dead session-bump feature — rotation
+// stamps the fresh row, which is the authoritative activity marker.
 
 func (m *mockTokenRepo) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
 	return 0, nil
@@ -328,6 +321,9 @@ type mockNotifier struct {
 	mu            sync.Mutex
 	lastReset     string
 	lastVerify    string
+	lastAlertIP   string
+	lastAlertDev  string
+	alertsSent    int
 	verifySendErr error
 }
 
@@ -345,6 +341,15 @@ func (n *mockNotifier) SendEmailVerification(ctx context.Context, to, verifyToke
 		return n.verifySendErr
 	}
 	n.lastVerify = verifyToken
+	return nil
+}
+
+func (n *mockNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceName string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.alertsSent++
+	n.lastAlertIP = ip
+	n.lastAlertDev = deviceName
 	return nil
 }
 
@@ -385,6 +390,18 @@ func (m *mockStore) Get(key string) (any, bool) {
 	defer m.mu.Unlock()
 	v, ok := m.data[key]
 	return v, ok
+}
+
+// Take atomically returns and deletes — mirrors the production contract.
+func (m *mockStore) Take(key string) (any, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.data[key]
+	if !ok {
+		return nil, false
+	}
+	delete(m.data, key)
+	return v, true
 }
 
 func (m *mockStore) Set(key string, value any, ttl time.Duration) {
@@ -595,21 +612,27 @@ func (m *mockGoogleIDTokenVerifier) Verify(ctx context.Context, rawIDToken strin
 // ---- mock Google OAuth client (skips consent URL + code exchange) ----
 
 type mockGoogleOAuthClient struct {
-	mu      sync.Mutex
-	authURL string
-	token   *oauth2.Token
-	err     error
-	codes   []string
+	mu            sync.Mutex
+	authURL       string
+	token         *oauth2.Token
+	err           error
+	codes         []string
+	lastChallenge string
+	lastVerifier  string
 }
 
-func (m *mockGoogleOAuthClient) AuthCodeURL(state string) string {
-	return m.authURL + "?state=" + state
+func (m *mockGoogleOAuthClient) AuthCodeURL(state, codeChallenge string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastChallenge = codeChallenge
+	return m.authURL + "?state=" + state + "&code_challenge=" + codeChallenge + "&code_challenge_method=S256"
 }
 
-func (m *mockGoogleOAuthClient) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
+func (m *mockGoogleOAuthClient) Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.codes = append(m.codes, code)
+	m.lastVerifier = codeVerifier
 	if m.err != nil {
 		return nil, m.err
 	}

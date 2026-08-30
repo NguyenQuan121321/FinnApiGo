@@ -102,6 +102,10 @@ func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer s
 // was never confirmed (disabled) rotates freely, matching first-time
 // enrollment.
 func (s *TOTPService) Enable(ctx context.Context, userID uint, email, sudoToken string) (string, string, error) {
+	if !s.acquireRotationLock(userID) {
+		return "", "", ErrRateLimited
+	}
+	defer s.releaseRotationLock(userID)
 	old, err := s.repo.FindByUserID(ctx, userID)
 	if err != nil {
 		return "", "", err
@@ -166,6 +170,14 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return nil, err
 	}
+	// Serialize the activation critical section: two concurrent verify
+	// submissions (double-click, retry storm) must not both pass the enabled
+	// check and race the secret swap + recovery-code replacement — the loser
+	// would silently invalidate the codes the first response just displayed.
+	if !s.acquireRotationLock(userID) {
+		return nil, ErrRateLimited
+	}
+	defer s.releaseRotationLock(userID)
 	d, err := s.repo.FindByUserID(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -262,21 +274,22 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 	if err != nil {
 		return err
 	}
-	want := hash.HashRecoveryCode(code)
+	hashes := make([]string, len(codes))
 	for i := range codes {
-		if hash.ConstantTimeCompare(codes[i].CodeHash, want) {
-			if err := s.repo.MarkRecoveryCodeUsed(ctx, &codes[i]); err != nil {
-				if errors.Is(err, repositories.ErrRecoveryCodeUsed) {
-					// A concurrent request consumed the code between our read
-					// and the mark — same outcome as any failed attempt.
-					s.recordFailure(ctx, userID, "recovery code replay")
-					return ErrInvalidCode
-				}
-				return err
+		hashes[i] = codes[i].CodeHash
+	}
+	if idx := hash.MatchRecoveryCode(code, hashes); idx >= 0 {
+		if err := s.repo.MarkRecoveryCodeUsed(ctx, &codes[idx]); err != nil {
+			if errors.Is(err, repositories.ErrRecoveryCodeUsed) {
+				// A concurrent request consumed the code between our read
+				// and the mark — same outcome as any failed attempt.
+				s.recordFailure(ctx, userID, "recovery code replay")
+				return ErrInvalidCode
 			}
-			s.recordSuccess(ctx, userID, models.AuditEventRecoveryCodeUsed, "recovery code used")
-			return nil
+			return err
 		}
+		s.recordSuccess(ctx, userID, models.AuditEventRecoveryCodeUsed, "recovery code used")
+		return nil
 	}
 	s.recordFailure(ctx, userID, "bad recovery code")
 	return ErrInvalidCode
@@ -486,6 +499,26 @@ func (s *TOTPService) recordFailure(ctx context.Context, userID uint, detail str
 		UserID: &uid, Event: models.AuditEventTOTPFailed, Success: false, Detail: detail,
 		CreatedAt: time.Now(),
 	})
+}
+
+// rotationLockTTL bounds the per-user enrollment/rotation critical section.
+const rotationLockTTL = 10 * time.Second
+
+// acquireRotationLock serializes the read-modify-write enrollment flows
+// (Enable / VerifyEnable) per user via the shared store. Returns false when
+// another rotation is in flight (429 to the caller). Nil store (tests) = no-op.
+func (s *TOTPService) acquireRotationLock(userID uint) bool {
+	if s.store == nil {
+		return true
+	}
+	return s.store.SetNX(fmt.Sprintf("totp:rotatelock:%d", userID), "1", rotationLockTTL)
+}
+
+// releaseRotationLock drops the per-user rotation critical section.
+func (s *TOTPService) releaseRotationLock(userID uint) {
+	if s.store != nil {
+		s.store.Delete(fmt.Sprintf("totp:rotatelock:%d", userID))
+	}
 }
 
 // storeCounterValue reads a counter written by IncrBy WITHOUT incrementing

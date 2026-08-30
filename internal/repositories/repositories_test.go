@@ -241,27 +241,9 @@ func TestRefreshTokenRepository_RevokeByID(t *testing.T) {
 	}
 }
 
-func TestRefreshTokenRepository_TouchLastActive(t *testing.T) {
-	ctx := context.Background()
-	db := testDB(t)
-	u := testUser(t, db)
-	repo := NewRefreshTokenRepository(db)
-	rt := &models.RefreshToken{UserID: u.ID, TokenHash: "touch", ExpiresAt: time.Now().Add(time.Hour), LastActiveAt: time.Now().Add(-time.Hour)}
-	if err := repo.Create(ctx, rt); err != nil {
-		t.Fatal(err)
-	}
-	original := rt.LastActiveAt
-	if err := repo.TouchLastActive(ctx, rt.ID); err != nil {
-		t.Fatalf("TouchLastActive err=%v", err)
-	}
-	got, err := repo.FindByHash(ctx, "touch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !got.LastActiveAt.After(original) {
-		t.Error("expected LastActiveAt to be bumped")
-	}
-}
+// TestRefreshTokenRepository_TouchLastActive was removed with the dead
+// session-bump feature: rotation creates a fresh row stamped with "now",
+// which is the authoritative activity marker for the sessions list.
 
 func TestUsedTokenRepository(t *testing.T) {
 	ctx := context.Background()

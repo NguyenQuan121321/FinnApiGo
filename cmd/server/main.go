@@ -175,10 +175,18 @@ func run() error {
 		return fmt.Errorf("recovery-code encryptor: %w", err)
 	}
 	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEnc, jwtMgr)
+	// NIST 800-63B breached-password screening (fail-open, k-anonymity):
+	// only a 5-hex-char SHA-1 prefix of the password leaves the process.
+	var authOpts []services.AuthServiceOption
+	if cfg.Security.BreachedPasswordCheck {
+		authOpts = append(authOpts, services.WithBreachedPasswordChecker(
+			services.NewBreachedPasswordChecker("", cfg.Security.BreachedPasswordTimeout)))
+	}
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
 		totpRepo, totpSvc,
+		authOpts...,
 	)
 
 	// --- Google OAuth (endpoints only registered when fully configured) ---
@@ -267,9 +275,10 @@ func run() error {
 
 	// Run token/used-token/audit-retention cleanup in the background (S2):
 	// leader-elected via the shared store by default (exactly one replica
-	// runs it), with the RUN_JOBS tri-state as the explicit override.
+	// runs it), with the RUN_JOBS tri-state as the explicit override. stopJobs
+	// is invoked explicitly during shutdown (below) — NOT deferred — so jobs
+	// stop while the DB pool is still open.
 	stopJobs := startJobs(cfg, tokenRepo, usedTokenRepo, baseAuditRepo, kvStore)
-	defer stopJobs()
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -292,6 +301,12 @@ func run() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	err = srv.Shutdown(ctx)
+
+	// Stop background jobs BEFORE the audit writer and DB pool close: the
+	// runner's Stop cancels the in-flight job context (leader.go), so a tick
+	// landing mid-shutdown can no longer start a purge against a closed pool.
+	// (Historically stopJobs was deferred and ran last — after sqlDB.Close().)
+	stopJobs()
 
 	// Flush resources in dependency order: the async audit writer drains its
 	// buffer into the DB first, then the DB pool itself is closed. Closing in

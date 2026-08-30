@@ -232,7 +232,7 @@ func TestPasskey_CloneDetection_RevokesAndAudits_W5(t *testing.T) {
 	}
 	r := httptest.NewRequest(http.MethodPost, "/verify", nil)
 	clone := &webauthn.Credential{
-		ID:           []byte("cred-clone"),
+		ID:            []byte("cred-clone"),
 		Authenticator: webauthn.Authenticator{SignCount: 3, CloneWarning: true}, // regression!
 	}
 	user, _, err := ps.loadUser(ctx, u.ID)
@@ -253,7 +253,7 @@ func TestPasskey_CloneDetection_RevokesAndAudits_W5(t *testing.T) {
 
 	// A healthy assertion (counter advanced) succeeds and touches the record.
 	healthy := &webauthn.Credential{
-		ID:           []byte("cred-clone"),
+		ID:            []byte("cred-clone"),
 		Authenticator: webauthn.Authenticator{SignCount: 11},
 	}
 	// Re-create the credential since the clone path revoked it.

@@ -1453,6 +1453,7 @@ func TestRegister_NotifierFailureStillSucceeds_C11(t *testing.T) {
 type failingStore struct{}
 
 func (failingStore) Get(string) (any, bool)                    { return nil, false }
+func (failingStore) Take(string) (any, bool)                   { return nil, false }
 func (failingStore) Set(string, any, time.Duration)            {}
 func (failingStore) SetNX(string, any, time.Duration) bool     { return false }
 func (failingStore) IncrBy(string, int64, time.Duration) int64 { return 0 }

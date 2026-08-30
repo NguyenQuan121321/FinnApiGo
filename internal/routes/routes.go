@@ -144,7 +144,10 @@ func Register(deps Deps) *gin.Engine {
 
 	// ---- Google OAuth 2.0 / OpenID Connect ----
 	if deps.OAuth != nil {
-		auth.GET("/google/login", deps.OAuth.GoogleLogin)
+		// /google/login mints a store-backed challenge per request — without
+		// the limiter it is the one unauthenticated endpoint that grows
+		// shared-store state, i.e. a cheap key-flooding DoS vector.
+		auth.GET("/google/login", deps.RateLimit.Handler(), deps.OAuth.GoogleLogin)
 		auth.GET("/google/callback", deps.RateLimit.Handler(), deps.OAuth.GoogleCallback)
 	}
 

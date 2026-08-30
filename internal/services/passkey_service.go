@@ -116,7 +116,10 @@ func (s *passkeyService) BeginRegistration(ctx context.Context, userID uint, in 
 	}
 	options, session, err := s.web.BeginRegistration(user,
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
-			UserVerification: protocol.VerificationPreferred,
+			// UV REQUIRED (not "preferred"): a passkey login is treated as full
+			// authentication for TOTP-enabled accounts, so user presence alone
+			// (a security key with no PIN) must never satisfy the ceremony.
+			UserVerification: protocol.VerificationRequired,
 			ResidentKey:      protocol.ResidentKeyRequirementPreferred,
 		}),
 		// W7 — operator-selected attestation conveyance (none|indirect|direct).
@@ -168,7 +171,10 @@ func (s *passkeyService) FinishRegistration(ctx context.Context, userID uint, r 
 }
 
 // loadUser builds the webauthn.User adapter for a user plus their stored
-// credentials.
+// credentials. Disabled accounts are refused here so EVERY ceremony
+// (registration and authentication alike) enforces the account-state gate —
+// a deactivation must be effective on the WebAuthn paths exactly like it is
+// on password/OAuth/refresh.
 func (s *passkeyService) loadUser(ctx context.Context, userID uint) (webauthnUser, []webauthn.Credential, error) {
 	u, err := s.users.FindByID(ctx, userID)
 	if err != nil {
@@ -176,6 +182,9 @@ func (s *passkeyService) loadUser(ctx context.Context, userID uint) (webauthnUse
 	}
 	if u == nil {
 		return webauthnUser{}, nil, ErrUserNotFound
+	}
+	if !u.IsActive {
+		return webauthnUser{}, nil, ErrAccountDisabled
 	}
 	rows, err := s.repo.ListByUser(ctx, userID, false)
 	if err != nil {
@@ -197,13 +206,15 @@ func (s *passkeyService) stageJSON(ctx context.Context, key string, v any) error
 	return nil
 }
 
-// takeJSON fetches and deletes the staged value — challenges are single-use.
+// takeJSON atomically fetches and deletes the staged value — challenges are
+// single-use. Store.Take is one operation on every backend, so two concurrent
+// Finish calls carrying the same assertion cannot both pass a Get-then-Delete
+// race and double-complete the ceremony.
 func (s *passkeyService) takeJSON(ctx context.Context, key string, dst any) error {
-	rawAny, ok := s.kv.Get(key)
+	rawAny, ok := s.kv.Take(key)
 	if !ok {
 		return ErrPasskeyChallenge
 	}
-	s.kv.Delete(key)
 	raw, isStr := rawAny.(string)
 	if !isStr {
 		return ErrPasskeyChallenge
@@ -229,8 +240,8 @@ func (w webauthnUser) WebAuthnID() []byte {
 	return buf
 }
 
-func (w webauthnUser) WebAuthnName() string           { return w.u.Username }
-func (w webauthnUser) WebAuthnDisplayName() string     { return w.u.FullName }
+func (w webauthnUser) WebAuthnName() string                       { return w.u.Username }
+func (w webauthnUser) WebAuthnDisplayName() string                { return w.u.FullName }
 func (w webauthnUser) WebAuthnCredentials() []webauthn.Credential { return w.creds }
 
 // credentialFromRow maps a stored row into the library credential.
@@ -238,11 +249,11 @@ func credentialFromRow(row *models.PasskeyCredential) webauthn.Credential {
 	var transports []protocol.AuthenticatorTransport
 	_ = json.Unmarshal([]byte(row.Transports), &transports)
 	return webauthn.Credential{
-		ID:               row.CredentialID,
-		PublicKey:        row.PublicKey,
-		AttestationType:  row.AttestationType,
-		Transport:        transports,
-		Authenticator:    webauthn.Authenticator{SignCount: row.SignCount},
+		ID:              row.CredentialID,
+		PublicKey:       row.PublicKey,
+		AttestationType: row.AttestationType,
+		Transport:       transports,
+		Authenticator:   webauthn.Authenticator{SignCount: row.SignCount},
 	}
 }
 
@@ -314,7 +325,10 @@ func (s *passkeyService) BeginAuthentication(ctx context.Context, userID uint) (
 	if err != nil {
 		return nil, err
 	}
-	options, session, err := s.web.BeginLogin(user)
+	// UV REQUIRED — see BeginRegistration; the library enforces the session's
+	// userVerification request at FinishLogin, so presence-only assertions are
+	// rejected before any token pair is issued.
+	options, session, err := s.web.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		// A user with zero credentials cannot start an authentication
 		// ceremony — surface as not found so the client offers registration.
@@ -355,7 +369,7 @@ func (s *passkeyService) completeAuthentication(ctx context.Context, userID uint
 	// (presented counter ≤ stored counter). Revoke the credential, audit the
 	// event, and refuse the login.
 	if cred.Authenticator.CloneWarning {
-		_ = s.repo.RevokeByID(ctx, s.rowIDByCredential(userID, cred.ID), userID)
+		_ = s.repo.RevokeByID(ctx, s.rowIDByCredential(ctx, userID, cred.ID), userID)
 		s.audits.Record(ctx, &models.AuditLog{
 			UserID: &userID, Event: models.AuditEventWebAuthnCloneDetected,
 			IPAddress: clientIPFrom(r), Success: false,
@@ -365,7 +379,7 @@ func (s *passkeyService) completeAuthentication(ctx context.Context, userID uint
 	}
 
 	// Maintain the device record (W6).
-	_ = s.repo.TouchUsage(ctx, s.rowIDByCredential(userID, cred.ID), cred.Authenticator.SignCount, time.Now())
+	_ = s.repo.TouchUsage(ctx, s.rowIDByCredential(ctx, userID, cred.ID), cred.Authenticator.SignCount, time.Now())
 	s.audits.Record(ctx, &models.AuditLog{
 		UserID: &userID, Event: models.AuditEventPasskeyLogin,
 		IPAddress: clientIPFrom(r), Success: true, Detail: cred.AttestationFormat,
@@ -398,9 +412,10 @@ func (s *passkeyService) Revoke(ctx context.Context, id, userID uint) error {
 	return nil
 }
 
-// rowIDByCredential resolves the DB row id for a verified credential.
-func (s *passkeyService) rowIDByCredential(userID uint, credentialID []byte) uint {
-	row, err := s.repo.FindByCredentialID(context.Background(), credentialID)
+// rowIDByCredential resolves the DB row id for a verified credential. The
+// request context is threaded so a client disconnect cancels the lookup.
+func (s *passkeyService) rowIDByCredential(ctx context.Context, userID uint, credentialID []byte) uint {
+	row, err := s.repo.FindByCredentialID(ctx, credentialID)
 	if err != nil || row == nil || row.UserID != userID {
 		return 0
 	}

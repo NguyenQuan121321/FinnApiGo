@@ -6,7 +6,10 @@ package services
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -28,6 +31,7 @@ type GoogleIDTokenClaims struct {
 	EmailVerified bool
 	Name          string
 	Picture       string
+	Nonce         string // replay-binding claim echoed by Google (checked against the challenge)
 }
 
 // GoogleIDTokenVerifier abstracts Google ID token verification so the service
@@ -49,9 +53,11 @@ type TokenIssuer interface {
 // building the consent-screen URL and exchanging the authorization code for
 // tokens. Production wraps golang.org/x/oauth2 (standard, well-audited — no
 // hand-rolled exchange); tests inject a fake so no real network calls happen.
+// Both methods carry PKCE (RFC 7636): the S256 challenge rides on the consent
+// URL, the verifier is handed to the exchange.
 type GoogleOAuthClient interface {
-	AuthCodeURL(state string) string
-	Exchange(ctx context.Context, code string) (*oauth2.Token, error)
+	AuthCodeURL(state, codeChallenge string) string
+	Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error)
 }
 
 // oauth2GoogleClient is the production client backed by golang.org/x/oauth2.
@@ -73,12 +79,17 @@ func NewGoogleOAuthClient(clientID, clientSecret, redirectURL string) GoogleOAut
 	}}
 }
 
-func (c *oauth2GoogleClient) AuthCodeURL(state string) string {
-	return c.cfg.AuthCodeURL(state)
+func (c *oauth2GoogleClient) AuthCodeURL(state, codeChallenge string) string {
+	return c.cfg.AuthCodeURL(state,
+		oauth2.SetAuthURLParam("code_challenge", codeChallenge),
+		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
+	)
 }
 
-func (c *oauth2GoogleClient) Exchange(ctx context.Context, code string) (*oauth2.Token, error) {
-	return c.cfg.Exchange(ctx, code)
+func (c *oauth2GoogleClient) Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error) {
+	return c.cfg.Exchange(ctx, code,
+		oauth2.SetAuthURLParam("code_verifier", codeVerifier),
+	)
 }
 
 // ---- Constants ----
@@ -87,21 +98,35 @@ const (
 	// oauthProviderGoogle is the provider identifier stored in oauth_identities.
 	oauthProviderGoogle = "google"
 
-	// oauthStateTTL is how long an OAuth state token lives in the store.
+	// oauthStateTTL is how long an OAuth challenge lives in the store.
 	// 10 minutes gives the user ample time to authenticate with Google.
 	oauthStateTTL = 10 * time.Minute
 
 	// oauthStateBytes is the entropy of the CSRF state parameter.
 	oauthStateBytes = 32 // 256 bits → 64 hex chars
+
+	// oauthNonceBytes is the entropy of the ID-token nonce.
+	oauthNonceBytes = 16 // 128 bits → 32 hex chars
 )
+
+// oauthChallenge is the server-side state stored (encrypted at rest only by
+// the store backend's isolation — it holds nothing secret beyond a PKCE
+// verifier, which is useless without the code) for one login attempt.
+type oauthChallenge struct {
+	Verifier string `json:"verifier"`
+	Nonce    string `json:"nonce"`
+}
+
+func oauthChallengeKey(state string) string { return "oauth:state:" + state }
 
 // ---- OAuthService ----
 
 // OAuthService implements the Google OAuth 2.0 / OpenID Connect sign-in flow:
-// state generation/validation, code exchange, ID token verification, account
-// linking, and delegation to TokenIssuer for MFA enforcement + token issuance.
-// It never creates sessions directly — the shared CheckMFAOrIssueTokens path
-// does, so OAuth and password logins behave identically downstream.
+// state generation/validation, PKCE, code exchange, ID token verification
+// (signature + audience + nonce), account linking, and delegation to
+// TokenIssuer for MFA enforcement + token issuance. It never creates sessions
+// directly — the shared CheckMFAOrIssueTokens path does, so OAuth and
+// password logins behave identically downstream.
 type OAuthService struct {
 	users       UserRepo
 	oauthIdents OAuthIdentityRepo
@@ -113,7 +138,7 @@ type OAuthService struct {
 
 // NewOAuthService constructs the OAuth service. All dependencies are
 // interfaces so the service is trivially unit-testable. A nil client disables
-// the flow at the callback stage (AuthorizationURL returns "").
+// the flow (BeginLogin returns an empty URL).
 func NewOAuthService(
 	users UserRepo,
 	oauthIdents OAuthIdentityRepo,
@@ -128,70 +153,93 @@ func NewOAuthService(
 	}
 }
 
-// GenerateState creates a cryptographically random state string and stores it
-// in the store.Store with a 10-minute TTL. The caller must pass this state
-// to AuthorizationURL and later to HandleCallback for validation.
-func (s *OAuthService) GenerateState(ctx context.Context) (string, error) {
-	b := make([]byte, oauthStateBytes)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("oauth: generate state: %w", err)
+// BeginLogin creates a full login attempt: a CSPRNG CSRF state, a PKCE S256
+// verifier, and an ID-token nonce — all staged server-side under the state
+// key with a 10-minute TTL. It returns the state (the handler ALSO binds it
+// to the browser via an HttpOnly cookie, closing login CSRF) and the consent
+// URL. An empty URL means Google sign-in is not configured.
+func (s *OAuthService) BeginLogin(ctx context.Context) (state, redirectURL string, err error) {
+	if s.client == nil {
+		return "", "", nil
 	}
-	state := hex.EncodeToString(b)
+	sb := make([]byte, oauthStateBytes)
+	if _, err = rand.Read(sb); err != nil {
+		return "", "", fmt.Errorf("oauth: generate state: %w", err)
+	}
+	state = hex.EncodeToString(sb)
+
+	verifier, err := pkceVerifier()
+	if err != nil {
+		return "", "", err
+	}
+	nb := make([]byte, oauthNonceBytes)
+	if _, err = rand.Read(nb); err != nil {
+		return "", "", fmt.Errorf("oauth: generate nonce: %w", err)
+	}
+	challenge := oauthChallenge{Verifier: verifier, Nonce: hex.EncodeToString(nb)}
+
 	if s.store != nil {
-		key := "oauth:state:" + state
-		if !s.store.SetNX(key, int64(1), oauthStateTTL) {
-			// Extremely unlikely (256-bit collision), but handle it.
-			return "", fmt.Errorf("oauth: state collision")
+		raw, err := json.Marshal(challenge)
+		if err != nil {
+			return "", "", fmt.Errorf("oauth: marshal challenge: %w", err)
+		}
+		if !s.store.SetNX(oauthChallengeKey(state), string(raw), oauthStateTTL) {
+			// Extremely unlikely (256-bit collision), but fail closed.
+			return "", "", fmt.Errorf("oauth: state collision")
 		}
 	}
-	return state, nil
+	return state, s.client.AuthCodeURL(state, s256Challenge(verifier)), nil
 }
 
-// ValidateState checks that the state was previously generated and stored, and
-// atomically consumes it (one-time use). The value is a counter: 1 = fresh,
-// 2 = consumed. IncrBy is atomic on both the in-memory and Redis stores, so a
-// concurrent replay of the same state gets n > 2 and is rejected.
-func (s *OAuthService) ValidateState(ctx context.Context, state string) error {
+// ConsumeState atomically validates AND deletes the challenge for state —
+// one-time use on every backend (Store.Take). The stored challenge (PKCE
+// verifier + nonce) is returned for the exchange and the ID-token check.
+func (s *OAuthService) ConsumeState(ctx context.Context, state string) (*oauthChallenge, error) {
 	if s.store == nil || state == "" {
-		return ErrOAuthStateInvalid
+		// No store: nothing staged to validate — refuse rather than run an
+		// unbound flow.
+		return nil, ErrOAuthStateInvalid
 	}
-	key := "oauth:state:" + state
-	if _, ok := s.store.Get(key); !ok {
-		return ErrOAuthStateInvalid
+	rawAny, ok := s.store.Take(oauthChallengeKey(state))
+	if !ok {
+		return nil, ErrOAuthStateInvalid // missing, expired, or already consumed
 	}
-	if n := s.store.IncrBy(key, 1, oauthStateTTL); n != 2 {
-		return ErrOAuthStateInvalid // already consumed — replay
+	raw, ok := rawAny.(string)
+	if !ok {
+		return nil, ErrOAuthStateInvalid
 	}
-	return nil
+	var challenge oauthChallenge
+	if err := json.Unmarshal([]byte(raw), &challenge); err != nil || challenge.Verifier == "" {
+		return nil, ErrOAuthStateInvalid
+	}
+	return &challenge, nil
 }
 
-// AuthorizationURL builds the Google OAuth 2.0 consent-screen URL carrying the
-// given CSRF state, with client_id / redirect_uri / scope (openid email
-// profile) from configuration. Returns an empty string when Google OAuth is
-// not configured.
-func (s *OAuthService) AuthorizationURL(state string) string {
-	if s.client == nil {
-		return ""
-	}
-	return s.client.AuthCodeURL(state)
+// s256Challenge derives the PKCE code challenge (RFC 7636 section 4.2):
+// BASE64URL-ENCODE(SHA256(ASCII(verifier))).
+func s256Challenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
-// HandleCallback processes the Google OAuth callback: validates the CSRF
-// state, exchanges the authorization code for tokens, verifies the ID token
-// (signature + audience via JWKS), enforces email_verified, links or creates
-// the local user account, and delegates MFA enforcement + token issuance to
-// the shared TokenIssuer — the exact same path as password Login.
+// HandleCallback processes the Google OAuth callback: consumes the CSRF
+// state (atomic single-use), exchanges the authorization code WITH the PKCE
+// verifier, verifies the ID token (JWKS signature + audience + nonce),
+// enforces email_verified, links or creates the local user account, and
+// delegates MFA enforcement + token issuance to the shared TokenIssuer — the
+// exact same path as password Login.
 func (s *OAuthService) HandleCallback(ctx context.Context, code, state, ip, ua string) (TokenPair, UserProfile, *MFAPendingResult, error) {
-	// ---- 1. Validate CSRF state BEFORE any network exchange ----
-	if err := s.ValidateState(ctx, state); err != nil {
+	// ---- 1. Consume the CSRF state BEFORE any network exchange ----
+	challenge, err := s.ConsumeState(ctx, state)
+	if err != nil {
 		return TokenPair{}, UserProfile{}, nil, err
 	}
 	if s.client == nil {
 		return TokenPair{}, UserProfile{}, nil, ErrOAuthNotConfigured
 	}
 
-	// ---- 2. Exchange authorization code for tokens ----
-	token, err := s.client.Exchange(ctx, code)
+	// ---- 2. Exchange the authorization code (PKCE verifier attached) ----
+	token, err := s.client.Exchange(ctx, code, challenge.Verifier)
 	if err != nil {
 		return TokenPair{}, UserProfile{}, nil, fmt.Errorf("%w: %w", ErrOAuthCodeExchangeFailed, err)
 	}
@@ -204,6 +252,11 @@ func (s *OAuthService) HandleCallback(ctx context.Context, code, state, ip, ua s
 	claims, err := s.idVerifier.Verify(ctx, rawIDToken)
 	if err != nil {
 		return TokenPair{}, UserProfile{}, nil, err
+	}
+	// Nonce binding: the ID token must echo the nonce staged with THIS state,
+	// so a stolen/borrowed code+token pair for a different attempt is useless.
+	if claims.Nonce == "" || claims.Nonce != challenge.Nonce {
+		return TokenPair{}, UserProfile{}, nil, ErrOAuthTokenVerificationFailed
 	}
 
 	// ---- 4. Enforce email_verified — never link an unverified email ----
@@ -227,28 +280,55 @@ func (s *OAuthService) HandleCallback(ctx context.Context, code, state, ip, ua s
 	return s.issuer.CheckMFAOrIssueTokens(ctx, user, ip, ua, "google-oauth")
 }
 
-// findOrCreateUser looks up a user by verified email. If none exists it
-// auto-registers one (IsEmailVerified=true — Google already proved control of
-// the inbox, so the existing flag is reused rather than adding a second one).
-// Either way it ensures an OAuthIdentity link exists for this Google account.
+// findOrCreateUser resolves the local account for a verified Google identity.
+//
+// Resolution order matters for security:
+//  1. The persisted identity row (provider, sub) is the source of truth —
+//     "sub" is Google's stable user ID, so a Google-side email CHANGE cannot
+//     fork the login onto a different local account or bypass the link.
+//  2. Without a link, an existing local user is attached ONLY when their
+//     email was already verified. Auto-linking an UNVERIFIED local account on
+//     an email match is the classic takeover pattern (whoever controls that
+//     address after reassignment would inherit the account).
+//  3. Otherwise a fresh account is provisioned from the verified identity.
 func (s *OAuthService) findOrCreateUser(ctx context.Context, claims *GoogleIDTokenClaims, email string) (*models.User, error) {
+	// 1. The stored link wins.
+	ident, err := s.oauthIdents.FindByProviderAndProviderUserID(ctx, oauthProviderGoogle, claims.Sub)
+	if err != nil {
+		return nil, fmt.Errorf("oauth: check identity: %w", err)
+	}
+	if ident != nil {
+		user, err := s.users.FindByID(ctx, ident.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("oauth: find linked user: %w", err)
+		}
+		if user == nil {
+			// Dangling link (user row deleted without cleaning identities) —
+			// refuse rather than silently re-provisioning under the same sub.
+			return nil, ErrUserNotFound
+		}
+		return user, nil
+	}
+
+	// 2. Match by email — verified local accounts only.
 	user, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
 		return nil, fmt.Errorf("oauth: find user: %w", err)
 	}
-
-	if user == nil {
+	if user != nil {
+		if !user.IsEmailVerified {
+			// Unverified local account with this email: REFUSE. Google's
+			// verification proves control of the address NOW, but it says
+			// nothing about who registered the local account — the flag
+			// promotion this branch used to do was the takeover vector.
+			return nil, ErrOAuthEmailTaken
+		}
+	} else {
+		// 3. Provision a new account from the verified identity.
 		user, err = s.createGoogleUser(ctx, claims, email)
 		if err != nil {
 			return nil, err
 		}
-	} else if !user.IsEmailVerified {
-		// Existing password-registered account: Google's verification is
-		// sufficient proof, so promote the flag on first Google sign-in.
-		if err := s.users.SetEmailVerified(ctx, user, true); err != nil {
-			return nil, fmt.Errorf("oauth: mark email verified: %w", err)
-		}
-		user.IsEmailVerified = true
 	}
 
 	if err := s.linkIdentity(ctx, user.ID, claims); err != nil {

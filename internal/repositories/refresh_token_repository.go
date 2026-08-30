@@ -91,11 +91,13 @@ func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID ui
 		Update("revoked", true).Error
 }
 
-// TouchLastActive bumps the last_active_at timestamp for a session row.
-func (r *RefreshTokenRepository) TouchLastActive(ctx context.Context, id uint) error {
-	return r.db.WithContext(ctx).Model(&models.RefreshToken{}).
-		Where("id = ?", id).
-		Update("last_active_at", time.Now()).Error
+// RevokeAllForUserTx is RevokeAllForUser bound to a caller-provided
+// transaction — the credential-change flow revokes sessions inside the SAME
+// transaction as the password update (services.TxScopedTokenRevoker).
+func (r *RefreshTokenRepository) RevokeAllForUserTx(tx *gorm.DB, userID uint) error {
+	return tx.Model(&models.RefreshToken{}).
+		Where("user_id = ? AND revoked = ?", userID, false).
+		Update("revoked", true).Error
 }
 
 // PurgeExpired removes revoked/expired rows — call from a periodic cleanup.
