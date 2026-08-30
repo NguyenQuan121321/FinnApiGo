@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — supply-chain & dependency hardening (2026-08-31)
+
+### Security
+- **Toolchain refresh** — `go 1.26.7` (go.mod `go` + `toolchain` directives),
+  CI `setup-go` and Docker builder upgraded from the EOL Go 1.25 series;
+  runtime base image `alpine:3.20` (EOL 2026-04) → `alpine:3.22`. Closes all
+  reachable stdlib advisories (GO-2026-6218, -6091, -6090, -6089, -5972,
+  -5026, -6088, -5942): `govulncheck` now reports zero reachable
+  vulnerabilities.
+- **Dependency refresh** — gorm v1.25.12 → v1.31.2, gorm mysql driver
+  v1.5.7 → v1.6.0, go-sql-driver v1.7.0 → v1.10.0, OpenTelemetry v1.44.0 →
+  v1.46.0 (otelgin v0.69.0 → v0.71.0), google.golang.org/api v0.293.0 →
+  v0.295.0, pquerna/otp v1.4.0 → v1.5.0, sonic v1.15.1 → v1.15.3. One test
+  migrated off the Go 1.26 deprecated `ecdsa.PublicKey.X/.Y` accessors to
+  `PublicKey.Bytes()` (staticcheck SA1019); full unit suite green.
+- **CI supply-chain hardening** — all GitHub Actions pinned to commit SHAs
+  (checkout v7.0.1, setup-go v7.0.0, golangci-lint-action v9.3.0,
+  trivy-action v0.36.0 replacing the unpinned `@master`, sbom-action
+  v0.24.2, upload-artifact v7.0.1); golangci-lint pinned to v2.12.2 to match
+  local tooling.
+- **CycloneDX SBOM job** — every push emits `finnapigo-sbom.cdx.json` as a
+  build artifact (NIST SSDF PS.3.2 / SLSA component inventory).
+- **Dependabot** — weekly `gomod`, `github-actions` and `docker` updates;
+  minor+patch grouped, security updates unscheduled.
+- **SECURITY.md** — supported versions, private disclosure process and patch
+  SLA (Critical ≤ 7 days, High ≤ 30, Medium ≤ 90).
+
+### Changed
+- `.gitattributes` enforces LF for all text files (ends CRLF churn in
+  `go.mod`/`go.sum` on Windows checkouts); `.gitignore` now covers the local
+  root binaries `migrate` and `server`.
+
 ## [Unreleased] — enterprise readiness (branch `feat/enterprise-readiness`)
 
 Execution of the enterprise-readiness program. Catalog items K3, X1–X2,

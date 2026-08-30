@@ -1,0 +1,17 @@
+# Normalize line endings: the canonical form of every text file is LF, both in
+# the index and the working tree, on every platform. This prevents CRLF churn
+# on Windows checkouts (autocrlf) from producing spurious whole-file diffs in
+# go.mod/go.sum and from breaking `go mod tidy -diff` verification.
+* text=auto eol=lf
+
+# Windows scripts genuinely need CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary assets must never be touched.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.exe binary
