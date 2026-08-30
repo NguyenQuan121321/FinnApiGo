@@ -53,6 +53,10 @@ in `docs/deep-review-remediation-2026-08.md`.
   Deliberately NOT risk-based authentication: no step-up, no blocking.
 - **`/auth/google/login` rate-limited** (was the only unauthenticated
   endpoint without the limiter).
+- **SMTP recipient validation** — every outbound email passes an RFC 5321
+  envelope check (exactly one @, no control/whitespace characters) before
+  reaching the wire, making SMTP command injection impossible regardless of
+  caller input (gosec G707 taint analysis; flagged the exact gap).
 
 ### Changed
 - **CI: container image is built and Trivy-scanned**; gosec/govulncheck

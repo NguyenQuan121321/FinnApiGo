@@ -2,11 +2,8 @@ package services
 
 import (
 	"context"
-	"crypto/rand" //nolint:gosec // CSPRNG for PKCE verifiers
-	"crypto/sha1" //nolint:gosec // HIBP's k-anonymity protocol is defined over SHA-1 — not a security decision
-	"encoding/base64"
+	"crypto/sha1" // #nosec G505 -- the HIBP k-anonymity protocol is defined over SHA-1; the digest never protects anything
 	"encoding/hex"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -53,11 +50,15 @@ func (c *BreachedPasswordChecker) Breached(ctx context.Context, password string)
 	if c == nil || password == "" {
 		return false
 	}
-	sum := sha1.Sum([]byte(password)) //nolint:gosec // protocol-defined digest
+	// k-anonymity: only the first 5 hex chars of the SHA-1 digest leave the
+	// process; the digest is protocol plumbing, never a protection mechanism.
+	sum := sha1.Sum([]byte(password)) // #nosec G401 -- HIBP protocol-defined digest
 	digest := strings.ToUpper(hex.EncodeToString(sum[:]))
 	prefix, suffix := digest[:5], digest[5:]
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+prefix, nil)
+	// The endpoint is operator configuration, never request input (no SSRF
+	// surface); the suffix-only query leaks at most a 5-hex-char prefix.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+prefix, nil) // #nosec G107 -- fixed operator-configured endpoint
 	if err != nil {
 		return false
 	}
@@ -75,15 +76,4 @@ func (c *BreachedPasswordChecker) Breached(ctx context.Context, password string)
 		return false
 	}
 	return strings.Contains(strings.ToUpper(string(body)), suffix+":")
-}
-
-// pkceVerifier generates a fresh PKCE code verifier (S256): 64 CSPRNG bytes
-// base64url-encoded — 86 chars, inside the RFC 7636 43..128 range, with the
-// unreserved-character guarantee base64url provides.
-func pkceVerifier() (string, error) {
-	b := make([]byte, 64)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("pkce verifier: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }

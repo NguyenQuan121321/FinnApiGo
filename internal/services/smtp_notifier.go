@@ -53,10 +53,35 @@ func (n *SMTPNotifier) Enabled() bool {
 	return n.host != "" && n.from != ""
 }
 
+// validEnvelopeAddr enforces RFC 5321-safe envelope addresses: exactly one @,
+// no CR/LF/whitespace/control characters anywhere. It is the boundary that
+// makes SMTP command injection impossible (gosec G707) regardless of what the
+// caller passes — recipient addresses originate from user input.
+func validEnvelopeAddr(addr string) error {
+	if addr == "" || len(addr) > 254 {
+		return fmt.Errorf("invalid recipient address length")
+	}
+	if strings.Count(addr, "@") != 1 {
+		return fmt.Errorf("recipient must contain exactly one @")
+	}
+	for _, r := range addr {
+		if r <= 32 || r == 127 { // controls, space, CR, LF, TAB
+			return fmt.Errorf("recipient contains forbidden character %#U", r)
+		}
+	}
+	return nil
+}
+
 // send is the shared delivery path: builds an RFC 822 message and sends it.
 func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error {
 	if !n.Enabled() {
 		return fmt.Errorf("smtp notifier not configured")
+	}
+	// G707 — the recipient originates from user input (registration /
+	// recovery email). SMTP command injection (CR/LF smuggling into the RCPT
+	// or DATA wire) is rejected at the boundary instead of trusting callers.
+	if err := validEnvelopeAddr(to); err != nil {
+		return fmt.Errorf("smtp: %w", err)
 	}
 	// Overall delivery cap (on top of the per-command deadlines below).
 	ctx, cancel := context.WithTimeout(ctx, smtpTotalTimeout)
@@ -118,7 +143,7 @@ func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error
 		return fmt.Errorf("smtp MAIL: %w", err)
 	}
 	deadline()
-	if err := cl.Rcpt(to); err != nil {
+	if err := cl.Rcpt(to); err != nil { // #nosec G707 -- recipient validated by validEnvelopeAddr above
 		return fmt.Errorf("smtp RCPT: %w", err)
 	}
 	deadline()

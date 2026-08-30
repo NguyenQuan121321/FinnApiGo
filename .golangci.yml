@@ -18,6 +18,11 @@ linters:
     - errorlint   # proper error wrapping (errors.Is/As over == / type asserts)
     - depguard    # import restrictions
   settings:
+    # Honor #nosec annotations — the SAME suppression mechanism the standalone
+    # gosec CI gate (security job) uses: one annotation satisfies both tools,
+    # and it lives only where the protocol genuinely requires the construct.
+    gosec:
+      nosec: true
     depguard:
       rules:
         services:

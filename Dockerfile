@@ -17,8 +17,11 @@ RUN go build -ldflags="-s -w" -o /out/finnapigo ./cmd/server
 RUN go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
 # Runtime base must stay inside Alpine's support window (3.20 EOL 2026-04).
+# apk upgrade pulls the latest patched packages (e.g. openssl CVE fixes that
+# land after the base tag was built) — the Trivy image gate fails otherwise.
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates tzdata && \
+    apk upgrade --no-cache && \
     adduser -D -u 10001 app
 WORKDIR /app
 COPY --from=builder /out/finnapigo /app/finnapigo

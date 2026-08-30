@@ -337,27 +337,24 @@ func TestNewIPLoginNotificationOnFirstLogin(t *testing.T) {
 	if _, _, _, err := e.authSvc.Login(ctx, LoginInput{Email: "alert@example.com", Password: "Password1"}, "77.1.2.3", "Firefox/120"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return e.notify.alertsSent == 1 })
-	if e.notify.alertsSent != 1 {
-		t.Fatalf("alertsSent=%d, want 1 on first login from a new IP", e.notify.alertsSent)
-	}
-	if e.notify.lastAlertIP != "77.1.2.3" {
-		t.Fatalf("alert IP=%q", e.notify.lastAlertIP)
+	waitFor(t, func() bool { return e.notify.alertCount() == 1 })
+	if ip, _ := e.notify.lastAlert(); ip != "77.1.2.3" {
+		t.Fatalf("alert IP=%q", ip)
 	}
 	// Same IP again → no second alert (lookback key already set).
 	if _, _, _, err := e.authSvc.Login(ctx, LoginInput{Email: "alert@example.com", Password: "Password1"}, "77.1.2.3", "Firefox/120"); err != nil {
 		t.Fatal(err)
 	}
-	if e.notify.alertsSent != 1 {
-		t.Fatalf("alertsSent=%d, want 1 — repeat IP must not re-alert", e.notify.alertsSent)
+	if e.notify.alertCount() != 1 {
+		t.Fatalf("alertsSent=%d, want 1 — repeat IP must not re-alert", e.notify.alertCount())
 	}
 	// A different IP → one more alert.
 	if _, _, _, err := e.authSvc.Login(ctx, LoginInput{Email: "alert@example.com", Password: "Password1"}, "78.4.5.6", "Firefox/120"); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, func() bool { return e.notify.alertsSent == 2 })
-	if e.notify.alertsSent != 2 {
-		t.Fatalf("alertsSent=%d, want 2 for a genuinely new IP", e.notify.alertsSent)
+	waitFor(t, func() bool { return e.notify.alertCount() == 2 })
+	if e.notify.alertCount() != 2 {
+		t.Fatalf("alertsSent=%d, want 2 for a genuinely new IP", e.notify.alertCount())
 	}
 }
 
@@ -375,8 +372,9 @@ func TestNewIPNotificationDisabledByConfig(t *testing.T) {
 	if _, _, _, err := e.authSvc.Login(ctx, LoginInput{Email: "quiet@example.com", Password: "Password1"}, "5.5.5.5", "UA"); err != nil {
 		t.Fatal(err)
 	}
-	if e.notify.alertsSent != 0 {
-		t.Fatalf("alertsSent=%d, want 0 when LOGIN_NOTIFY_NEW_IP=false", e.notify.alertsSent)
+	time.Sleep(200 * time.Millisecond) // allow any (wrongly) spawned alert goroutine to land
+	if e.notify.alertCount() != 0 {
+		t.Fatalf("alertsSent=%d, want 0 when LOGIN_NOTIFY_NEW_IP=false", e.notify.alertCount())
 	}
 }
 

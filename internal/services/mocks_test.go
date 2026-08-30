@@ -353,6 +353,20 @@ func (n *mockNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceName
 	return nil
 }
 
+// alertCount is the thread-safe reader for assertions — the alert is delivered
+// from a fire-and-forget goroutine, so tests must not read the fields directly.
+func (n *mockNotifier) alertCount() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.alertsSent
+}
+
+func (n *mockNotifier) lastAlert() (ip, device string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.lastAlertIP, n.lastAlertDev
+}
+
 // ---- mock store (for §1.8 jti tracking in tests) ----
 
 type mockStore struct {
