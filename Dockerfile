@@ -1,7 +1,7 @@
 # Multi-stage build for FinnApiGo.
 # Builder pins an exact supported Go patch release (1.25 is EOL since Go 1.27
 # shipped); Dependabot keeps both pins current.
-FROM golang:1.26.7-alpine AS builder
+FROM golang:1.27.0-alpine AS builder
 WORKDIR /src
 
 # Cache deps first.
