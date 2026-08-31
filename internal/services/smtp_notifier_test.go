@@ -98,13 +98,51 @@ func TestSMTPNotifier_HonorsContext_A2(t *testing.T) {
 	}
 }
 
-func TestSMTPNotifier_RejectsSubjectHeaderInjection(t *testing.T) {
-	n := NewSMTPNotifier("127.0.0.1", "1", "user", "pass", "from@example.com")
-	err := n.send(context.Background(), "to@example.com", "Hello\r\nBcc: attacker@example.com", "body")
-	if err == nil {
-		t.Fatal("subject containing a line break must be rejected")
+func TestSMTPNotifier_RejectsSubjectHeaderInjectionBeforeSMTPConnection(t *testing.T) {
+	testCases := []string{
+		"Hello\r\nBcc: attacker@example.com",
+		"Hello\nBcc: attacker@example.com",
+		"Hello\rBcc: attacker@example.com",
 	}
-	if !strings.Contains(err.Error(), "subject") {
-		t.Fatalf("error should identify the subject validation failure, got: %v", err)
+
+	for _, subject := range testCases {
+		t.Run("rejects line break", func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+
+			connected := make(chan struct{}, 1)
+			go func() {
+				conn, err := ln.Accept()
+				if err == nil {
+					connected <- struct{}{}
+					_ = conn.Close()
+				}
+			}()
+
+			host, port, _ := net.SplitHostPort(ln.Addr().String())
+			n := NewSMTPNotifier(host, port, "user", "pass", "from@example.com")
+			err = n.send(context.Background(), "to@example.com", subject, "body")
+			if err == nil || !strings.Contains(err.Error(), "smtp subject") {
+				t.Fatalf("injected subject must be rejected, got: %v", err)
+			}
+
+			select {
+			case <-connected:
+				t.Fatal("notifier opened an SMTP connection after rejecting the subject")
+			case <-time.After(100 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestSafeMailDisplayValue(t *testing.T) {
+	if got := safeMailDisplayValue("Chrome\r\nBcc: attacker@example.com"); got != "Chrome Bcc: attacker@example.com" {
+		t.Fatalf("safeMailDisplayValue() = %q", got)
+	}
+	if got := safeMailIP("not-an-ip\r\nBcc: attacker@example.com"); got != "Unknown" {
+		t.Fatalf("safeMailIP() = %q, want Unknown", got)
 	}
 }

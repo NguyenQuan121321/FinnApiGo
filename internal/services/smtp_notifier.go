@@ -56,17 +56,17 @@ func (n *SMTPNotifier) Enabled() bool {
 // validEnvelopeAddr enforces RFC 5321-safe envelope addresses: exactly one @,
 // no CR/LF/whitespace/control characters anywhere. It is the boundary that
 // makes SMTP command injection impossible (gosec G707) regardless of what the
-// caller passes — recipient addresses originate from user input.
+// caller passes.
 func validEnvelopeAddr(addr string) error {
 	if addr == "" || len(addr) > 254 {
-		return fmt.Errorf("invalid recipient address length")
+		return fmt.Errorf("invalid envelope address length")
 	}
 	if strings.Count(addr, "@") != 1 {
-		return fmt.Errorf("recipient must contain exactly one @")
+		return fmt.Errorf("envelope address must contain exactly one @")
 	}
 	for _, r := range addr {
 		if r <= 32 || r == 127 { // controls, space, CR, LF, TAB
-			return fmt.Errorf("recipient contains forbidden character %#U", r)
+			return fmt.Errorf("envelope address contains forbidden character %#U", r)
 		}
 	}
 	return nil
@@ -82,6 +82,25 @@ func validHeaderValue(value string) error {
 	return nil
 }
 
+// safeMailDisplayValue keeps request-derived values on one readable text line
+// before they are interpolated into an email body. This prevents a malicious
+// User-Agent or similar value from creating spoofed header-like content.
+func safeMailDisplayValue(value string) string {
+	value = strings.ReplaceAll(value, "\r", " ")
+	value = strings.ReplaceAll(value, "\n", " ")
+	return strings.Join(strings.Fields(value), " ")
+}
+
+// safeMailIP returns a canonical IP address or a non-sensitive placeholder.
+// It prevents an untrusted forwarded-header string from reaching an email.
+func safeMailIP(ip string) string {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return "Unknown"
+	}
+	return parsed.String()
+}
+
 // send is the shared delivery path: builds an RFC 822 message and sends it.
 func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error {
 	if !n.Enabled() {
@@ -92,6 +111,9 @@ func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error
 	// or DATA wire) is rejected at the boundary instead of trusting callers.
 	if err := validEnvelopeAddr(to); err != nil {
 		return fmt.Errorf("smtp: %w", err)
+	}
+	if err := validEnvelopeAddr(n.from); err != nil {
+		return fmt.Errorf("smtp sender: %w", err)
 	}
 	if err := validHeaderValue(subject); err != nil {
 		return fmt.Errorf("smtp subject: %w", err)
@@ -164,6 +186,8 @@ func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error
 	if err != nil {
 		return fmt.Errorf("smtp DATA: %w", err)
 	}
+	// codeql[go/email-injection] -- header values are validated and the only
+	// request-derived body fields are canonicalized before a fixed text template.
 	if _, err := w.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("smtp write body: %w", err)
 	}
@@ -189,6 +213,8 @@ func (n *SMTPNotifier) SendEmailVerification(ctx context.Context, to, verifyToke
 // links — it is informational (and unactionable links train users to click
 // email links).
 func (n *SMTPNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceName string) error {
+	ip = safeMailIP(ip)
+	deviceName = safeMailDisplayValue(deviceName)
 	body := "A new sign-in to your account was detected.\n\n" +
 		"IP address: " + ip + "\n" +
 		"Device:     " + deviceName + "\n" +
