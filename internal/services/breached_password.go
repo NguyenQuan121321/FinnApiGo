@@ -49,6 +49,7 @@ func NewBreachedPasswordChecker(endpoint string, timeout time.Duration) *Breache
 // protocol; it is never used for password storage, authentication, or
 // password verification in this application.
 func calculateHIBPSHA1Prefix(pwd string) (prefix, suffix string) {
+	// codeql[go/weak-sensitive-data-hashing] -- SHA-1 is mandated by HIBP's k-anonymity range protocol, not used for password storage.
 	sum := sha1.Sum([]byte(pwd)) // #nosec G401 -- HIBP protocol-defined k-anonymity lookup digest
 	digest := strings.ToUpper(hex.EncodeToString(sum[:]))
 	return digest[:5], digest[5:]
