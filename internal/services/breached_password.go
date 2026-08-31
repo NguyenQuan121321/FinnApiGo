@@ -44,17 +44,25 @@ func NewBreachedPasswordChecker(endpoint string, timeout time.Duration) *Breache
 	}
 }
 
+// calculateHIBPSHA1Prefix returns the digest portions required by the HIBP
+// Pwned Passwords k-anonymity range API. SHA-1 is mandated by that external
+// protocol; it is never used for password storage, authentication, or
+// password verification in this application.
+func calculateHIBPSHA1Prefix(pwd string) (prefix, suffix string) {
+	sum := sha1.Sum([]byte(pwd)) // #nosec G401 -- HIBP protocol-defined k-anonymity lookup digest
+	digest := strings.ToUpper(hex.EncodeToString(sum[:]))
+	return digest[:5], digest[5:]
+}
+
 // Breached reports whether the plaintext password appears in the breach
 // corpus. False on any failure (fail open) — never on a confirmed hit.
 func (c *BreachedPasswordChecker) Breached(ctx context.Context, password string) bool {
 	if c == nil || password == "" {
 		return false
 	}
-	// k-anonymity: only the first 5 hex chars of the SHA-1 digest leave the
-	// process; the digest is protocol plumbing, never a protection mechanism.
-	sum := sha1.Sum([]byte(password)) // #nosec G401 -- HIBP protocol-defined digest
-	digest := strings.ToUpper(hex.EncodeToString(sum[:]))
-	prefix, suffix := digest[:5], digest[5:]
+	// k-anonymity: only the first 5 hex chars of the protocol-defined digest
+	// leave the process; the digest is never a protection mechanism.
+	prefix, suffix := calculateHIBPSHA1Prefix(password)
 
 	// The endpoint is operator configuration, never request input (no SSRF
 	// surface); the suffix-only query leaks at most a 5-hex-char prefix.
