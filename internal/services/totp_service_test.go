@@ -683,11 +683,14 @@ type barrierTOTPRepo struct {
 
 func (b *barrierTOTPRepo) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]models.RecoveryCode, error) {
 	rows, err := b.mockTOTPRepo.ActiveRecoveryCodes(ctx, userID)
-	if userID == b.userID && atomic.AddInt32(&b.arrived, 1) <= b.racers {
-		if atomic.LoadInt32(&b.arrived) == b.racers {
+	if userID == b.userID {
+		arrived := atomic.AddInt32(&b.arrived, 1)
+		if arrived == b.racers {
 			close(b.released)
 		}
-		<-b.released
+		if arrived <= b.racers {
+			<-b.released
+		}
 	}
 	return rows, err
 }
