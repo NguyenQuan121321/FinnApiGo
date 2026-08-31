@@ -147,7 +147,9 @@ func (h *PasskeyHandler) Revoke(c *gin.Context) {
 		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
 		return
 	}
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	// Limit parsing to the platform's uint width so converting to uint cannot
+	// truncate a valid 64-bit value on 32-bit builds.
+	id, err := strconv.ParseUint(c.Param("id"), 10, strconv.IntSize)
 	if err != nil {
 		response.Respond(c, http.StatusBadRequest, "invalid passkey id", nil)
 		return

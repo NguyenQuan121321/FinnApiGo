@@ -72,6 +72,16 @@ func validEnvelopeAddr(addr string) error {
 	return nil
 }
 
+// validHeaderValue rejects line breaks in a RFC 822 header value. Header
+// fields must occupy exactly one line; accepting CR or LF here would allow a
+// caller to inject additional MIME or SMTP headers into the DATA stream.
+func validHeaderValue(value string) error {
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("header value contains a line break")
+	}
+	return nil
+}
+
 // send is the shared delivery path: builds an RFC 822 message and sends it.
 func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error {
 	if !n.Enabled() {
@@ -82,6 +92,9 @@ func (n *SMTPNotifier) send(ctx context.Context, to, subject, body string) error
 	// or DATA wire) is rejected at the boundary instead of trusting callers.
 	if err := validEnvelopeAddr(to); err != nil {
 		return fmt.Errorf("smtp: %w", err)
+	}
+	if err := validHeaderValue(subject); err != nil {
+		return fmt.Errorf("smtp subject: %w", err)
 	}
 	// Overall delivery cap (on top of the per-command deadlines below).
 	ctx, cancel := context.WithTimeout(ctx, smtpTotalTimeout)

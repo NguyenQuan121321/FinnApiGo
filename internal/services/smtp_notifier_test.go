@@ -97,3 +97,14 @@ func TestSMTPNotifier_HonorsContext_A2(t *testing.T) {
 		t.Fatalf("error should surface the context cancellation, got: %v", err)
 	}
 }
+
+func TestSMTPNotifier_RejectsSubjectHeaderInjection(t *testing.T) {
+	n := NewSMTPNotifier("127.0.0.1", "1", "user", "pass", "from@example.com")
+	err := n.send(context.Background(), "to@example.com", "Hello\r\nBcc: attacker@example.com", "body")
+	if err == nil {
+		t.Fatal("subject containing a line break must be rejected")
+	}
+	if !strings.Contains(err.Error(), "subject") {
+		t.Fatalf("error should identify the subject validation failure, got: %v", err)
+	}
+}
