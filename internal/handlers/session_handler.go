@@ -30,6 +30,17 @@ func NewSessionHandler(svc SessionService) *SessionHandler {
 	return &SessionHandler{svc: svc}
 }
 
+// List godoc
+//
+//	@Summary      List active sessions
+//	@Description  Lists the caller's active (non-expired, non-revoked) sessions/devices.
+//	@Tags         Sessions
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Success      200  {object}  swagger.SessionsEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/sessions [get]
+//
 // List handles GET /api/v1/auth/sessions — returns the caller's active
 // (non-expired, non-revoked) sessions/devices.
 func (h *SessionHandler) List(c *gin.Context) {
@@ -46,6 +57,20 @@ func (h *SessionHandler) List(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "sessions fetched", gin.H{"sessions": sessions})
 }
 
+// Revoke godoc
+//
+//	@Summary      Revoke a session
+//	@Description  Revokes a single session by ID, scoped to the caller. The target device can no longer rotate its refresh token.
+//	@Tags         Sessions
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Param        id  path  int  true  "Session ID"
+//	@Success      200  {object}  swagger.NullDataEnvelope
+//	@Failure      400  {object}  swagger.ErrorEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      404  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/sessions/{id} [delete]
+//
 // Revoke handles DELETE /api/v1/auth/sessions/:id — revokes a single session
 // (device), instantly blocking that device from rotating its refresh token.
 func (h *SessionHandler) Revoke(c *gin.Context) {

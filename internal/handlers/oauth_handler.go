@@ -43,6 +43,18 @@ func NewOAuthHandler(svc OAuthService) *OAuthHandler {
 	return &OAuthHandler{svc: svc}
 }
 
+// GoogleLogin godoc
+//
+//	@Summary      Start the Google OAuth flow
+//	@Description  Initiates the Google OAuth 2.0 flow. Sets an HttpOnly SameSite=Lax cookie binding the CSRF state to the browser, then redirects (302) to Google's consent screen.
+//	@Tags         OAuth
+//	@Produce      json
+//	@Success      302  "Redirect to Google consent screen"
+//	@Failure      429  {object}  swagger.ErrorEnvelope
+//	@Failure      500  {object}  swagger.ErrorEnvelope
+//	@Failure      501  {object}  swagger.ErrorEnvelope  "Google sign-in not configured"
+//	@Router       /api/v1/auth/google/login [get]
+//
 // GoogleLogin initiates the Google OAuth 2.0 flow: stage the challenge, bind
 // the state to the browser with an HttpOnly cookie, and redirect (302) to
 // Google's consent screen.
@@ -65,6 +77,21 @@ func (h *OAuthHandler) GoogleLogin(c *gin.Context) {
 	c.Redirect(http.StatusFound, url)
 }
 
+// GoogleCallback godoc
+//
+//	@Summary      Handle the Google OAuth callback
+//	@Description  Handles the redirect back from Google. Verifies the browser-bound state cookie, exchanges the authorization code, verifies the Google ID token, and links/creates the user account. Response shapes are identical to POST /auth/login: HTTP 200 with message "login successful" and the standard token pair, or HTTP 200 with message "mfa required" and data {mfaRequired: true, mfaToken: "<mfa_pending JWT>"} when TOTP is enabled.
+//	@Tags         OAuth
+//	@Produce      json
+//	@Param        code   query  string  true  "Authorization code from Google"
+//	@Param        state  query  string  true  "CSRF state parameter"
+//	@Success      200  {object}  swagger.LoginEnvelope  "Standard token pair, or the MFA-pending payload when TOTP is enabled (see description)"
+//	@Failure      400  {object}  swagger.ErrorEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      429  {object}  swagger.ErrorEnvelope
+//	@Failure      501  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/google/callback [get]
+//
 // GoogleCallback handles the redirect back from Google. It verifies the
 // browser-bound state cookie, consumes the server-side challenge, exchanges
 // the authorization code, verifies the ID token, links/creates the user

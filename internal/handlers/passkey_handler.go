@@ -30,7 +30,23 @@ type PasskeyBeginRequest struct {
 	DisplayName string `json:"displayName" binding:"max=255"`
 }
 
-// BeginRegistration issues the PKC creation options for a signed-in user.
+// BeginRegistration godoc
+//
+//	@Summary      Begin passkey registration
+//	@Description  Issues the PublicKeyCredentialCreationOptions for a signed-in user.
+//	@Description  Stages the ceremony challenge in the shared store (60s TTL, single use).
+//	@Description  Requires WEBAUTHN_RP_ID to be configured.
+//	@Tags         MFA
+//	@Accept       json
+//	@Produce      json
+//	@Param        body  body      handlers.PasskeyBeginRequest  true  "Optional display name for the credential"
+//	@Success      200   {object}  swagger.PasskeyOptionsEnvelope  "PKC creation options (pass to navigator.credentials.create)"
+//	@Failure      400   {object}  swagger.ErrorEnvelope
+//	@Failure      401   {object}  swagger.ErrorEnvelope
+//	@Failure      403   {object}  swagger.ErrorEnvelope
+//	@Failure      429   {object}  swagger.ErrorEnvelope
+//	@Security     BearerAuth
+//	@Router       /api/v1/auth/mfa/passkey/register/challenge [post]
 func (h *PasskeyHandler) BeginRegistration(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -51,7 +67,20 @@ func (h *PasskeyHandler) BeginRegistration(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "passkey registration challenge", options)
 }
 
-// FinishRegistration verifies the attestation and persists the credential.
+// FinishRegistration godoc
+//
+//	@Summary      Finish passkey registration
+//	@Description  Completes passkey registration by verifying the attestation and persisting the credential.
+//	@Description  The request body is the verbatim WebAuthn attestation response (PublicKeyCredential JSON) — do not wrap or rebind it.
+//	@Tags         MFA
+//	@Produce      json
+//	@Success      201  {object}  swagger.PasskeyRegisteredEnvelope
+//	@Failure      400  {object}  swagger.ErrorEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      429  {object}  swagger.ErrorEnvelope
+//	@Security     BearerAuth
+//	@Router       /api/v1/auth/mfa/passkey/register/verify [post]
 func (h *PasskeyHandler) FinishRegistration(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -78,8 +107,18 @@ func (h *PasskeyHandler) FinishRegistration(c *gin.Context) {
 	})
 }
 
-// BeginAuthentication issues the PKC assertion options (step-up login with a
-// registered passkey on an active session).
+// BeginAuthentication godoc
+//
+//	@Summary      Begin passkey authentication
+//	@Description  Issues the PublicKeyCredentialRequestOptions for step-up login with a registered passkey on an active session.
+//	@Tags         MFA
+//	@Produce      json
+//	@Success      200  {object}  swagger.PasskeyOptionsEnvelope  "PKC assertion options (pass to navigator.credentials.get)"
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      429  {object}  swagger.ErrorEnvelope
+//	@Security     BearerAuth
+//	@Router       /api/v1/auth/mfa/passkey/authenticate/challenge [post]
 func (h *PasskeyHandler) BeginAuthentication(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -94,8 +133,20 @@ func (h *PasskeyHandler) BeginAuthentication(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "passkey authentication challenge", options)
 }
 
-// FinishAuthentication verifies the assertion, enforces clone detection, and
-// issues a standard token pair (W5).
+// FinishAuthentication godoc
+//
+//	@Summary      Finish passkey authentication
+//	@Description  Verifies the WebAuthn assertion. A sign-count regression (cloned credential) revokes the credential,
+//	@Description  records a passkey.clone_detected audit event, and refuses the login.
+//	@Description  On success a standard token pair is issued.
+//	@Tags         MFA
+//	@Produce      json
+//	@Success      200  {object}  swagger.LoginEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      429  {object}  swagger.ErrorEnvelope
+//	@Security     BearerAuth
+//	@Router       /api/v1/auth/mfa/passkey/authenticate/verify [post]
 func (h *PasskeyHandler) FinishAuthentication(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -121,7 +172,16 @@ func (h *PasskeyHandler) FinishAuthentication(c *gin.Context) {
 	})
 }
 
-// List returns the caller's registered passkeys (device management, W6).
+// List godoc
+//
+//	@Summary      List passkeys
+//	@Description  Lists the caller's registered passkeys for device management.
+//	@Tags         MFA
+//	@Produce      json
+//	@Success      200  {object}  swagger.PasskeysListEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Security     BearerAuth
+//	@Router       /api/v1/auth/mfa/passkeys [get]
 func (h *PasskeyHandler) List(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -139,8 +199,22 @@ func (h *PasskeyHandler) List(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "passkeys fetched", gin.H{"passkeys": rows})
 }
 
-// Revoke removes one passkey. The route mounts SudoMiddleware: a stolen
-// access token alone cannot strip a user's credentials (W6).
+// Revoke godoc
+//
+//	@Summary      Revoke a passkey
+//	@Description  Revokes one passkey. Requires X-Sudo-Token header (sudo-gated) —
+//	@Description  a stolen access token alone cannot strip a user's credentials.
+//	@Tags         MFA
+//	@Produce      json
+//	@Param        id   path      int  true  "Passkey ID"
+//	@Success      200  {object}  swagger.NullDataEnvelope
+//	@Failure      400  {object}  swagger.ErrorEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      404  {object}  swagger.ErrorEnvelope
+//	@Security     BearerAuth
+//	@Security     SudoAuth
+//	@Router       /api/v1/auth/mfa/passkeys/{id} [delete]
 func (h *PasskeyHandler) Revoke(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {

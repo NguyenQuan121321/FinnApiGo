@@ -44,6 +44,20 @@ type noOpCaptcha struct{}
 
 func (noOpCaptcha) Verify(ctx context.Context, token string) error { return nil }
 
+// Register godoc
+//
+//	@Summary      Create a new account
+//	@Description  Creates a new account. A verification email is sent when SMTP is configured. CAPTCHA may be required depending on server settings. The honeypot field 'website' must stay empty — non-empty values silently succeed without creating an account.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body handlers.RegisterRequest true "Registration payload"
+//	@Success      201 {object} swagger.RegisterEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      409 {object} swagger.ErrorEnvelope
+//	@Failure      422 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/register [post]
 func (h *AuthHandler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -78,6 +92,20 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	response.Respond(c, http.StatusCreated, "account created", RegisterResponse{Profile: profile})
 }
 
+// Login godoc
+//
+//	@Summary      Log in with email and password
+//	@Description  Authenticates with email and password. When the account has TOTP MFA active the response is HTTP 200 with message "mfa required" and data {mfaRequired: true, mfaToken: "<mfa_pending JWT>"} — complete the login with POST /auth/mfa/login-verify carrying that token in the Authorization header. Otherwise the response is HTTP 200 with message "login successful" and the standard token pair next to the profile.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body handlers.LoginRequest true "Login credentials"
+//	@Success      200 {object} swagger.LoginEnvelope "Standard token pair, or the MFA-pending payload when TOTP is enabled (see description)"
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      403 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/login [post]
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -98,6 +126,20 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "login successful", LoginResponse{Profile: profile, TokenPair: pair})
 }
 
+// CompleteMFALogin godoc
+//
+//	@Summary      Complete an MFA-pending login
+//	@Description  Completes a login that returned "mfa required". The Authorization header must carry the short-lived mfa_pending JWT issued by POST /auth/login — a standard access token is rejected. On success a standard token pair is issued.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        request body handlers.MFALoginVerifyRequest true "TOTP or recovery code"
+//	@Success      200 {object} swagger.LoginEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/login-verify [post]
 func (h *AuthHandler) CompleteMFALogin(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -118,6 +160,19 @@ func (h *AuthHandler) CompleteMFALogin(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "login successful", LoginResponse{Profile: profile, TokenPair: pair})
 }
 
+// Logout godoc
+//
+//	@Summary      Log out one device
+//	@Description  Revokes the given refresh token. Requires a valid access token for the same account.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        request body handlers.LogoutRequest true "Refresh token to revoke"
+//	@Success      200 {object} swagger.NullDataEnvelope "logged out"
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/logout [post]
 func (h *AuthHandler) Logout(c *gin.Context) {
 	var req LogoutRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -131,6 +186,16 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "logged out", nil)
 }
 
+// LogoutAll godoc
+//
+//	@Summary      Log out everywhere
+//	@Description  Revokes every active session of the caller — all devices must log in again.
+//	@Tags         Auth
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Success      200 {object} swagger.NullDataEnvelope "signed out everywhere"
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/logout-all [post]
 func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -144,6 +209,19 @@ func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "signed out everywhere", nil)
 }
 
+// Refresh godoc
+//
+//	@Summary      Rotate a refresh token
+//	@Description  Exchanges a valid refresh token for a new token pair. The presented token is revoked (single-use rotation).
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body handlers.RefreshRequest true "Current refresh token"
+//	@Success      200 {object} swagger.TokenPairEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/refresh-token [post]
 func (h *AuthHandler) Refresh(c *gin.Context) {
 	var req RefreshRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -158,6 +236,18 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "token refreshed", pair)
 }
 
+// ForgotPassword godoc
+//
+//	@Summary      Request a password-reset email
+//	@Description  Always responds 200 with the same message regardless of whether the email exists (anti-enumeration). A reset link is emailed only when the account exists.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body handlers.ForgotPasswordRequest true "Account email"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/forgot-password [post]
 func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	var req ForgotPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -169,6 +259,20 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "if the email exists, a reset link has been sent", nil)
 }
 
+// ResetPassword godoc
+//
+//	@Summary      Reset the password with a single-use token
+//	@Description  Consumes the single-use reset token from the email link and sets the new password. The token cannot be reused.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body handlers.ResetPasswordRequest true "Reset token and new password"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      422 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/reset-password [post]
 func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	var req ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -184,6 +288,20 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "password has been reset", nil)
 }
 
+// ChangePassword godoc
+//
+//	@Summary      Change the caller's password
+//	@Description  Verifies the old password, sets the new one, and revokes ALL sessions — every device must log in again.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        request body handlers.ChangePasswordRequest true "Old and new password"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      422 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/change-password [post]
 func (h *AuthHandler) ChangePassword(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -208,6 +326,21 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 // Unlike ChangePassword there is no oldPassword to verify — but the service
 // layer independently re-checks that no password exists yet and rejects with
 // 409 otherwise, so this can never act as a change-password bypass.
+// SetPassword godoc
+//
+//	@Summary      Set a first password (Google-OAuth-only accounts)
+//	@Description  Establishes the first password for an account that has never had one (Google OAuth sign-up). Returns 409 when a password already exists — use change-password instead.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        request body handlers.SetPasswordRequest true "New password"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      409 {object} swagger.ErrorEnvelope
+//	@Failure      422 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/set-password [post]
 func (h *AuthHandler) SetPassword(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -226,6 +359,17 @@ func (h *AuthHandler) SetPassword(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "password has been set", nil)
 }
 
+// Me godoc
+//
+//	@Summary      Get the caller's profile
+//	@Description  Returns the authenticated user's sanitized profile.
+//	@Tags         Auth
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Success      200 {object} swagger.UserProfileEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      404 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/me [get]
 func (h *AuthHandler) Me(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -240,6 +384,20 @@ func (h *AuthHandler) Me(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "profile fetched", profile)
 }
 
+// VerifyEmail godoc
+//
+//	@Summary      Verify the account email
+//	@Description  Consumes the single-use verification token from the email link and marks the account verified. The token cannot be reused.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body handlers.VerifyEmailRequest true "Verification token"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      404 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/verify-email [post]
 func (h *AuthHandler) VerifyEmail(c *gin.Context) {
 	var req VerifyEmailRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -253,6 +411,18 @@ func (h *AuthHandler) VerifyEmail(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "email verified", nil)
 }
 
+// ResendVerifyEmail godoc
+//
+//	@Summary      Resend the verification email
+//	@Description  Responds 200 with the same message whether or not the email exists and whether it is already verified (anti-enumeration); a link is sent only to unverified existing accounts. Exceeding the resend rate limit surfaces a 429 so legitimate clients can back off.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body handlers.ResendVerifyEmailRequest true "Account email"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/resend-verification [post]
 func (h *AuthHandler) ResendVerifyEmail(c *gin.Context) {
 	var req ResendVerifyEmailRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
