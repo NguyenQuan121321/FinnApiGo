@@ -19,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	_ "github.com/finnapigo/finnapigo/docs" // generated OpenAPI spec — required by the gated /swagger route
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/database"
@@ -36,6 +37,19 @@ import (
 	"github.com/finnapigo/finnapigo/internal/tracing"
 )
 
+// @title                      FinnApiGo Auth API
+// @version                    1.0.0
+// @description                Authentication and account-security API: registration with email verification, JWT login with TOTP MFA, Google OAuth 2.0, session and device management, and passkeys/WebAuthn. The response envelope is {code, message, data} on every endpoint.
+// @contact.name               FinnApiGo
+// @contact.url                https://github.com/NguyenQuan121321/FinnApiGo/issues
+// @securityDefinitions.apikey BearerAuth
+// @in                         header
+// @name                       Authorization
+// @description                JWT access token. Send as "Bearer <token>". For /auth/mfa/login-verify this must be the short-lived mfa_pending token issued by /auth/login.
+// @securityDefinitions.apikey SudoAuth
+// @in                         header
+// @name                       X-Sudo-Token
+// @description                Short-lived sudo token minted by POST /auth/mfa/totp/recovery-codes; required for privileged operations.
 func main() {
 	// Structured JSON logs for the whole process — every slog call (including
 	// from libraries that use the default logger) emits machine-parseable JSON.
@@ -261,6 +275,7 @@ func run() error {
 		Metrics:             publicMetricsHandler,
 		Tracing:             true,
 		CORSAllowedOrigins:  cfg.Server.CORSAllowedOrigins,
+		SwaggerEnabled:      cfg.Server.SwaggerEnabled,
 	})
 
 	// --- HTTP server with graceful shutdown ---
