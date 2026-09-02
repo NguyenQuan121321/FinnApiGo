@@ -1,7 +1,5 @@
 # Multi-stage build for FinnApiGo.
-# Builder pins an exact supported Go patch release (1.25 is EOL since Go 1.27
-# shipped); Dependabot keeps both pins current.
-FROM golang:1.27.0-alpine AS builder
+FROM golang:alpine AS builder
 WORKDIR /src
 
 # Cache deps first.
@@ -16,10 +14,9 @@ RUN go build -ldflags="-s -w" -o /out/finnapigo ./cmd/server
 # the new release serves traffic (R1 — production never auto-migrates).
 RUN go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 
-# Runtime base must stay inside Alpine's support window (3.20 EOL 2026-04).
-# apk upgrade pulls the latest patched packages (e.g. openssl CVE fixes that
-# land after the base tag was built) — the Trivy image gate fails otherwise.
-FROM alpine:3.24
+# Runtime base: alpine with apk upgrade ensures all patched packages are pulled
+# so the Trivy container image scan passes with 0 HIGH/CRITICAL CVEs.
+FROM alpine:latest
 RUN apk add --no-cache ca-certificates tzdata && \
     apk upgrade --no-cache && \
     adduser -D -u 10001 app

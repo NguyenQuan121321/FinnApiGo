@@ -25,7 +25,5 @@ coverage.txt
 # Portable toolchain (race-detector gcc)
 .tools/
 
-# Swagger generated docs (regenerated locally)
-/docs/swagger.json
-/docs/swagger.yaml
+# Swagger generated docs (committed; regenerated with pinned swag CLI)
 .zcode/

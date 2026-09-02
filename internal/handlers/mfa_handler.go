@@ -41,6 +41,19 @@ func NewMFAHandler(totp TOTPService, jwtMgr *jwt.JWTManager, sudoTTL time.Durati
 	return &MFAHandler{totp: totp, jwtMgr: jwtMgr, sudoTTL: sudoTTL}
 }
 
+// EnableTOTP godoc
+//
+//	@Summary      Begin TOTP enrollment
+//	@Description  Begins TOTP enrollment. Returns the shared secret and provisioning URI. If TOTP is already active, stages a new secret (requires X-Sudo-Token for re-enrollment).
+//	@Tags         MFA
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Success      200  {object}  swagger.TOTPEnableEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      429  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/totp/enable [post]
 func (h *MFAHandler) EnableTOTP(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok || h.totp == nil {
@@ -65,6 +78,20 @@ func (h *MFAHandler) EnableTOTP(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "TOTP enrollment pending verification", gin.H{"secret": secret, "provisioningURI": uri})
 }
 
+// VerifyTOTP godoc
+//
+//	@Summary      Confirm TOTP enrollment
+//	@Description  Confirms TOTP enrollment with a current code. Activates TOTP and returns single-use recovery codes (displayed once).
+//	@Tags         MFA
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        body  body      handlers.TOTPCodeRequest  true  "Current TOTP code"
+//	@Success      200   {object}  swagger.RecoveryCodesEnvelope
+//	@Failure      400   {object}  swagger.ErrorEnvelope
+//	@Failure      401   {object}  swagger.ErrorEnvelope
+//	@Failure      429   {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/totp/verify [post]
 func (h *MFAHandler) VerifyTOTP(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok || h.totp == nil {
@@ -83,6 +110,20 @@ func (h *MFAHandler) VerifyTOTP(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "TOTP enabled", gin.H{"recoveryCodes": codes})
 }
 
+// ValidateTOTP godoc
+//
+//	@Summary      Validate a TOTP code
+//	@Description  Validates a TOTP code for re-authentication on an active session.
+//	@Tags         MFA
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        body  body      handlers.TOTPCodeRequest  true  "Current TOTP code"
+//	@Success      200   {object}  swagger.NullDataEnvelope
+//	@Failure      400   {object}  swagger.ErrorEnvelope
+//	@Failure      401   {object}  swagger.ErrorEnvelope
+//	@Failure      429   {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/totp/validate [post]
 func (h *MFAHandler) ValidateTOTP(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok || h.totp == nil {
@@ -100,6 +141,21 @@ func (h *MFAHandler) ValidateTOTP(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "TOTP validated", nil)
 }
 
+// ViewRecoveryCodes godoc
+//
+//	@Summary      View recovery codes
+//	@Description  Re-displays saved recovery codes after verifying a current TOTP code. Also mints a short-lived sudo token for the regenerate endpoint.
+//	@Tags         MFA
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        body  body      handlers.TOTPCodeRequest  true  "Current TOTP code"
+//	@Success      200   {object}  swagger.RecoveryCodesViewEnvelope
+//	@Failure      400   {object}  swagger.ErrorEnvelope
+//	@Failure      401   {object}  swagger.ErrorEnvelope
+//	@Failure      429   {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/totp/recovery-codes [post]
+//
 // ViewRecoveryCodes re-displays the caller's saved recovery codes. The request
 // must carry a current TOTP code (validated by the service); on success the
 // handler also mints a short-lived sudo token so the client can regenerate
@@ -136,6 +192,21 @@ func (h *MFAHandler) ViewRecoveryCodes(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "Recovery codes", resp)
 }
 
+// RegenerateRecoveryCodes godoc
+//
+//	@Summary      Regenerate recovery codes
+//	@Description  Invalidates existing recovery codes and generates a new set. Requires the X-Sudo-Token minted by the view-recovery-codes endpoint (GitHub-style sudo mode).
+//	@Tags         MFA
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Security     SudoAuth
+//	@Success      200  {object}  swagger.RecoveryCodesEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      429  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/totp/recovery-codes/regenerate [post]
+//
 // RegenerateRecoveryCodes invalidates the caller's existing recovery codes and
 // returns a brand-new set. Sudo enforcement (X-Sudo-Token bound to the current
 // user) happens in the route middleware before this handler runs.

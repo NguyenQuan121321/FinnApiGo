@@ -9,6 +9,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 	otelgin "go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"gorm.io/gorm"
@@ -55,6 +57,11 @@ type Deps struct {
 	// cross-origin API calls (web frontends, test harnesses). Empty = no
 	// CORS behavior.
 	CORSAllowedOrigins []string
+	// SwaggerEnabled mounts the swag-generated Swagger UI at
+	// /swagger/index.html. Defaults to false — must be explicitly enabled.
+	// Keep disabled in production unless the documentation endpoint is
+	// required by API consumers behind appropriate access controls.
+	SwaggerEnabled bool
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -99,33 +106,23 @@ func Register(deps Deps) *gin.Engine {
 
 	// Prometheus scrape endpoint (P2) — see Deps.Metrics.
 	if deps.Metrics != nil {
-		r.GET("/metrics", gin.WrapH(deps.Metrics))
+		r.GET("/metrics", metricsHandler(deps.Metrics))
+	}
+
+	// Swagger UI (gated) — interactive docs generated from swag annotations.
+	// Mounted BEFORE the route groups so it shares the global middlewares
+	// (security headers, body-size cap, request log). The generated spec is a
+	// developer-experience companion; docs/openapi.yaml stays the contract of
+	// record enforced by internal/apidrift.
+	if deps.SwaggerEnabled {
+		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	}
 
 	// health check — process liveness (no DB dependency).
-	r.GET("/healthz", func(c *gin.Context) {
-		response.Respond(c, 200, "ok", gin.H{"status": "ok"})
-	})
+	r.GET("/healthz", healthz)
 
 	// readiness check — pings DB to confirm the app can serve requests (§7).
-	r.GET("/readyz", func(c *gin.Context) {
-		if deps.DB == nil {
-			response.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "skipped"})
-			return
-		}
-		sqlDB, err := deps.DB.DB()
-		if err != nil {
-			response.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := sqlDB.PingContext(ctx); err != nil {
-			response.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
-			return
-		}
-		response.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "up"})
-	})
+	r.GET("/readyz", readyz(deps.DB))
 
 	api := r.Group("/api/v1")
 	auth := api.Group("/auth")
@@ -228,6 +225,61 @@ func Register(deps Deps) *gin.Engine {
 	mfa.POST("/totp/recovery-codes/regenerate", deps.RateLimit.Handler(), middleware.SudoMiddleware(deps.JWT), deps.MFA.RegenerateRecoveryCodes)
 
 	return r
+}
+
+// metricsHandler adapts the Prometheus scrape handler (P2) onto the router.
+//
+//	@Summary      Prometheus metrics
+//	@Description  Prometheus exposition endpoint. Intended for the internal metrics listener (METRICS_ADDR); when served on the public listener it is unauthenticated by design (X1).
+//	@Tags         Operational
+//	@Produce      plain
+//	@Success      200 {string} string "Prometheus text exposition"
+//	@Router       /metrics [get]
+func metricsHandler(h http.Handler) gin.HandlerFunc {
+	return gin.WrapH(h)
+}
+
+// healthz reports process liveness — no DB dependency (§7).
+//
+//	@Summary      Liveness check
+//	@Description  Process liveness probe — always 200 while the process is up; no DB dependency.
+//	@Tags         Operational
+//	@Produce      json
+//	@Success      200 {object} swagger.HealthEnvelope
+//	@Router       /healthz [get]
+func healthz(c *gin.Context) {
+	response.Respond(c, 200, "ok", gin.H{"status": "ok"})
+}
+
+// readyz reports readiness — pings the DB to confirm the app can serve
+// requests (§7). A nil DB (no database configured) reports db "skipped".
+//
+//	@Summary      Readiness check
+//	@Description  Readiness probe — pings the database with a 3s timeout. Responds 503 when the DB is unreachable.
+//	@Tags         Operational
+//	@Produce      json
+//	@Success      200 {object} swagger.HealthEnvelope
+//	@Failure      503 {object} swagger.HealthEnvelope "not ready — database unreachable"
+//	@Router       /readyz [get]
+func readyz(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if db == nil {
+			response.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "skipped"})
+			return
+		}
+		sqlDB, err := db.DB()
+		if err != nil {
+			response.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := sqlDB.PingContext(ctx); err != nil {
+			response.Respond(c, 503, "not ready", gin.H{"status": "error", "db": err.Error()})
+			return
+		}
+		response.Respond(c, 200, "ok", gin.H{"status": "ok", "db": "up"})
+	}
 }
 
 // requestLogger is a minimal access log (§4 — token redaction). It logs

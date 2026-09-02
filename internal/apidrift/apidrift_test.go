@@ -64,6 +64,10 @@ func buildRealRouter() *gin.Engine {
 		RateLimit:           middleware.NewRateLimiter(100, 200, time.Minute),
 		MaxRequestBodyBytes: 1 << 20,
 		Metrics:             metrics.Handler(nil),
+		// The gated Swagger UI is a developer-experience companion, not part
+		// of the contract — keep it out of the drift router regardless of any
+		// default change in internal/config.
+		SwaggerEnabled: false,
 	}
 	router := routes.Register(deps)
 	_ = router.SetTrustedProxies(nil)

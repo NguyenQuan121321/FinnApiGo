@@ -66,6 +66,11 @@ type ServerConfig struct {
 	// true = this replica runs jobs unconditionally (the minimal variant:
 	// pin it to exactly one replica). false = jobs disabled on this replica.
 	RunJobs *bool
+	// SwaggerEnabled (env SWAGGER_ENABLED) mounts the Swagger UI at
+	// /swagger/index.html. Defaults to false — must be explicitly enabled.
+	// Keep disabled in production unless the documentation endpoint is
+	// required by API consumers behind appropriate access controls.
+	SwaggerEnabled bool
 }
 
 type DBConfig struct {
@@ -292,6 +297,7 @@ func Load() (*Config, error) {
 			CORSAllowedOrigins: l.envCSV("CORS_ALLOWED_ORIGINS"),
 			HSTSSeconds:        l.envInt("HSTS_SECONDS", 0),
 			RunJobs:            l.envOptionalBool("RUN_JOBS"),
+			SwaggerEnabled:     l.envBool("SWAGGER_ENABLED", false),
 		},
 		DB: DBConfig{
 			Host:         l.env("DB_HOST", "127.0.0.1"),
