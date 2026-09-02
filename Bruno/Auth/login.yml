@@ -16,7 +16,7 @@ http:
     data: |-
       {
         "email": "nguyenhoanganhquan13@gmail.com",
-        "password": "Password123"
+        "password": "anhquan123"
       }
 
 runtime:
@@ -41,3 +41,4 @@ settings:
   timeout: 0
   followRedirects: true
   maxRedirects: 5
+  forwardAuthorizationHeader: true

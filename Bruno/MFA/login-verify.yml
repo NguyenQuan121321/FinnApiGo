@@ -10,7 +10,7 @@ http:
     type: json
     data: |-
       {
-        "code": "802556"
+        "code": "726957"
       }
   auth:
     type: bearer
@@ -35,3 +35,4 @@ settings:
   timeout: 0
   followRedirects: true
   maxRedirects: 5
+  forwardAuthorizationHeader: true

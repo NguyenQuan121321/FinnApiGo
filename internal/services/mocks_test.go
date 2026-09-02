@@ -635,11 +635,11 @@ type mockGoogleOAuthClient struct {
 	lastVerifier  string
 }
 
-func (m *mockGoogleOAuthClient) AuthCodeURL(state, codeChallenge string) string {
+func (m *mockGoogleOAuthClient) AuthCodeURL(state, codeChallenge, nonce string) string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastChallenge = codeChallenge
-	return m.authURL + "?state=" + state + "&code_challenge=" + codeChallenge + "&code_challenge_method=S256"
+	return m.authURL + "?state=" + state + "&code_challenge=" + codeChallenge + "&code_challenge_method=S256&nonce=" + nonce
 }
 
 func (m *mockGoogleOAuthClient) Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error) {

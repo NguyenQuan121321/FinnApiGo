@@ -10,7 +10,7 @@ http:
     type: json
     data: |-
       {
-        "email": "test1@example.com",
+        "email": "nguyenhoanganhquan13@gmail.com",
         "password": "Password123"
       }
   auth:
@@ -22,3 +22,4 @@ settings:
   timeout: 0
   followRedirects: true
   maxRedirects: 5
+  forwardAuthorizationHeader: true

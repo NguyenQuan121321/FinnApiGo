@@ -1,4 +1,5 @@
 name: Local
 variables:
   - name: baseUrl
-    value: {{baseUrl}}
+    value: http://localhost:8081
+    description: ""

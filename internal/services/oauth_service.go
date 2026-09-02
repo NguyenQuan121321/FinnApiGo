@@ -56,7 +56,7 @@ type TokenIssuer interface {
 // Both methods carry PKCE (RFC 7636): the S256 challenge rides on the consent
 // URL, the verifier is handed to the exchange.
 type GoogleOAuthClient interface {
-	AuthCodeURL(state, codeChallenge string) string
+	AuthCodeURL(state, codeChallenge, nonce string) string
 	Exchange(ctx context.Context, code, codeVerifier string) (*oauth2.Token, error)
 }
 
@@ -79,7 +79,14 @@ func NewGoogleOAuthClient(clientID, clientSecret, redirectURL string) GoogleOAut
 	}}
 }
 
-func (c *oauth2GoogleClient) AuthCodeURL(state, codeChallenge string) string {
+func (c *oauth2GoogleClient) AuthCodeURL(state, codeChallenge, nonce string) string {
+	if nonce != "" {
+		return c.cfg.AuthCodeURL(state,
+			oauth2.SetAuthURLParam("code_challenge", codeChallenge),
+			oauth2.SetAuthURLParam("code_challenge_method", "S256"),
+			oauth2.SetAuthURLParam("nonce", nonce),
+		)
+	}
 	return c.cfg.AuthCodeURL(state,
 		oauth2.SetAuthURLParam("code_challenge", codeChallenge),
 		oauth2.SetAuthURLParam("code_challenge_method", "S256"),
@@ -188,7 +195,7 @@ func (s *OAuthService) BeginLogin(ctx context.Context) (state, redirectURL strin
 			return "", "", fmt.Errorf("oauth: state collision")
 		}
 	}
-	return state, s.client.AuthCodeURL(state, s256Challenge(verifier)), nil
+	return state, s.client.AuthCodeURL(state, s256Challenge(verifier), challenge.Nonce), nil
 }
 
 // ConsumeState atomically validates AND deletes the challenge for state —
