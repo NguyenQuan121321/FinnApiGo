@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Remediation of the 2026-08-31 five-stream deep review. Full finding→fix map
 in `docs/deep-review-remediation-2026-08.md`.
 
+### Added
+- **Interactive Swagger UI at `/swagger/index.html`** — swag-generated OpenAPI 2.0
+  documentation covering all 31 registered endpoints with typed response
+  envelopes (`internal/swagger/types.go`), accurate error schemas, and security
+  definitions (`BearerAuth`, `SudoAuth`). Gated behind the `SWAGGER_ENABLED`
+  environment flag (default `false` for secure-by-default production posture).
+  The hand-written `docs/openapi.yaml` remains the contract of record enforced
+  by `internal/apidrift`.
+
 ### Fixed
 - **Passkey login no longer bypasses account deactivation** — `IsActive` is
   enforced in the WebAuthn ceremonies AND at token issuance (H1).

@@ -1,0 +1,1496 @@
+definitions:
+  github_com_finnapigo_finnapigo_internal_models.PasskeyCredential:
+    properties:
+      attestationType:
+        type: string
+      createdAt:
+        type: string
+      displayName:
+        type: string
+      id:
+        type: integer
+      lastUsedAt:
+        type: string
+      revoked:
+        type: boolean
+      transports:
+        type: string
+      updatedAt:
+        type: string
+      userId:
+        type: integer
+    type: object
+  internal_handlers.ChangePasswordRequest:
+    properties:
+      newPassword:
+        maxLength: 128
+        minLength: 8
+        type: string
+      oldPassword:
+        maxLength: 128
+        type: string
+    required:
+    - newPassword
+    - oldPassword
+    type: object
+  internal_handlers.ForgotPasswordRequest:
+    properties:
+      email:
+        maxLength: 255
+        type: string
+    required:
+    - email
+    type: object
+  internal_handlers.LoginRequest:
+    properties:
+      captchaToken:
+        description: §3 — optional captcha; required only after repeated failures
+          from an IP.
+        type: string
+      email:
+        maxLength: 255
+        type: string
+      password:
+        maxLength: 128
+        type: string
+    required:
+    - email
+    - password
+    type: object
+  internal_handlers.LogoutRequest:
+    properties:
+      refreshToken:
+        type: string
+    required:
+    - refreshToken
+    type: object
+  internal_handlers.MFALoginVerifyRequest:
+    properties:
+      code:
+        maxLength: 128
+        minLength: 6
+        type: string
+    required:
+    - code
+    type: object
+  internal_handlers.PasskeyBeginRequest:
+    properties:
+      displayName:
+        maxLength: 255
+        type: string
+    type: object
+  internal_handlers.RefreshRequest:
+    properties:
+      refreshToken:
+        type: string
+    required:
+    - refreshToken
+    type: object
+  internal_handlers.RegisterRequest:
+    properties:
+      captchaToken:
+        description: |-
+          §2 — CaptchaToken is verified server-side when CAPTCHA is configured.
+          Optional so the endpoint still works with CAPTCHA disabled (default).
+        type: string
+      email:
+        maxLength: 255
+        type: string
+      fullName:
+        maxLength: 255
+        type: string
+      password:
+        maxLength: 128
+        minLength: 8
+        type: string
+      username:
+        maxLength: 50
+        minLength: 3
+        type: string
+      website:
+        description: '§2 — Honeypot: hidden field real users never fill. Non-empty
+          => bot.'
+        type: string
+    required:
+    - email
+    - fullName
+    - password
+    - username
+    type: object
+  internal_handlers.ResendVerifyEmailRequest:
+    properties:
+      email:
+        maxLength: 255
+        type: string
+    required:
+    - email
+    type: object
+  internal_handlers.ResetPasswordRequest:
+    properties:
+      newPassword:
+        maxLength: 128
+        minLength: 8
+        type: string
+      token:
+        type: string
+    required:
+    - newPassword
+    - token
+    type: object
+  internal_handlers.SetPasswordRequest:
+    properties:
+      password:
+        maxLength: 128
+        minLength: 8
+        type: string
+    required:
+    - password
+    type: object
+  internal_handlers.TOTPCodeRequest:
+    properties:
+      code:
+        maxLength: 128
+        minLength: 6
+        type: string
+    required:
+    - code
+    type: object
+  internal_handlers.VerifyEmailRequest:
+    properties:
+      token:
+        type: string
+    required:
+    - token
+    type: object
+  swagger.ErrorEnvelope:
+    properties:
+      code:
+        example: 400
+        type: integer
+      data:
+        example: "null"
+        type: string
+      message:
+        example: validation error
+        type: string
+    type: object
+  swagger.HealthData:
+    properties:
+      db:
+        example: up
+        type: string
+      status:
+        example: ok
+        type: string
+    type: object
+  swagger.HealthEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.HealthData'
+      message:
+        example: ok
+        type: string
+    type: object
+  swagger.LoginData:
+    properties:
+      accessToken:
+        example: eyJhbGciOiJIUzI1NiIs...
+        type: string
+      expiresAt:
+        example: "2026-01-15T11:30:00Z"
+        type: string
+      profile:
+        $ref: '#/definitions/swagger.UserProfile'
+      refreshToken:
+        example: dGhpcyBpcyBhIHJlZnJl...
+        type: string
+    type: object
+  swagger.LoginEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.LoginData'
+      message:
+        example: login successful
+        type: string
+    type: object
+  swagger.NullDataEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        example: "null"
+        type: string
+      message:
+        example: operation successful
+        type: string
+    type: object
+  swagger.PasskeyOptionsEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        type: object
+      message:
+        example: passkey registration challenge
+        type: string
+    type: object
+  swagger.PasskeyRegisteredData:
+    properties:
+      createdAt:
+        example: "2026-01-15T10:30:00Z"
+        type: string
+      displayName:
+        example: My YubiKey
+        type: string
+      id:
+        example: 1
+        type: integer
+      transports:
+        example: '["usb"]'
+        type: string
+    type: object
+  swagger.PasskeyRegisteredEnvelope:
+    properties:
+      code:
+        example: 201
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.PasskeyRegisteredData'
+      message:
+        example: passkey registered
+        type: string
+    type: object
+  swagger.PasskeysListData:
+    properties:
+      passkeys:
+        items:
+          $ref: '#/definitions/github_com_finnapigo_finnapigo_internal_models.PasskeyCredential'
+        type: array
+    type: object
+  swagger.PasskeysListEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.PasskeysListData'
+      message:
+        example: passkeys fetched
+        type: string
+    type: object
+  swagger.RecoveryCodesData:
+    properties:
+      recoveryCodes:
+        example:
+        - a1b2c3d4e5f6
+        - g7h8i9j0k1l2
+        items:
+          type: string
+        type: array
+    type: object
+  swagger.RecoveryCodesEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.RecoveryCodesData'
+      message:
+        example: TOTP enabled
+        type: string
+    type: object
+  swagger.RecoveryCodesViewData:
+    properties:
+      recoveryCodes:
+        example:
+        - a1b2c3d4e5f6
+        - g7h8i9j0k1l2
+        items:
+          type: string
+        type: array
+      sudoExpiresInSec:
+        example: 900
+        type: integer
+      sudoToken:
+        example: eyJhbGciOiJIUzI1NiIs...
+        type: string
+    type: object
+  swagger.RecoveryCodesViewEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.RecoveryCodesViewData'
+      message:
+        example: Recovery codes
+        type: string
+    type: object
+  swagger.RegisterData:
+    properties:
+      profile:
+        $ref: '#/definitions/swagger.UserProfile'
+    type: object
+  swagger.RegisterEnvelope:
+    properties:
+      code:
+        example: 201
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.RegisterData'
+      message:
+        example: account created
+        type: string
+    type: object
+  swagger.SessionInfo:
+    properties:
+      createdAt:
+        example: "2026-01-15T10:30:00Z"
+        type: string
+      deviceName:
+        example: Chrome on Windows
+        type: string
+      expiresAt:
+        example: "2026-01-22T10:30:00Z"
+        type: string
+      id:
+        example: 7
+        type: integer
+      ipAddress:
+        example: 192.168.1.100
+        type: string
+      lastActiveAt:
+        example: "2026-01-15T11:00:00Z"
+        type: string
+      locationEstimate:
+        example: Ho Chi Minh City, VN
+        type: string
+      userAgent:
+        example: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+        type: string
+    type: object
+  swagger.SessionsData:
+    properties:
+      sessions:
+        items:
+          $ref: '#/definitions/swagger.SessionInfo'
+        type: array
+    type: object
+  swagger.SessionsEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.SessionsData'
+      message:
+        example: sessions fetched
+        type: string
+    type: object
+  swagger.TOTPEnableData:
+    properties:
+      provisioningURI:
+        example: otpauth://totp/FinnApiGo:john@example.com?secret=JBSWY3DPEHPK3PXP&issuer=FinnApiGo
+        type: string
+      secret:
+        example: JBSWY3DPEHPK3PXP
+        type: string
+    type: object
+  swagger.TOTPEnableEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.TOTPEnableData'
+      message:
+        example: TOTP enrollment pending verification
+        type: string
+    type: object
+  swagger.TokenPair:
+    properties:
+      accessToken:
+        example: eyJhbGciOiJIUzI1NiIs...
+        type: string
+      expiresAt:
+        example: "2026-01-15T11:30:00Z"
+        type: string
+      refreshToken:
+        example: dGhpcyBpcyBhIHJlZnJl...
+        type: string
+    type: object
+  swagger.TokenPairEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.TokenPair'
+      message:
+        example: token refreshed
+        type: string
+    type: object
+  swagger.UserProfile:
+    properties:
+      createdAt:
+        example: "2026-01-15T10:30:00Z"
+        type: string
+      email:
+        example: john@example.com
+        type: string
+      fullName:
+        example: John Doe
+        type: string
+      id:
+        example: 42
+        type: integer
+      isActive:
+        example: true
+        type: boolean
+      isEmailVerified:
+        example: false
+        type: boolean
+      role:
+        example: user
+        type: string
+      username:
+        example: johndoe
+        type: string
+    type: object
+  swagger.UserProfileEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.UserProfile'
+      message:
+        example: profile fetched
+        type: string
+    type: object
+info:
+  contact:
+    name: FinnApiGo
+    url: https://github.com/NguyenQuan121321/FinnApiGo/issues
+  description: 'Authentication and account-security API: registration with email verification,
+    JWT login with TOTP MFA, Google OAuth 2.0, session and device management, and
+    passkeys/WebAuthn. The response envelope is {code, message, data} on every endpoint.'
+  title: FinnApiGo Auth API
+  version: 1.0.0
+paths:
+  /api/v1/auth/change-password:
+    post:
+      consumes:
+      - application/json
+      description: Verifies the old password, sets the new one, and revokes ALL sessions
+        — every device must log in again.
+      parameters:
+      - description: Old and new password
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.ChangePasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Change the caller's password
+      tags:
+      - Auth
+  /api/v1/auth/forgot-password:
+    post:
+      consumes:
+      - application/json
+      description: Always responds 200 with the same message regardless of whether
+        the email exists (anti-enumeration). A reset link is emailed only when the
+        account exists.
+      parameters:
+      - description: Account email
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.ForgotPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Request a password-reset email
+      tags:
+      - Auth
+  /api/v1/auth/google/callback:
+    get:
+      description: 'Handles the redirect back from Google. Verifies the browser-bound
+        state cookie, exchanges the authorization code, verifies the Google ID token,
+        and links/creates the user account. Response shapes are identical to POST
+        /auth/login: HTTP 200 with message "login successful" and the standard token
+        pair, or HTTP 200 with message "mfa required" and data {mfaRequired: true,
+        mfaToken: "<mfa_pending JWT>"} when TOTP is enabled.'
+      parameters:
+      - description: Authorization code from Google
+        in: query
+        name: code
+        required: true
+        type: string
+      - description: CSRF state parameter
+        in: query
+        name: state
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Standard token pair, or the MFA-pending payload when TOTP is
+            enabled (see description)
+          schema:
+            $ref: '#/definitions/swagger.LoginEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "501":
+          description: Not Implemented
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Handle the Google OAuth callback
+      tags:
+      - OAuth
+  /api/v1/auth/google/login:
+    get:
+      description: Initiates the Google OAuth 2.0 flow. Sets an HttpOnly SameSite=Lax
+        cookie binding the CSRF state to the browser, then redirects (302) to Google's
+        consent screen.
+      produces:
+      - application/json
+      responses:
+        "302":
+          description: Redirect to Google consent screen
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "500":
+          description: Internal Server Error
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "501":
+          description: Google sign-in not configured
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Start the Google OAuth flow
+      tags:
+      - OAuth
+  /api/v1/auth/login:
+    post:
+      consumes:
+      - application/json
+      description: 'Authenticates with email and password. When the account has TOTP
+        MFA active the response is HTTP 200 with message "mfa required" and data {mfaRequired:
+        true, mfaToken: "<mfa_pending JWT>"} — complete the login with POST /auth/mfa/login-verify
+        carrying that token in the Authorization header. Otherwise the response is
+        HTTP 200 with message "login successful" and the standard token pair next
+        to the profile.'
+      parameters:
+      - description: Login credentials
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Standard token pair, or the MFA-pending payload when TOTP is
+            enabled (see description)
+          schema:
+            $ref: '#/definitions/swagger.LoginEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Log in with email and password
+      tags:
+      - Auth
+  /api/v1/auth/logout:
+    post:
+      consumes:
+      - application/json
+      description: Revokes the given refresh token. Requires a valid access token
+        for the same account.
+      parameters:
+      - description: Refresh token to revoke
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.LogoutRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: logged out
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Log out one device
+      tags:
+      - Auth
+  /api/v1/auth/logout-all:
+    post:
+      description: Revokes every active session of the caller — all devices must log
+        in again.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: signed out everywhere
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Log out everywhere
+      tags:
+      - Auth
+  /api/v1/auth/me:
+    get:
+      description: Returns the authenticated user's sanitized profile.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.UserProfileEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Get the caller's profile
+      tags:
+      - Auth
+  /api/v1/auth/mfa/login-verify:
+    post:
+      consumes:
+      - application/json
+      description: Completes a login that returned "mfa required". The Authorization
+        header must carry the short-lived mfa_pending JWT issued by POST /auth/login
+        — a standard access token is rejected. On success a standard token pair is
+        issued.
+      parameters:
+      - description: TOTP or recovery code
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.MFALoginVerifyRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.LoginEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Complete an MFA-pending login
+      tags:
+      - Auth
+  /api/v1/auth/mfa/passkey/authenticate/challenge:
+    post:
+      description: Issues the PublicKeyCredentialRequestOptions for step-up login
+        with a registered passkey on an active session.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: PKC assertion options (pass to navigator.credentials.get)
+          schema:
+            $ref: '#/definitions/swagger.PasskeyOptionsEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Begin passkey authentication
+      tags:
+      - MFA
+  /api/v1/auth/mfa/passkey/authenticate/verify:
+    post:
+      description: |-
+        Verifies the WebAuthn assertion. A sign-count regression (cloned credential) revokes the credential,
+        records a passkey.clone_detected audit event, and refuses the login.
+        On success a standard token pair is issued.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.LoginEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Finish passkey authentication
+      tags:
+      - MFA
+  /api/v1/auth/mfa/passkey/register/challenge:
+    post:
+      consumes:
+      - application/json
+      description: |-
+        Issues the PublicKeyCredentialCreationOptions for a signed-in user.
+        Stages the ceremony challenge in the shared store (60s TTL, single use).
+        Requires WEBAUTHN_RP_ID to be configured.
+      parameters:
+      - description: Optional display name for the credential
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.PasskeyBeginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: PKC creation options (pass to navigator.credentials.create)
+          schema:
+            $ref: '#/definitions/swagger.PasskeyOptionsEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Begin passkey registration
+      tags:
+      - MFA
+  /api/v1/auth/mfa/passkey/register/verify:
+    post:
+      description: |-
+        Completes passkey registration by verifying the attestation and persisting the credential.
+        The request body is the verbatim WebAuthn attestation response (PublicKeyCredential JSON) — do not wrap or rebind it.
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/swagger.PasskeyRegisteredEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Finish passkey registration
+      tags:
+      - MFA
+  /api/v1/auth/mfa/passkeys:
+    get:
+      description: Lists the caller's registered passkeys for device management.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.PasskeysListEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List passkeys
+      tags:
+      - MFA
+  /api/v1/auth/mfa/passkeys/{id}:
+    delete:
+      description: |-
+        Revokes one passkey. Requires X-Sudo-Token header (sudo-gated) —
+        a stolen access token alone cannot strip a user's credentials.
+      parameters:
+      - description: Passkey ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      - SudoAuth: []
+      summary: Revoke a passkey
+      tags:
+      - MFA
+  /api/v1/auth/mfa/totp/enable:
+    post:
+      consumes:
+      - application/json
+      description: Begins TOTP enrollment. Returns the shared secret and provisioning
+        URI. If TOTP is already active, stages a new secret (requires X-Sudo-Token
+        for re-enrollment).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.TOTPEnableEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Begin TOTP enrollment
+      tags:
+      - MFA
+  /api/v1/auth/mfa/totp/recovery-codes:
+    post:
+      consumes:
+      - application/json
+      description: Re-displays saved recovery codes after verifying a current TOTP
+        code. Also mints a short-lived sudo token for the regenerate endpoint.
+      parameters:
+      - description: Current TOTP code
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.TOTPCodeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.RecoveryCodesViewEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: View recovery codes
+      tags:
+      - MFA
+  /api/v1/auth/mfa/totp/recovery-codes/regenerate:
+    post:
+      consumes:
+      - application/json
+      description: Invalidates existing recovery codes and generates a new set. Requires
+        the X-Sudo-Token minted by the view-recovery-codes endpoint (GitHub-style
+        sudo mode).
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.RecoveryCodesEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      - SudoAuth: []
+      summary: Regenerate recovery codes
+      tags:
+      - MFA
+  /api/v1/auth/mfa/totp/validate:
+    post:
+      consumes:
+      - application/json
+      description: Validates a TOTP code for re-authentication on an active session.
+      parameters:
+      - description: Current TOTP code
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.TOTPCodeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Validate a TOTP code
+      tags:
+      - MFA
+  /api/v1/auth/mfa/totp/verify:
+    post:
+      consumes:
+      - application/json
+      description: Confirms TOTP enrollment with a current code. Activates TOTP and
+        returns single-use recovery codes (displayed once).
+      parameters:
+      - description: Current TOTP code
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.TOTPCodeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.RecoveryCodesEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Confirm TOTP enrollment
+      tags:
+      - MFA
+  /api/v1/auth/refresh-token:
+    post:
+      consumes:
+      - application/json
+      description: Exchanges a valid refresh token for a new token pair. The presented
+        token is revoked (single-use rotation).
+      parameters:
+      - description: Current refresh token
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.RefreshRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.TokenPairEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Rotate a refresh token
+      tags:
+      - Auth
+  /api/v1/auth/register:
+    post:
+      consumes:
+      - application/json
+      description: Creates a new account. A verification email is sent when SMTP is
+        configured. CAPTCHA may be required depending on server settings. The honeypot
+        field 'website' must stay empty — non-empty values silently succeed without
+        creating an account.
+      parameters:
+      - description: Registration payload
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.RegisterRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/swagger.RegisterEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Create a new account
+      tags:
+      - Auth
+  /api/v1/auth/resend-verification:
+    post:
+      consumes:
+      - application/json
+      description: Responds 200 with the same message whether or not the email exists
+        and whether it is already verified (anti-enumeration); a link is sent only
+        to unverified existing accounts. Exceeding the resend rate limit surfaces
+        a 429 so legitimate clients can back off.
+      parameters:
+      - description: Account email
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.ResendVerifyEmailRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Resend the verification email
+      tags:
+      - Auth
+  /api/v1/auth/reset-password:
+    post:
+      consumes:
+      - application/json
+      description: Consumes the single-use reset token from the email link and sets
+        the new password. The token cannot be reused.
+      parameters:
+      - description: Reset token and new password
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.ResetPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Reset the password with a single-use token
+      tags:
+      - Auth
+  /api/v1/auth/sessions:
+    get:
+      description: Lists the caller's active (non-expired, non-revoked) sessions/devices.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.SessionsEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List active sessions
+      tags:
+      - Sessions
+  /api/v1/auth/sessions/{id}:
+    delete:
+      description: Revokes a single session by ID, scoped to the caller. The target
+        device can no longer rotate its refresh token.
+      parameters:
+      - description: Session ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Revoke a session
+      tags:
+      - Sessions
+  /api/v1/auth/set-password:
+    post:
+      consumes:
+      - application/json
+      description: Establishes the first password for an account that has never had
+        one (Google OAuth sign-up). Returns 409 when a password already exists — use
+        change-password instead.
+      parameters:
+      - description: New password
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.SetPasswordRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Set a first password (Google-OAuth-only accounts)
+      tags:
+      - Auth
+  /api/v1/auth/verify-email:
+    post:
+      consumes:
+      - application/json
+      description: Consumes the single-use verification token from the email link
+        and marks the account verified. The token cannot be reused.
+      parameters:
+      - description: Verification token
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.VerifyEmailRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Verify the account email
+      tags:
+      - Auth
+  /healthz:
+    get:
+      description: Process liveness probe — always 200 while the process is up; no
+        DB dependency.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.HealthEnvelope'
+      summary: Liveness check
+      tags:
+      - Operational
+  /metrics:
+    get:
+      description: Prometheus exposition endpoint. Intended for the internal metrics
+        listener (METRICS_ADDR); when served on the public listener it is unauthenticated
+        by design (X1).
+      produces:
+      - text/plain
+      responses:
+        "200":
+          description: Prometheus text exposition
+          schema:
+            type: string
+      summary: Prometheus metrics
+      tags:
+      - Operational
+  /readyz:
+    get:
+      description: Readiness probe — pings the database with a 3s timeout. Responds
+        503 when the DB is unreachable.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.HealthEnvelope'
+        "503":
+          description: not ready — database unreachable
+          schema:
+            $ref: '#/definitions/swagger.HealthEnvelope'
+      summary: Readiness check
+      tags:
+      - Operational
+securityDefinitions:
+  BearerAuth:
+    description: JWT access token. Send as "Bearer <token>". For /auth/mfa/login-verify
+      this must be the short-lived mfa_pending token issued by /auth/login.
+    in: header
+    name: Authorization
+    type: apiKey
+  SudoAuth:
+    description: Short-lived sudo token minted by POST /auth/mfa/totp/recovery-codes;
+      required for privileged operations.
+    in: header
+    name: X-Sudo-Token
+    type: apiKey
+swagger: "2.0"

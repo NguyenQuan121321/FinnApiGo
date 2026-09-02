@@ -171,7 +171,7 @@ Everything is read from environment variables (`.env` supported). See `.env.exam
 
 | Group | Variables | Notes |
 |---|---|---|
-| Server | `SERVER_PORT`, `GIN_MODE`, `TRUSTED_PROXIES`, `PPROF_ADDR`, `HSTS_SECONDS` | `TRUSTED_PROXIES` is a comma-separated CIDR list; empty = trust no one. `PPROF_ADDR` starts an internal-only pprof listener |
+| Server | `SERVER_PORT`, `GIN_MODE`, `TRUSTED_PROXIES`, `PPROF_ADDR`, `HSTS_SECONDS`, `SWAGGER_ENABLED` | `TRUSTED_PROXIES` is a comma-separated CIDR list; empty = trust no one. `PPROF_ADDR` starts an internal-only pprof listener. `SWAGGER_ENABLED` mounts `/swagger/index.html` (default false) |
 | Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS`, `DB_TLS`, `MIGRATE_AUTO` | `DB_TLS` appends `&tls=...` to the DSN; `MIGRATE_AUTO` is the dev-only AutoMigrate escape hatch |
 | JWT | `JWT_SECRET` (required, no default), `JWT_SECRET_PREVIOUS`, `JWT_ISSUER`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `RESET_TOKEN_TTL`, `EMAIL_VERIFY_TOKEN_TTL`, `MFA_PENDING_TOKEN_TTL`, `SUDO_TOKEN_TTL` | `JWT_SECRET_PREVIOUS` enables zero-downtime rotation |
 | Keys & secrets | `RECOVERY_CODE_KEY` (**required in release mode**), `KEY_PROVIDER` (`env`\|`file`), `KEY_DIR` | AES-256 key sealing recovery codes and TOTP secrets |
@@ -267,6 +267,21 @@ Every response, success or error, has the same shape:
   "data": { }
 }
 ```
+
+### Swagger / API documentation
+
+An interactive Swagger UI is generated from swag annotations in the handlers and served at **`/swagger/index.html`**, gated by `SWAGGER_ENABLED` (default **false** — production posture is off; enable explicitly where the docs are wanted, e.g. local dev).
+
+- UI URL: `http://localhost:<SERVER_PORT>/swagger/index.html` (default port 8080). Always link `/swagger/index.html` — bare `/swagger` is not a UI route.
+- The UI targets whatever origin serves it (annotations carry full absolute paths), so it works unchanged on localhost and on Render.
+- `docs/openapi.yaml` remains the **contract of record** enforced by `internal/apidrift`; the generated OpenAPI 2.0 spec (`docs/docs.go`, `docs/swagger.json`, `docs/swagger.yaml`) is a committed developer-experience companion.
+- Regenerate after changing any annotation, with the pinned CLI (never `@latest`):
+
+  ```bash
+  go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/server/main.go --parseDependency --parseInternal -o docs/
+  ```
+
+  CI regenerates with the same pinned version and fails on a stale spec.
 
 ---
 

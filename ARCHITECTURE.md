@@ -27,8 +27,10 @@ The application enforces a transport-to-domain flow: handlers parse and validate
 - `internal/logging`: redacting `slog.Handler` decorator (G2) — secret-shaped attribute values become `[REDACTED]` before reaching any sink.
 - `internal/metrics`: Prometheus registry construction (P2); counters wrap atomics maintained at runtime. Metrics carry no user-identifying labels (G2).
 - `internal/middleware`: auth, MFA-pending, sudo, rate limiting (process-local token bucket + shared store counter path), security headers (A3), and the TOTP concurrency semaphore.
-- `internal/routes`: route registration, request logger (safe fields only, request-ID correlation), trusted-proxy handling.
+- `internal/routes`: route registration, request logger (safe fields only, request-ID correlation), trusted-proxy handling, and the `SWAGGER_ENABLED`-gated Swagger UI mount.
 - `internal/apidrift`: contract drift check — builds the real router and diffs it against `docs/openapi.yaml` (A1).
+- `internal/swagger`: documentation-only response structs referenced by swag annotations. Never imported at runtime; the generated OpenAPI 2.0 spec is a developer-experience companion, while `docs/openapi.yaml` stays the contract of record.
+- `docs/`: generated swag output (`docs.go`, `swagger.json`, `swagger.yaml`) committed so builds and CI serve Swagger UI without the swag CLI; regenerated with the pinned command in the README.
 - `internal/database`: GORM/MySQL connection plus the embedded golang-migrate runner (R1).
 - `migrations/`: embedded SQL migration pairs applied by `cmd/migrate` as the deploy step.
 - `internal/device`, `internal/geo`, `internal/response`: focused single-purpose packages (UA parsing, mockable geo resolution, response envelope).
