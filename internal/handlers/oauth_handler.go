@@ -31,6 +31,7 @@ type OAuthService interface {
 	// OAuth is not configured).
 	BeginLogin(ctx context.Context) (state, redirectURL string, err error)
 	HandleCallback(ctx context.Context, code, state, ip, ua string) (services.TokenPair, services.UserProfile, *services.MFAPendingResult, error)
+	Unlink(ctx context.Context, userID uint, provider, ip string) error
 }
 
 // OAuthHandler exposes GET /api/v1/auth/google/login and GET /api/v1/auth/google/callback.
@@ -70,10 +71,14 @@ func (h *OAuthHandler) GoogleLogin(c *gin.Context) {
 	}
 	// Double-submit binding: SameSite=Lax still delivers the cookie on the
 	// top-level GET navigation back from Google's redirect.
+	// V5 — SetSameSite MUST run BEFORE SetCookie: gin's SetCookie renders the
+	// header from the pending sameSite value, so the reverse order emitted
+	// the state cookie with NO SameSite attribute at all (browser default
+	// Lax-by-omission is not guaranteed across browsers).
 	secure := c.Request.TLS != nil || c.Request.Header.Get("X-Forwarded-Proto") == "https"
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(OAuthStateCookie, state, oauthStateCookieMaxAge,
 		"/api/v1/auth/google", "", secure, true /* HttpOnly */)
-	c.SetSameSite(http.SameSiteLaxMode)
 	c.Redirect(http.StatusFound, url)
 }
 
@@ -134,4 +139,35 @@ func clearOAuthStateCookie(c *gin.Context) {
 	secure := c.Request.TLS != nil || c.Request.Header.Get("X-Forwarded-Proto") == "https"
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(OAuthStateCookie, "", -1, "/api/v1/auth/google", "", secure, true)
+}
+
+// Unlink godoc
+//
+//	@Summary      Unlink an OAuth provider
+//	@Description  Disconnects a third-party OAuth provider from the account. Refuses to unlink if it is the user's only remaining authentication method without a usable password.
+//	@Tags         OAuth
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        provider path string true "Provider name (e.g. google)"
+//	@Success      200  {object}  swagger.NullDataEnvelope
+//	@Failure      400  {object}  swagger.ErrorEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      404  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/oauth/{provider} [delete]
+func (h *OAuthHandler) Unlink(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	provider := c.Param("provider")
+	if provider == "" {
+		response.Respond(c, http.StatusBadRequest, "provider required", nil)
+		return
+	}
+	if err := h.svc.Unlink(c.Request.Context(), uid, provider, clientIP(c)); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "provider unlinked successfully", nil)
 }

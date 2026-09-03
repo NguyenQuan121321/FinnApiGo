@@ -79,3 +79,10 @@ func (r *PasskeyRepository) RevokeByID(ctx context.Context, id, userID uint) err
 	}
 	return nil
 }
+
+// RevokeAllForUser marks all active credentials of a user revoked (P1.3 erasure).
+func (r *PasskeyRepository) RevokeAllForUser(ctx context.Context, userID uint) error {
+	return r.db.WithContext(ctx).Model(&models.PasskeyCredential{}).
+		Where("user_id = ? AND revoked = ?", userID, false).
+		Update("revoked", true).Error
+}

@@ -1,0 +1,25 @@
+info:
+  name: lock-user
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/admin/users/{{targetUserId}}/lock"
+  body:
+    type: json
+    data: |-
+      {
+        "durationSeconds": 86400
+      }
+  auth:
+    type: bearer
+    token: "{{adminAccessToken}}"
+
+headers:
+  - name: X-Tenant-ID
+    value: "{{tenantId}}"
+    enabled: true
+
+settings:
+  encodeUrl: true

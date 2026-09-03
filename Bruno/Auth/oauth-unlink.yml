@@ -1,0 +1,19 @@
+info:
+  name: oauth-unlink
+  type: http
+  seq: 23
+
+http:
+  method: DELETE
+  url: "{{baseUrl}}/api/v1/auth/oauth/google"
+  body: none
+  auth:
+    type: bearer
+    token: "{{accessToken}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: true

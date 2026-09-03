@@ -17,9 +17,9 @@ import (
 
 // newTestAuthService builds an AuthService wired to in-memory mocks. Lockout
 // knobs are tuned short for test speed.
-func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier) {
+func newTestAuthService(opts ...AuthServiceOption) (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAuditRepo, *mockNotifier) {
 	tokens := newMockTokenRepo()
-	svc, users, audit, notify, _ := newTestAuthServiceWithTokens(tokens)
+	svc, users, audit, notify, _ := newTestAuthServiceWithTokens(tokens, opts...)
 	return svc, users, tokens, audit, notify
 }
 
@@ -27,7 +27,7 @@ func newTestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mockAud
 // RefreshTokenRepo, for concurrency tests that must control the read→revoke
 // race window deterministically. It also returns the mock store so tests can
 // flush it (single-use durability, C8).
-func newTestAuthServiceWithTokens(tokens RefreshTokenRepo) (*AuthService, *mockUserRepo, *mockAuditRepo, *mockNotifier, *mockStore) {
+func newTestAuthServiceWithTokens(tokens RefreshTokenRepo, opts ...AuthServiceOption) (*AuthService, *mockUserRepo, *mockAuditRepo, *mockNotifier, *mockStore) {
 	users := newMockUserRepo()
 	usedTokens := newMockUsedTokenRepo()
 	kv := newMockStore()
@@ -57,7 +57,7 @@ func newTestAuthServiceWithTokens(tokens RefreshTokenRepo) (*AuthService, *mockU
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
-	svc := NewAuthService(users, tokens, usedTokens, audit, kv, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil)
+	svc := NewAuthService(users, tokens, usedTokens, audit, kv, jwtMgr, cfg, rateLimitCfg, jwtCfg, notify, nil, nil, nil, nil, opts...)
 	return svc, users, audit, notify, kv
 }
 
@@ -92,16 +92,28 @@ func TestRegister_Success(t *testing.T) {
 }
 
 func TestRegister_RejectsDuplicateEmail(t *testing.T) {
-	svc, _, _, _, _ := newTestAuthService()
+	svc, _, _, audit, notify := newTestAuthService()
 	in := RegisterInput{Username: "alice", Email: "alice@example.com", Password: "Password1", FullName: "A"}
 	if _, err := svc.Register(context.Background(), in); err != nil {
 		t.Fatalf("first register failed: %v", err)
 	}
-	_, err := svc.Register(context.Background(), RegisterInput{
+	profile, err := svc.Register(context.Background(), RegisterInput{
 		Username: "alice2", Email: "alice@example.com", Password: "Password1", FullName: "A",
 	})
-	if !errors.Is(err, ErrEmailExists) {
-		t.Errorf("expected ErrEmailExists, got %v", err)
+	if err != nil {
+		t.Fatalf("expected neutral 201 success (P0.1), got %v", err)
+	}
+	if profile.Email != "alice@example.com" || profile.Username != "alice2" {
+		t.Errorf("unexpected profile returned: %+v", profile)
+	}
+	// Wait a moment for fire-and-forget alert goroutine
+	time.Sleep(50 * time.Millisecond)
+	if notify.alertCount() != 1 {
+		t.Errorf("expected 1 duplicate alert to owner, got %d", notify.alertCount())
+	}
+	events := audit.byEvent(models.AuditEventRegisterDuplicate)
+	if len(events) != 1 {
+		t.Errorf("expected 1 register_duplicate audit event, got %d", len(events))
 	}
 }
 
@@ -835,7 +847,7 @@ func TestListSessions_AfterLogin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("login2: %v", err)
 	}
-	sessions, err := svc.ListSessions(context.Background(), 1)
+	sessions, err := svc.ListSessions(context.Background(), 1, "")
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
@@ -878,7 +890,7 @@ func TestListSessions_SkipsRevokedAndExpired(t *testing.T) {
 	tokens.byHash["exp"] = 999
 	tokens.mu.Unlock()
 
-	sessions, err := svc.ListSessions(context.Background(), 1)
+	sessions, err := svc.ListSessions(context.Background(), 1, "")
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
@@ -898,11 +910,11 @@ func TestRevokeSession_Success(t *testing.T) {
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.2.3.4", "agent")
 	// Revoke session id=1.
-	if err := svc.RevokeSession(context.Background(), 1, 1, "10.0.0.1"); err != nil {
+	if err := svc.RevokeSession(context.Background(), "1", 1, "10.0.0.1"); err != nil {
 		t.Fatalf("RevokeSession: %v", err)
 	}
 	// Verify it no longer appears in the active list.
-	sessions, _ := svc.ListSessions(context.Background(), 1)
+	sessions, _ := svc.ListSessions(context.Background(), 1, "")
 	if len(sessions) != 0 {
 		t.Fatalf("expected 0 sessions after revoke, got %d", len(sessions))
 	}
@@ -918,7 +930,7 @@ func TestRevokeSession_Success(t *testing.T) {
 
 func TestRevokeSession_NotFound(t *testing.T) {
 	svc, _, _, _, _ := newTestAuthService()
-	err := svc.RevokeSession(context.Background(), 9999, 1, "ip")
+	err := svc.RevokeSession(context.Background(), "9999", 1, "ip")
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Errorf("expected ErrSessionNotFound, got %v", err)
 	}
@@ -942,7 +954,7 @@ func TestRevokeSession_IDOR_WrongUser(t *testing.T) {
 		Email: "alice@example.com", Password: "Password1",
 	}, "1.1.1.1", "agent")
 	// Bob tries to revoke alice's session → should get ErrSessionNotFound (scoped to bob's id=2).
-	err := svc.RevokeSession(context.Background(), 1, 2, "evil")
+	err := svc.RevokeSession(context.Background(), "1", 2, "evil")
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Errorf("expected ErrSessionNotFound for cross-user revoke, got %v", err)
 	}
@@ -1039,7 +1051,7 @@ func TestListSessions_WithCustomGeoResolver(t *testing.T) {
 	if err != nil {
 		t.Fatalf("login: %v", err)
 	}
-	sessions, err := svc.ListSessions(context.Background(), 1)
+	sessions, err := svc.ListSessions(context.Background(), 1, "")
 	if err != nil {
 		t.Fatalf("ListSessions: %v", err)
 	}
@@ -1594,3 +1606,179 @@ func TestCredentialChange_RevokesAccessTokensViaPwdVer_A7(t *testing.T) {
 		t.Fatalf("pwd_version after reset = %d, want 2", live)
 	}
 }
+
+func TestPassword_ZXCVBNScoringAndDictionaryCheck_P17(t *testing.T) {
+	// 1. Rejection of username in password
+	svc, _, _, _, _ := newTestAuthService()
+	_, err := svc.Register(context.Background(), RegisterInput{
+		Username: "superman", Email: "super@example.com", Password: "SupermanPass123", FullName: "Clark",
+	})
+	if !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("expected ErrPasswordTooWeak when password contains username, got %v", err)
+	}
+
+	// 2. Rejection of email local-part in password
+	_, err = svc.Register(context.Background(), RegisterInput{
+		Username: "clark", Email: "batman_fan@example.com", Password: "batman_fan_123", FullName: "Clark",
+	})
+	if !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("expected ErrPasswordTooWeak when password contains email local-part, got %v", err)
+	}
+
+	// 3. zxcvbn scoring >= 3 enforcement
+	zxcvbnSvc, _, _, _, _ := newTestAuthService(WithMinPasswordScore(3))
+	// Weak password (score < 3)
+	_, err = zxcvbnSvc.Register(context.Background(), RegisterInput{
+		Username: "alice_strong", Email: "alice_strong@example.com", Password: "Password123!", FullName: "Alice",
+	})
+	if !errors.Is(err, ErrPasswordTooWeak) {
+		t.Fatalf("expected ErrPasswordTooWeak for zxcvbn score < 3, got %v", err)
+	}
+
+	// Strong password (score >= 3)
+	_, err = zxcvbnSvc.Register(context.Background(), RegisterInput{
+		Username: "alice_strong", Email: "alice_strong@example.com", Password: "correct horse battery staple 99!", FullName: "Alice",
+	})
+	if err != nil {
+		t.Fatalf("expected high-entropy passphrase to pass zxcvbn score check, got %v", err)
+	}
+}
+
+func TestGetUserAuditLog_P14(t *testing.T) {
+	svc, _, _, audit, _ := newTestAuthService()
+	uid := uint(42)
+	audit.Record(context.Background(), &models.AuditLog{
+		UserID:    &uid,
+		Event:     models.AuditEventLogin,
+		IPAddress: "127.0.0.1",
+		Success:   true,
+	})
+	audit.Record(context.Background(), &models.AuditLog{
+		UserID:    &uid,
+		Event:     models.AuditEventPasswordChanged,
+		IPAddress: "127.0.0.1",
+		Success:   true,
+	})
+
+	items, total, err := svc.GetUserAuditLog(context.Background(), uid, 1, 20)
+	if err != nil {
+		t.Fatalf("GetUserAuditLog failed: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("want 2 items and total 2, got total=%d items=%d", total, len(items))
+	}
+	if items[0].Event != models.AuditEventLogin {
+		t.Fatalf("unexpected event: %s", items[0].Event)
+	}
+}
+
+func TestChangeEmail_Ceremony_P12(t *testing.T) {
+	svc, users, _, audit, notify := newTestAuthService()
+	hashed, _ := hash.HashPassword("Password123")
+	u := &models.User{
+		ID:              10,
+		Email:           "old@example.com",
+		Username:        "testuser",
+		Password:        hashed,
+		IsActive:        true,
+		IsEmailVerified: true,
+	}
+	_ = users.Create(context.Background(), u)
+
+	// 1. Wrong password fails
+	err := svc.RequestChangeEmail(context.Background(), u.ID, ChangeEmailRequestInput{
+		Password: "WrongPassword",
+		NewEmail: "new@example.com",
+	}, "127.0.0.1")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+
+	// 2. Disposable email fails
+	err = svc.RequestChangeEmail(context.Background(), u.ID, ChangeEmailRequestInput{
+		Password: "Password123",
+		NewEmail: "test@mailinator.com",
+	}, "127.0.0.1")
+	if !errors.Is(err, ErrDisposableEmail) {
+		t.Fatalf("expected ErrDisposableEmail, got %v", err)
+	}
+
+	// 3. Valid request stages token and sends emails
+	err = svc.RequestChangeEmail(context.Background(), u.ID, ChangeEmailRequestInput{
+		Password: "Password123",
+		NewEmail: "new@example.com",
+	}, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("RequestChangeEmail failed: %v", err)
+	}
+	if notify.lastVerify == "" {
+		t.Fatal("expected staged verification token sent to new email")
+	}
+
+	// 4. Confirm with invalid token fails
+	err = svc.ConfirmChangeEmail(context.Background(), "invalid-token", "127.0.0.1")
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("expected ErrInvalidToken, got %v", err)
+	}
+
+	// 5. Confirm with valid token succeeds and updates email
+	err = svc.ConfirmChangeEmail(context.Background(), notify.lastVerify, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("ConfirmChangeEmail failed: %v", err)
+	}
+	updated, _ := users.FindByID(context.Background(), u.ID)
+	if updated.Email != "new@example.com" {
+		t.Fatalf("email not updated: got %s, want new@example.com", updated.Email)
+	}
+	if audit.count() == 0 {
+		t.Fatal("expected audit logs for change email")
+	}
+}
+
+func TestDeactivateAndErase_P13(t *testing.T) {
+	svc, users, _, _, _ := newTestAuthService()
+	hashed, _ := hash.HashPassword("Password123")
+	u := &models.User{
+		Email:           "victim@example.com",
+		Username:        "victimuser",
+		Password:        hashed,
+		FullName:        "Victim User",
+		IsActive:        true,
+		IsEmailVerified: true,
+	}
+	_ = users.Create(context.Background(), u)
+
+	// 1. Deactivate with bad password fails
+	err := svc.DeactivateAccount(context.Background(), u.ID, "", "WrongPassword", "jti-1", "127.0.0.1")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+
+	// 2. Deactivate with correct password succeeds
+	err = svc.DeactivateAccount(context.Background(), u.ID, "", "Password123", "jti-1", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("DeactivateAccount failed: %v", err)
+	}
+	deactivated, _ := users.FindByID(context.Background(), u.ID)
+	if deactivated.IsActive {
+		t.Fatal("expected user to be inactive")
+	}
+
+	// Reactivate for erase test
+	deactivated.IsActive = true
+	_ = users.Update(context.Background(), deactivated)
+
+	// 3. Erase account anonymizes PII and scrambles password
+	err = svc.EraseAccount(context.Background(), u.ID, "", "Password123", "jti-2", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("EraseAccount failed: %v", err)
+	}
+	erased, _ := users.FindByID(context.Background(), u.ID)
+	if erased.Password != "" || erased.FullName != "" || erased.IsActive {
+		t.Fatalf("account not properly erased: %+v", erased)
+	}
+	if !strings.HasPrefix(erased.Email, "deleted_") {
+		t.Fatalf("expected anonymized email, got %s", erased.Email)
+	}
+}
+

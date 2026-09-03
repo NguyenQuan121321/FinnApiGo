@@ -208,6 +208,17 @@ func (m *mockTokenRepo) RevokeAllForUser(ctx context.Context, userID uint) error
 	return nil
 }
 
+func (m *mockTokenRepo) RevokeBySession(ctx context.Context, sessionID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, rt := range m.rows {
+		if rt.SessionID == sessionID {
+			rt.Revoked = true
+		}
+	}
+	return nil
+}
+
 // FindActiveByUser returns the caller's non-expired, non-revoked sessions,
 // newest activity first — mirrors the GORM repository ordering for parity.
 func (m *mockTokenRepo) FindActiveByUser(ctx context.Context, userID uint) ([]models.RefreshToken, error) {
@@ -315,6 +326,42 @@ func (m *mockAuditRepo) count() int {
 	return len(m.entries)
 }
 
+func (m *mockAuditRepo) FindByUserIDPaginated(ctx context.Context, userID uint, page, limit int) ([]models.AuditLog, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var matches []models.AuditLog
+	for _, e := range m.entries {
+		if e.UserID != nil && *e.UserID == userID {
+			matches = append(matches, *e)
+		}
+	}
+	total := int64(len(matches))
+	return matches, total, nil
+}
+
+func (m *mockAuditRepo) AnonymizeUser(ctx context.Context, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, e := range m.entries {
+		if e.UserID != nil && *e.UserID == userID {
+			e.Email = "anonymized@gdpr.local"
+		}
+	}
+	return nil
+}
+
+func (m *mockAuditRepo) StreamAll(ctx context.Context, tenantID string) ([]models.AuditLog, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.AuditLog
+	for _, e := range m.entries {
+		if e != nil {
+			out = append(out, *e)
+		}
+	}
+	return out, nil
+}
+
 // ---- mock notifier (captures last sent values) ----
 
 type mockNotifier struct {
@@ -352,6 +399,116 @@ func (n *mockNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceName
 	n.lastAlertDev = deviceName
 	return nil
 }
+
+func (n *mockNotifier) SendDuplicateRegisterAlert(ctx context.Context, to string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.alertsSent++
+	return nil
+}
+
+func (n *mockNotifier) SendSecurityAlert(ctx context.Context, to, event, detail string) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.alertsSent++
+	return nil
+}
+
+var _ Notifier = (*mockNotifier)(nil)
+var _ RefreshTokenRepo = (*mockTokenRepo)(nil)
+
+// ---- mock session repo (P0.3) ----
+
+type mockSessionRepo struct {
+	mu   sync.Mutex
+	rows map[string]*models.Session
+}
+
+func newMockSessionRepo() *mockSessionRepo {
+	return &mockSessionRepo{rows: make(map[string]*models.Session)}
+}
+
+func (m *mockSessionRepo) Create(ctx context.Context, s *models.Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clone := *s
+	m.rows[s.ID] = &clone
+	return nil
+}
+
+func (m *mockSessionRepo) FindByID(ctx context.Context, id string) (*models.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.rows[id]; ok {
+		clone := *s
+		return &clone, nil
+	}
+	return nil, nil
+}
+
+func (m *mockSessionRepo) FindActiveByUser(ctx context.Context, userID uint) ([]models.Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	var out []models.Session
+	for _, s := range m.rows {
+		if s.UserID == userID && !s.Revoked && s.ExpiresAt.After(now) {
+			out = append(out, *s)
+		}
+	}
+	// Sort by LastActiveAt desc
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0; j-- {
+			if out[j-1].LastActiveAt.Before(out[j].LastActiveAt) {
+				out[j-1], out[j] = out[j], out[j-1]
+			} else {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *mockSessionRepo) Touch(ctx context.Context, id, ip, ua, device, location string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.rows[id]; ok {
+		s.IPAddress = ip
+		s.UserAgent = ua
+		s.DeviceName = device
+		s.LocationEstimate = location
+		s.LastActiveAt = at
+	}
+	return nil
+}
+
+func (m *mockSessionRepo) RevokeByID(ctx context.Context, id string, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.rows[id]; ok && s.UserID == userID {
+		s.Revoked = true
+		return nil
+	}
+	return gorm.ErrRecordNotFound
+}
+
+func (m *mockSessionRepo) RevokeAllForUser(ctx context.Context, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.rows {
+		if s.UserID == userID {
+			s.Revoked = true
+		}
+	}
+	return nil
+}
+
+func (m *mockSessionRepo) RevokeAllForUserTx(tx *gorm.DB, userID uint) error {
+	return m.RevokeAllForUser(context.Background(), userID)
+}
+
+var _ SessionRepo = (*mockSessionRepo)(nil)
+
 
 // alertCount is the thread-safe reader for assertions — the alert is delivered
 // from a fire-and-forget goroutine, so tests must not read the fields directly.
@@ -537,6 +694,18 @@ func (m *mockTOTPRepo) MarkRecoveryCodeUsed(ctx context.Context, c *models.Recov
 	return repositories.ErrRecoveryCodeUsed
 }
 
+func (m *mockTOTPRepo) Disable(ctx context.Context, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if d, ok := m.devices[userID]; ok {
+		d.Enabled = false
+		d.Secret = ""
+		d.SecretEncrypted = ""
+		d.PendingSecretEncrypted = ""
+	}
+	return nil
+}
+
 // ---- mock TOTP validator (for MFA login tests) ----
 
 type mockTOTPValidator struct {
@@ -601,6 +770,111 @@ func (m *mockOAuthIdentityRepo) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.rows)
+}
+
+func (m *mockOAuthIdentityRepo) DeleteByUserIDAndProvider(ctx context.Context, userID uint, provider string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var kept []*models.OAuthIdentity
+	for _, r := range m.rows {
+		if !(r.UserID == userID && r.Provider == provider) {
+			kept = append(kept, r)
+		}
+	}
+	m.rows = kept
+	return nil
+}
+
+func (m *mockOAuthIdentityRepo) DeleteAllByUserID(ctx context.Context, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var kept []*models.OAuthIdentity
+	for _, r := range m.rows {
+		if r.UserID != userID {
+			kept = append(kept, r)
+		}
+	}
+	m.rows = kept
+	return nil
+}
+
+// ---- mock passkey repo ----
+
+type mockPasskeyRepo struct {
+	mu   sync.Mutex
+	rows []*models.PasskeyCredential
+}
+
+func newMockPasskeyRepo() *mockPasskeyRepo { return &mockPasskeyRepo{} }
+
+func (m *mockPasskeyRepo) Create(ctx context.Context, pc *models.PasskeyCredential) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clone := *pc
+	m.rows = append(m.rows, &clone)
+	return nil
+}
+
+func (m *mockPasskeyRepo) FindByCredentialID(ctx context.Context, credentialID []byte) (*models.PasskeyCredential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if string(r.CredentialID) == string(credentialID) {
+			c := *r
+			return &c, nil
+		}
+	}
+	return nil, nil
+}
+
+func (m *mockPasskeyRepo) ListByUser(ctx context.Context, userID uint, includeRevoked bool) ([]models.PasskeyCredential, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []models.PasskeyCredential
+	for _, r := range m.rows {
+		if r.UserID == userID {
+			if includeRevoked || !r.Revoked {
+				out = append(out, *r)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (m *mockPasskeyRepo) TouchUsage(ctx context.Context, id uint, signCount uint32, usedAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.ID == id {
+			r.SignCount = signCount
+			r.LastUsedAt = &usedAt
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *mockPasskeyRepo) RevokeByID(ctx context.Context, id, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.ID == id && r.UserID == userID {
+			r.Revoked = true
+			return nil
+		}
+	}
+	return nil
+}
+
+func (m *mockPasskeyRepo) RevokeAllForUser(ctx context.Context, userID uint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.rows {
+		if r.UserID == userID {
+			r.Revoked = true
+		}
+	}
+	return nil
 }
 
 // ---- mock Google ID token verifier (no real network/JWKS calls) ----

@@ -141,6 +141,27 @@ type OAuthService struct {
 	issuer      TokenIssuer
 	idVerifier  GoogleIDTokenVerifier
 	client      GoogleOAuthClient // nil = feature disabled
+	notifier    Notifier
+	audits      AuditRepo
+	passkeys    PasskeyRepo
+}
+
+// OAuthOption configures optional dependencies on OAuthService.
+type OAuthOption func(*OAuthService)
+
+// WithOAuthNotifier wires Notifier for security alerts on link/unlink (P1.6).
+func WithOAuthNotifier(n Notifier) OAuthOption {
+	return func(s *OAuthService) { s.notifier = n }
+}
+
+// WithOAuthAudits wires AuditRepo for security event logging (P1.6).
+func WithOAuthAudits(a AuditRepo) OAuthOption {
+	return func(s *OAuthService) { s.audits = a }
+}
+
+// WithOAuthPasskeys wires PasskeyRepo for login method verification on unlink (P1.6).
+func WithOAuthPasskeys(p PasskeyRepo) OAuthOption {
+	return func(s *OAuthService) { s.passkeys = p }
 }
 
 // NewOAuthService constructs the OAuth service. All dependencies are
@@ -153,11 +174,16 @@ func NewOAuthService(
 	issuer TokenIssuer,
 	idVerifier GoogleIDTokenVerifier,
 	client GoogleOAuthClient,
+	opts ...OAuthOption,
 ) *OAuthService {
-	return &OAuthService{
+	s := &OAuthService{
 		users: users, oauthIdents: oauthIdents, store: store,
 		issuer: issuer, idVerifier: idVerifier, client: client,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // BeginLogin creates a full login attempt: a CSPRNG CSRF state, a PKCE S256
@@ -284,7 +310,7 @@ func (s *OAuthService) HandleCallback(ctx context.Context, code, state, ip, ua s
 	email := strings.ToLower(strings.TrimSpace(claims.Email))
 
 	// ---- 5. Account linking (create or attach, never duplicate) ----
-	user, err := s.findOrCreateUser(ctx, claims, email)
+	user, err := s.findOrCreateUser(ctx, claims, email, ip)
 	if err != nil {
 		return TokenPair{}, UserProfile{}, nil, err
 	}
@@ -309,7 +335,7 @@ func (s *OAuthService) HandleCallback(ctx context.Context, code, state, ip, ua s
 //     an email match is the classic takeover pattern (whoever controls that
 //     address after reassignment would inherit the account).
 //  3. Otherwise a fresh account is provisioned from the verified identity.
-func (s *OAuthService) findOrCreateUser(ctx context.Context, claims *GoogleIDTokenClaims, email string) (*models.User, error) {
+func (s *OAuthService) findOrCreateUser(ctx context.Context, claims *GoogleIDTokenClaims, email, ip string) (*models.User, error) {
 	// 1. The stored link wins.
 	ident, err := s.oauthIdents.FindByProviderAndProviderUserID(ctx, oauthProviderGoogle, claims.Sub)
 	if err != nil {
@@ -349,7 +375,7 @@ func (s *OAuthService) findOrCreateUser(ctx context.Context, claims *GoogleIDTok
 		}
 	}
 
-	if err := s.linkIdentity(ctx, user.ID, claims); err != nil {
+	if err := s.linkIdentity(ctx, user, claims, ip); err != nil {
 		return nil, err
 	}
 	return user, nil
@@ -389,7 +415,8 @@ func (s *OAuthService) createGoogleUser(ctx context.Context, claims *GoogleIDTok
 
 // linkIdentity creates an oauth_identities row for this user + Google account.
 // If the identity already exists (prior sign-in), this is a no-op.
-func (s *OAuthService) linkIdentity(ctx context.Context, userID uint, claims *GoogleIDTokenClaims) error {
+// Sends notification email and records audit log (P1.6).
+func (s *OAuthService) linkIdentity(ctx context.Context, user *models.User, claims *GoogleIDTokenClaims, ip string) error {
 	existing, err := s.oauthIdents.FindByProviderAndProviderUserID(ctx, oauthProviderGoogle, claims.Sub)
 	if err != nil {
 		return fmt.Errorf("oauth: check identity: %w", err)
@@ -398,12 +425,75 @@ func (s *OAuthService) linkIdentity(ctx context.Context, userID uint, claims *Go
 		return nil // already linked — nothing to do
 	}
 	identity := &models.OAuthIdentity{
-		UserID:         userID,
+		UserID:         user.ID,
 		Provider:       oauthProviderGoogle,
 		ProviderUserID: claims.Sub,
 	}
 	if err := s.oauthIdents.Create(ctx, identity); err != nil {
 		return fmt.Errorf("oauth: link identity: %w", err)
+	}
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID:    &user.ID,
+			Email:     user.Email,
+			Event:     models.AuditEventOAuthLinked,
+			IPAddress: ip,
+			Success:   true,
+			Detail:    "linked google oauth account",
+		})
+	}
+	if s.notifier != nil {
+		_ = s.notifier.SendSecurityAlert(ctx, user.Email, "oauth_linked", "A Google account has been connected to your profile.")
+	}
+	return nil
+}
+
+// Unlink disconnects an OAuth provider from the user's account (P1.6).
+// Refuses if this is the user's only login method without a usable password.
+func (s *OAuthService) Unlink(ctx context.Context, userID uint, provider, ip string) error {
+	existing, err := s.oauthIdents.FindByUserIDAndProvider(ctx, userID, provider)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return ErrUserNotFound
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return ErrUserNotFound
+	}
+
+	hasPassword := user.Password != ""
+	hasPasskey := false
+	if s.passkeys != nil {
+		pks, err := s.passkeys.ListByUser(ctx, userID, false)
+		if err == nil && len(pks) > 0 {
+			hasPasskey = true
+		}
+	}
+	if !hasPassword && !hasPasskey {
+		return ErrCannotUnlinkOnlyMethod
+	}
+
+	if err := s.oauthIdents.DeleteByUserIDAndProvider(ctx, userID, provider); err != nil {
+		return err
+	}
+
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID:    &user.ID,
+			Email:     user.Email,
+			Event:     models.AuditEventOAuthUnlinked,
+			IPAddress: ip,
+			Success:   true,
+			Detail:    fmt.Sprintf("unlinked %s oauth account", provider),
+		})
+	}
+	if s.notifier != nil {
+		_ = s.notifier.SendSecurityAlert(ctx, user.Email, "oauth_unlinked", fmt.Sprintf("Your %s account was disconnected from your profile.", provider))
 	}
 	return nil
 }

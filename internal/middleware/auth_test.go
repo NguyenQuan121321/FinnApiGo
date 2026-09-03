@@ -190,11 +190,11 @@ func TestAuthMiddleware_DenialsAreLogged_A4(t *testing.T) {
 func TestAuthMiddleware_StalePwdVersionRejected_A7(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
-	stale, err := jwtMgr.IssueAccess(7, "user", "u@e.com", time.Minute, 0)
+	stale, err := jwtMgr.IssueAccess(7, "user", "u@e.com", time.Minute, 0, "sess-7")
 	if err != nil {
 		t.Fatal(err)
 	}
-	fresh, err := jwtMgr.IssueAccess(7, "user", "u@e.com", time.Minute, 1)
+	fresh, err := jwtMgr.IssueAccess(7, "user", "u@e.com", time.Minute, 1, "sess-7")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,3 +223,66 @@ func TestAuthMiddleware_StalePwdVersionRejected_A7(t *testing.T) {
 		t.Errorf("version source error must fail open: status=%d, want 200", got)
 	}
 }
+
+type mockDenylist struct {
+	denied map[string]bool
+}
+
+func (m *mockDenylist) Get(key string) (any, bool) {
+	if m.denied[key] {
+		return "revoked", true
+	}
+	return nil, false
+}
+
+func TestAuthMiddleware_DenylistRejected_P02(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
+	token, err := jwtMgr.IssueAccess(7, "user", "u@e.com", time.Minute, 1, "session-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := jwtMgr.Verify(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dl := &mockDenylist{denied: make(map[string]bool)}
+	r := gin.New()
+	var seenJTI, seenSID string
+	r.GET("/p", AuthMiddleware(jwtMgr, nil, WithDenylist(dl)), func(c *gin.Context) {
+		seenJTI = c.GetString(CtxJTI)
+		seenSID = c.GetString(CtxSID)
+		c.Status(200)
+	})
+
+	do := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/p", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w.Code
+	}
+
+	// 1. Clean token passes and context is populated
+	if code := do(); code != 200 {
+		t.Fatalf("clean token failed: %d", code)
+	}
+	if seenJTI != claims.ID || seenSID != "session-abc" {
+		t.Errorf("context not populated: jti=%q (want %q), sid=%q (want session-abc)", seenJTI, claims.ID, seenSID)
+	}
+
+	// 2. JTI denylisted → 401
+	dl.denied["denylist:jti:"+claims.ID] = true
+	if code := do(); code != 401 {
+		t.Fatalf("denylisted JTI must return 401, got %d", code)
+	}
+	delete(dl.denied, "denylist:jti:"+claims.ID)
+
+	// 3. SID denylisted → 401
+	dl.denied["denylist:sid:session-abc"] = true
+	if code := do(); code != 401 {
+		t.Fatalf("denylisted SID must return 401, got %d", code)
+	}
+}
+

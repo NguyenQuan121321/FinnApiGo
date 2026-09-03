@@ -129,3 +129,39 @@ func TestConfig_KeyProviderValidation_K3(t *testing.T) {
 		t.Fatal("K3: KEY_PROVIDER=file without KEY_DIR must fail config load")
 	}
 }
+
+func TestValidateMetricsPolicy_ReleaseMode_P06(t *testing.T) {
+	// 1. Release mode without METRICS_ADDR and without METRICS_TOKEN must fail boot
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			GinMode:      gin.ReleaseMode,
+			MetricsAddr:  "",
+			MetricsToken: "",
+		},
+	}
+	if err := validateMetricsPolicy(cfg); err == nil {
+		t.Fatal("P0.6: release mode without metrics addr or token must fail boot, got nil error")
+	}
+
+	// 2. Release mode with METRICS_ADDR succeeds
+	cfg.Server.MetricsAddr = "127.0.0.1:9090"
+	if err := validateMetricsPolicy(cfg); err != nil {
+		t.Fatalf("P0.6: release mode with METRICS_ADDR must succeed, got %v", err)
+	}
+
+	// 3. Release mode with METRICS_TOKEN succeeds
+	cfg.Server.MetricsAddr = ""
+	cfg.Server.MetricsToken = "secret-token"
+	if err := validateMetricsPolicy(cfg); err != nil {
+		t.Fatalf("P0.6: release mode with METRICS_TOKEN must succeed, got %v", err)
+	}
+
+	// 4. Debug/dev mode without addr or token succeeds
+	cfg.Server.GinMode = gin.DebugMode
+	cfg.Server.MetricsAddr = ""
+	cfg.Server.MetricsToken = ""
+	if err := validateMetricsPolicy(cfg); err != nil {
+		t.Fatalf("P0.6: dev mode without metrics addr or token must succeed, got %v", err)
+	}
+}
+

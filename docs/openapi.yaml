@@ -24,6 +24,9 @@ tags:
   - name: sessions
   - name: mfa
   - name: oauth
+  - name: admin
+  - name: trusted-devices
+  - name: webhooks
 
 paths:
   /healthz:
@@ -367,6 +370,190 @@ paths:
                 $ref: '#/components/schemas/UserProfileResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [auth]
+      summary: Permanently erase account (GDPR)
+      description: Erases account credentials and anonymizes audit records.
+      security:
+        - bearerAuth: []
+      operationId: eraseMe
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessNoData'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/auth/me/audit-log:
+    get:
+      tags: [auth]
+      summary: Personal security event log
+      description: Returns paginated security audit trail for caller.
+      security:
+        - bearerAuth: []
+      operationId: myAuditLog
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+      responses:
+        '200':
+          description: Audit log fetched
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, data]
+                properties:
+                  code: { type: integer, example: 200 }
+                  message: { type: string, example: "audit log" }
+                  data:
+                    type: object
+                    required: [items, total, page, limit]
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer }
+                            event: { type: string }
+                            ipAddress: { type: string }
+                            success: { type: boolean }
+                            createdAt: { type: string, format: date-time }
+                      total: { type: integer }
+                      page: { type: integer }
+                      limit: { type: integer }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/change-email/request:
+    post:
+      tags: [auth]
+      summary: Request email address change
+      description: Stages email change and sends verification to new address.
+      security:
+        - bearerAuth: []
+      operationId: requestChangeEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, newEmail]
+              properties:
+                password: { type: string }
+                newEmail: { type: string, format: email }
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessNoData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/change-email/confirm:
+    post:
+      tags: [auth]
+      summary: Confirm email address change
+      description: Finalizes email change using single-use staged token.
+      operationId: confirmChangeEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessNoData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/deactivate:
+    post:
+      tags: [auth]
+      summary: Self-deactivate account
+      description: Deactivates account, revoking sessions. Requires X-Sudo-Token or password.
+      security:
+        - bearerAuth: []
+      operationId: deactivateAccount
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password: { type: string }
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessNoData'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/oauth/{provider}:
+    delete:
+      tags: [oauth]
+      summary: Unlink an OAuth provider
+      description: Disconnects third-party login method.
+      security:
+        - bearerAuth: []
+      operationId: unlinkOAuthProvider
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessNoData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /api/v1/auth/sessions:
     get:
@@ -396,7 +583,7 @@ paths:
         - in: path
           name: id
           required: true
-          schema: { type: integer }
+          schema: { type: string, format: uuid }
       responses:
         '200':
           $ref: '#/components/responses/MessageOnly'
@@ -527,6 +714,69 @@ paths:
                 $ref: '#/components/schemas/RecoveryCodesViewResponse'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/totp/disable:
+    post:
+      tags: [mfa]
+      summary: Disable TOTP
+      description: Disables TOTP authentication for caller. Requires X-Sudo-Token or password + code.
+      security:
+        - bearerAuth: []
+      operationId: disableTOTP
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password:
+                  type: string
+                code:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/SuccessNoData'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/mfa/methods:
+    get:
+      tags: [mfa]
+      summary: List configured MFA methods
+      description: Returns active MFA methods, remaining recovery codes, and default method.
+      security:
+        - bearerAuth: []
+      operationId: listMFAMethods
+      responses:
+        '200':
+          description: MFA methods retrieved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code, message, data]
+                properties:
+                  code: { type: integer, example: 200 }
+                  message: { type: string, example: "MFA methods" }
+                  data:
+                    type: object
+                    required: [totpEnabled, passkeysCount, recoveryCodesRemaining, defaultMethod]
+                    properties:
+                      totpEnabled: { type: boolean }
+                      passkeysCount: { type: integer }
+                      recoveryCodesRemaining: { type: integer }
+                      defaultMethod: { type: string, example: "totp" }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '429':
@@ -687,6 +937,185 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/RateLimited'
+  /api/v1/auth/trusted-devices:
+    get:
+      tags: [trusted-devices]
+      summary: List user trusted devices (P2.4)
+      security:
+        - bearerAuth: []
+      operationId: listTrustedDevices
+      responses:
+        '200':
+          description: List of active trusted devices
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/auth/trusted-devices/{id}:
+    delete:
+      tags: [trusted-devices]
+      summary: Revoke a trusted device (P2.4)
+      security:
+        - bearerAuth: []
+      operationId: revokeTrustedDevice
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Device revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /api/v1/admin/users:
+    get:
+      tags: [admin]
+      summary: List users in tenant (P2.3)
+      security:
+        - bearerAuth: []
+      operationId: adminListUsers
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+        - name: search
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: Paginated users list
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/users/{id}/lock:
+    post:
+      tags: [admin]
+      summary: Lock a user account (P2.3)
+      security:
+        - bearerAuth: []
+      operationId: adminLockUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                durationSeconds: { type: integer }
+      responses:
+        '200':
+          description: User locked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/users/{id}/unlock:
+    post:
+      tags: [admin]
+      summary: Unlock a user account (P2.3)
+      security:
+        - bearerAuth: []
+      operationId: adminUnlockUser
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: User unlocked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/users/{id}/force-logout:
+    post:
+      tags: [admin]
+      summary: Force revoke all user sessions (P2.3)
+      security:
+        - bearerAuth: []
+      operationId: adminForceLogout
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: User sessions revoked
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/sessions:
+    get:
+      tags: [admin]
+      summary: List all active sessions in tenant (P2.3)
+      security:
+        - bearerAuth: []
+      operationId: adminListSessions
+      responses:
+        '200':
+          description: Active sessions
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/audit-log/export:
+    get:
+      tags: [admin]
+      summary: Export audit logs in CSV or NDJSON (P2.3)
+      security:
+        - bearerAuth: []
+      operationId: adminExportAuditLog
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [csv, ndjson], default: csv }
+      responses:
+        '200':
+          description: Streamed audit log data
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/webhooks:
+    post:
+      tags: [webhooks]
+      summary: Register webhook endpoint (P2.5)
+      security:
+        - bearerAuth: []
+      operationId: createWebhookEndpoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [url, events]
+              properties:
+                url: { type: string, format: uri }
+                events: { type: string }
+      responses:
+        '201':
+          description: Webhook endpoint registered
+        '400':
+          description: Invalid request
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
 components:
   securitySchemes:
@@ -889,7 +1318,7 @@ components:
     SessionInfo:
       type: object
       properties:
-        id: { type: integer }
+        id: { type: string, format: uuid }
         ipAddress: { type: string }
         userAgent: { type: string }
         deviceName: { type: string }
@@ -897,6 +1326,7 @@ components:
         createdAt: { type: string, format: date-time }
         lastActiveAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time }
+        isCurrent: { type: boolean }
 
     # ---- typed envelopes ----
     RegisterResponse:

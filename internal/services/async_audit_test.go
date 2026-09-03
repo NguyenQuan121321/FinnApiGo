@@ -29,6 +29,24 @@ func (m *mockAuditRepo) Record(ctx context.Context, entry *models.AuditLog) {
 	m.recorded = append(m.recorded, entry)
 }
 
+func (m *mockAuditRepo) FindByUserIDPaginated(ctx context.Context, userID uint, page, limit int) ([]models.AuditLog, int64, error) {
+	return nil, 0, nil
+}
+
+func (m *mockAuditRepo) AnonymizeUser(ctx context.Context, userID uint) error {
+	return nil
+}
+
+func (m *mockAuditRepo) StreamAll(ctx context.Context, tenantID string) ([]models.AuditLog, error) {
+	var out []models.AuditLog
+	for _, r := range m.recorded {
+		if r != nil {
+			out = append(out, *r)
+		}
+	}
+	return out, nil
+}
+
 func TestAsyncAuditWriter(t *testing.T) {
 	repo := &mockAuditRepo{}
 	inserter := &mockBatchInserter{}

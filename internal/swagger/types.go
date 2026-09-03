@@ -147,7 +147,7 @@ type UserProfileEnvelope struct {
 
 // SessionInfo is one active session/device row.
 type SessionInfo struct {
-	ID               uint      `json:"id" example:"7"`
+	ID               string    `json:"id" example:"9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"`
 	IPAddress        string    `json:"ipAddress" example:"192.168.1.100"`
 	UserAgent        string    `json:"userAgent" example:"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"`
 	DeviceName       string    `json:"deviceName" example:"Chrome on Windows"`
@@ -155,6 +155,7 @@ type SessionInfo struct {
 	CreatedAt        time.Time `json:"createdAt" example:"2026-01-15T10:30:00Z"`
 	LastActiveAt     time.Time `json:"lastActiveAt" example:"2026-01-15T11:00:00Z"`
 	ExpiresAt        time.Time `json:"expiresAt" example:"2026-01-22T10:30:00Z"`
+	IsCurrent        bool      `json:"isCurrent" example:"true"`
 }
 
 // SessionsData is the payload of GET /api/v1/auth/sessions.

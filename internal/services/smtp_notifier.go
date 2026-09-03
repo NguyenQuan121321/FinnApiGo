@@ -223,3 +223,25 @@ func (n *SMTPNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceName
 		"sign-in, change your password immediately and revoke unknown sessions."
 	return n.send(ctx, to, "New sign-in to your account", body)
 }
+
+// SendDuplicateRegisterAlert delivers the security alert when someone tries to
+// register with an already existing email/username (P0.1).
+func (n *SMTPNotifier) SendDuplicateRegisterAlert(ctx context.Context, to string) error {
+	body := "An attempt was made to register a new account using your email address or username.\n\n" +
+		"Time (UTC): " + time.Now().UTC().Format(time.RFC3339) + "\n\n" +
+		"If this was you, you can log in or reset your password. If you did not attempt this, no action is needed; your account remains secure."
+	return n.send(ctx, to, "Security alert: Attempted registration with your account", body)
+}
+
+// SendSecurityAlert delivers a generic security-transparency notice (P0.3 / P1.1 / P1.2).
+func (n *SMTPNotifier) SendSecurityAlert(ctx context.Context, to, event, detail string) error {
+	body := "A security event occurred on your account.\n\n" +
+		"Event:  " + safeMailDisplayValue(event) + "\n" +
+		"Detail: " + safeMailDisplayValue(detail) + "\n" +
+		"Time:   " + time.Now().UTC().Format(time.RFC3339) + "\n\n" +
+		"If you did not authorize this action, change your password immediately and revoke active sessions."
+	return n.send(ctx, to, event, body)
+}
+
+var _ Notifier = (*SMTPNotifier)(nil)
+

@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/response"
 	"github.com/finnapigo/finnapigo/internal/services"
 )
@@ -15,7 +17,7 @@ import (
 type AuthService interface {
 	Register(context.Context, services.RegisterInput) (services.UserProfile, error)
 	Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, *services.MFAPendingResult, error)
-	Logout(context.Context, string, string) error
+	Logout(ctx context.Context, refreshToken, accessJTI, ip string) error
 	LogoutAll(context.Context, uint, string) error
 	Refresh(context.Context, string, string, string) (services.TokenPair, error)
 	ForgotPassword(context.Context, string, string) error
@@ -26,6 +28,11 @@ type AuthService interface {
 	VerifyEmail(context.Context, services.EmailVerifyInput) error
 	ResendVerifyEmail(context.Context, string, string) error
 	CompleteMFALogin(context.Context, services.CompleteMFALoginInput) (services.TokenPair, services.UserProfile, error)
+	GetUserAuditLog(context.Context, uint, int, int) ([]services.UserAuditLogItem, int64, error)
+	RequestChangeEmail(ctx context.Context, userID uint, in services.ChangeEmailRequestInput, ip string) error
+	ConfirmChangeEmail(ctx context.Context, token, ip string) error
+	DeactivateAccount(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error
+	EraseAccount(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error
 }
 
 type AuthHandler struct {
@@ -179,7 +186,8 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	if err := h.svc.Logout(c.Request.Context(), req.RefreshToken, clientIP(c)); err != nil {
+	accessJTI := c.GetString(middleware.CtxJTI)
+	if err := h.svc.Logout(c.Request.Context(), req.RefreshToken, accessJTI, clientIP(c)); err != nil {
 		respondError(c, err)
 		return
 	}
@@ -439,4 +447,172 @@ func (h *AuthHandler) ResendVerifyEmail(c *gin.Context) {
 		return
 	}
 	response.Respond(c, http.StatusOK, "if the email exists, a verification link has been sent", nil)
+}
+
+// MyAuditLog godoc
+//
+//	@Summary      Get personal audit log
+//	@Description  Returns paginated security event log for the authenticated user.
+//	@Tags         Auth
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        page   query     int  false  "Page number (default 1)"
+//	@Param        limit  query     int  false  "Items per page (default 20, max 100)"
+//	@Success      200    {object}  swagger.UserAuditLogEnvelope
+//	@Failure      401    {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/me/audit-log [get]
+func (h *AuthHandler) MyAuditLog(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	items, total, err := h.svc.GetUserAuditLog(c.Request.Context(), uid, page, limit)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "audit log", gin.H{
+		"items": items,
+		"total": total,
+		"page":  page,
+		"limit": limit,
+	})
+}
+
+// DeactivateRequest is the optional body for POST /api/v1/auth/deactivate (P1.3).
+type DeactivateRequest struct {
+	Password string `json:"password"`
+}
+
+// EraseMeRequest is the optional body for DELETE /api/v1/auth/me (P1.3).
+type EraseMeRequest struct {
+	Password string `json:"password"`
+}
+
+// RequestChangeEmail godoc
+//
+//	@Summary      Request email change
+//	@Description  Stages an email change request. Verifies password, checks disposable and colliding domains, sends verification to the new email and security alert to current email.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        request body services.ChangeEmailRequestInput true "Current password and new email"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      409 {object} swagger.ErrorEnvelope
+//	@Failure      422 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/change-email/request [post]
+func (h *AuthHandler) RequestChangeEmail(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req services.ChangeEmailRequestInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+	if err := h.svc.RequestChangeEmail(c.Request.Context(), uid, req, clientIP(c)); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "verification email sent to new address", nil)
+}
+
+// ConfirmChangeEmail godoc
+//
+//	@Summary      Confirm email change
+//	@Description  Confirms email change using the single-use token from the verification email. Inactive sessions are revoked and password version bumped.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Param        request body services.ChangeEmailConfirmInput true "Confirmation token"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      400 {object} swagger.ErrorEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      409 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/change-email/confirm [post]
+func (h *AuthHandler) ConfirmChangeEmail(c *gin.Context) {
+	var req services.ChangeEmailConfirmInput
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+	if err := h.svc.ConfirmChangeEmail(c.Request.Context(), req.Token, clientIP(c)); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "email successfully changed", nil)
+}
+
+// DeactivateAccount godoc
+//
+//	@Summary      Deactivate account
+//	@Description  Deactivates caller account (is_active=false), revokes all sessions and denylists caller's access token. Requires either X-Sudo-Token header or password.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        request body handlers.DeactivateRequest false "Account password (optional if X-Sudo-Token provided)"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      403 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/deactivate [post]
+func (h *AuthHandler) DeactivateAccount(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req DeactivateRequest
+	_ = c.ShouldBindJSON(&req)
+	sudoToken := c.GetHeader(middleware.SudoHeader)
+	accessJTI := c.GetString(middleware.CtxJTI)
+	if err := h.svc.DeactivateAccount(c.Request.Context(), uid, sudoToken, req.Password, accessJTI, clientIP(c)); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "account deactivated", nil)
+}
+
+// EraseMe godoc
+//
+//	@Summary      Permanently erase account (GDPR)
+//	@Description  Scrambles user credentials, deletes credentials (TOTP, passkeys, OAuth), anonymizes audit records, revokes all sessions. Requires either X-Sudo-Token header or password.
+//	@Tags         Auth
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        request body handlers.EraseMeRequest false "Account password (optional if X-Sudo-Token provided)"
+//	@Success      200 {object} swagger.NullDataEnvelope
+//	@Failure      401 {object} swagger.ErrorEnvelope
+//	@Failure      403 {object} swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/me [delete]
+func (h *AuthHandler) EraseMe(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req EraseMeRequest
+	_ = c.ShouldBindJSON(&req)
+	sudoToken := c.GetHeader(middleware.SudoHeader)
+	accessJTI := c.GetString(middleware.CtxJTI)
+	if err := h.svc.EraseAccount(c.Request.Context(), uid, sudoToken, req.Password, accessJTI, clientIP(c)); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "account erased", nil)
 }

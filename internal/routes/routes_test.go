@@ -104,8 +104,8 @@ func TestSessionRoutes(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("authenticated revoke: status=%d body=%s", w.Code, w.Body.String())
 	}
-	if svc.revokedID != 3 || svc.revokeUserID != uid {
-		t.Fatalf("revoke got (%d for user %d), want (3 for user %d)", svc.revokedID, svc.revokeUserID, uid)
+	if svc.revokedID != "3" || svc.revokeUserID != uid {
+		t.Fatalf("revoke got (%s for user %d), want (3 for user %d)", svc.revokedID, svc.revokeUserID, uid)
 	}
 }
 
@@ -142,16 +142,16 @@ func TestSessionRoutes_TrustedProxyIP(t *testing.T) {
 // stubSessionService records calls for assertions.
 type stubSessionService struct {
 	lastIP       string
-	revokedID    uint
+	revokedID    string
 	revokeUserID uint
 }
 
-func (s *stubSessionService) ListSessions(_ context.Context, userID uint) ([]services.SessionInfo, error) {
+func (s *stubSessionService) ListSessions(_ context.Context, userID uint, currentSID string) ([]services.SessionInfo, error) {
 	// Return one row so the JSON envelope is meaningful.
-	return []services.SessionInfo{{ID: 1, DeviceName: "Chrome on Windows"}}, nil
+	return []services.SessionInfo{{ID: "1", DeviceName: "Chrome on Windows"}}, nil
 }
 
-func (s *stubSessionService) RevokeSession(_ context.Context, id, userID uint, ip string) error {
+func (s *stubSessionService) RevokeSession(_ context.Context, id string, userID uint, ip string) error {
 	s.revokedID, s.revokeUserID, s.lastIP = id, userID, ip
 	return nil
 }

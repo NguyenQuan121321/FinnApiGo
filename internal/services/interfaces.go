@@ -7,6 +7,8 @@ import (
 	"context"
 	"time"
 
+	"gorm.io/gorm"
+
 	"github.com/finnapigo/finnapigo/internal/models"
 )
 
@@ -49,7 +51,34 @@ type RefreshTokenRepo interface {
 	// treat that as token reuse, not as an error to propagate.
 	Revoke(ctx context.Context, rt *models.RefreshToken) error
 	RevokeAllForUser(ctx context.Context, userID uint) error
+	// RevokeBySession revokes every refresh token linked to one session family
+	// (P0.3) — the scoped alternative to RevokeAllForUser when only one
+	// device's chain must die.
+	RevokeBySession(ctx context.Context, sessionID string) error
 	PurgeExpired(ctx context.Context, before time.Time) (int64, error)
+}
+
+// SessionRepo abstracts persistence for server-side login sessions (P0.3).
+// One row per successful authentication; refresh tokens and access tokens
+// (sid claim) belong to exactly one session, giving token-family isolation.
+type SessionRepo interface {
+	Create(ctx context.Context, s *models.Session) error
+	// FindByID returns the session row or nil when unknown/soft-deleted.
+	FindByID(ctx context.Context, id string) (*models.Session, error)
+	// FindActiveByUser returns the caller's non-expired, non-revoked sessions,
+	// most-recently-active first (drives GET /auth/sessions).
+	FindActiveByUser(ctx context.Context, userID uint) ([]models.Session, error)
+	// Touch updates a session's device metadata and activity timestamp after
+	// a rotation (the family stays the same; the view stays current).
+	Touch(ctx context.Context, id, ip, ua, device, location string, at time.Time) error
+	// RevokeByID marks one session revoked, scoped to userID (IDOR defense).
+	// Returns gorm.ErrRecordNotFound when no row matched.
+	RevokeByID(ctx context.Context, id string, userID uint) error
+	// RevokeAllForUser revokes every active session of a user.
+	RevokeAllForUser(ctx context.Context, userID uint) error
+	// RevokeAllForUserTx is RevokeAllForUser bound to a caller-provided
+	// transaction (credential-change atomicity).
+	RevokeAllForUserTx(tx *gorm.DB, userID uint) error
 }
 
 type TOTPRepo interface {
@@ -64,6 +93,8 @@ type TOTPRepo interface {
 	// concurrent request already consumed the code — callers must treat that
 	// as a failed attempt, not propagate it.
 	MarkRecoveryCodeUsed(context.Context, *models.RecoveryCode) error
+	// Disable deactivates the user's TOTP device and clears stored secrets (P1.1).
+	Disable(context.Context, uint) error
 }
 
 // TOTPValidator validates a TOTP code for an already-enabled device. The
@@ -77,6 +108,9 @@ type TOTPValidator interface {
 // AuditRepo abstracts audit logging.
 type AuditRepo interface {
 	Record(ctx context.Context, entry *models.AuditLog)
+	FindByUserIDPaginated(ctx context.Context, userID uint, page, limit int) ([]models.AuditLog, int64, error)
+	AnonymizeUser(ctx context.Context, userID uint) error
+	StreamAll(ctx context.Context, tenantID string) ([]models.AuditLog, error)
 }
 
 // OAuthIdentityRepo abstracts persistence for third-party OAuth identity
@@ -90,6 +124,10 @@ type OAuthIdentityRepo interface {
 	FindByProviderAndProviderUserID(ctx context.Context, provider, providerUserID string) (*models.OAuthIdentity, error)
 	// FindByUserIDAndProvider returns the identity link for a local user + provider.
 	FindByUserIDAndProvider(ctx context.Context, userID uint, provider string) (*models.OAuthIdentity, error)
+	// DeleteByUserIDAndProvider unlinks an OAuth identity (P1.6).
+	DeleteByUserIDAndProvider(ctx context.Context, userID uint, provider string) error
+	// DeleteAllByUserID removes all OAuth identities for a user upon erasure (P1.3).
+	DeleteAllByUserID(ctx context.Context, userID uint) error
 }
 
 // UsedTokenRepo abstracts single-use token (jti) tracking (§1.8).
@@ -112,6 +150,16 @@ type Notifier interface {
 	// authentication: no step-up, no blocking (product decision for
 	// predictable UX across deployments). The message carries no secrets.
 	SendNewLoginAlert(ctx context.Context, to, ip, device string) error
+	// SendDuplicateRegisterAlert warns the OWNER of an existing account that
+	// someone attempted to register with their email/username (P0.1). The
+	// registration response itself is a neutral 201, so this email is the
+	// user-visible signal. No tokens, no links.
+	SendDuplicateRegisterAlert(ctx context.Context, to string) error
+	// SendSecurityAlert delivers a generic security-transparency notice
+	// (token reuse detected, account deactivated, MFA disabled, email
+	// change, ...). detail is a short human label already sanitized by the
+	// caller. The message carries no tokens or links.
+	SendSecurityAlert(ctx context.Context, to, event, detail string) error
 }
 
 // ---- CAPTCHA verifier (§2) ----
