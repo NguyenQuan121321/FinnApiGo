@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"io"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -54,10 +55,13 @@ func HashRecoveryCode(code string) string {
 	return HashToken(code)
 }
 
+// randReader allows injecting a failing reader during unit tests.
+var randReader io.Reader = rand.Reader
+
 // GenerateRandomBytes returns n cryptographically secure random bytes.
 func GenerateRandomBytes(n int) ([]byte, error) {
 	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
+	if _, err := io.ReadFull(randReader, b); err != nil {
 		return nil, err
 	}
 	return b, nil
