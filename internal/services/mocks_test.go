@@ -508,6 +508,7 @@ func (m *mockSessionRepo) RevokeAllForUserTx(tx *gorm.DB, userID uint) error {
 }
 
 var _ SessionRepo = (*mockSessionRepo)(nil)
+var _ = newMockSessionRepo
 
 
 // alertCount is the thread-safe reader for assertions — the alert is delivered
@@ -777,7 +778,7 @@ func (m *mockOAuthIdentityRepo) DeleteByUserIDAndProvider(ctx context.Context, u
 	defer m.mu.Unlock()
 	var kept []*models.OAuthIdentity
 	for _, r := range m.rows {
-		if !(r.UserID == userID && r.Provider == provider) {
+		if r.UserID != userID || r.Provider != provider {
 			kept = append(kept, r)
 		}
 	}

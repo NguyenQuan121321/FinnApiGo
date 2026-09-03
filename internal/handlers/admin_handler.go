@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -29,7 +30,19 @@ func NewAdminHandler(svc AdminServiceInterface) *AdminHandler {
 }
 
 // ListUsers godoc
-// @Summary List users in tenant (P2.3)
+//
+//	@Summary      List tenant users
+//	@Description  Returns a paginated list of users within the current tenant.
+//	@Tags         Admin
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Param        page   query     int     false  "Page number"
+//	@Param        limit  query     int     false  "Page limit"
+//	@Param        search query     string  false  "Search term"
+//	@Success      200    {object}  swagger.AdminUsersEnvelope
+//	@Failure      401    {object}  swagger.ErrorEnvelope
+//	@Failure      403    {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/admin/users [get]
 func (h *AdminHandler) ListUsers(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
@@ -50,11 +63,25 @@ func (h *AdminHandler) ListUsers(c *gin.Context) {
 }
 
 type lockUserRequest struct {
-	DurationSeconds int64 `json:"durationSeconds"`
+	DurationSeconds int64 `json:"durationSeconds" example:"3600"`
 }
 
 // LockUser godoc
-// @Summary Lock a user account (P2.3)
+//
+//	@Summary      Lock user account
+//	@Description  Locks a user account for a specified duration or indefinitely.
+//	@Tags         Admin
+//	@Security     BearerAuth
+//	@Accept       json
+//	@Produce      json
+//	@Param        id    path      int              true  "Target user ID"
+//	@Param        body  body      lockUserRequest  true  "Lock duration parameters"
+//	@Success      200   {object}  swagger.NullDataEnvelope
+//	@Failure      400   {object}  swagger.ErrorEnvelope
+//	@Failure      401   {object}  swagger.ErrorEnvelope
+//	@Failure      403   {object}  swagger.ErrorEnvelope
+//	@Failure      404   {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/admin/users/{id}/lock [post]
 func (h *AdminHandler) LockUser(c *gin.Context) {
 	adminID, ok := ctxUserID(c)
 	if !ok {
@@ -63,7 +90,7 @@ func (h *AdminHandler) LockUser(c *gin.Context) {
 	}
 
 	targetIDParsed, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
+	if err != nil || targetIDParsed > math.MaxUint {
 		response.Respond(c, http.StatusBadRequest, "invalid user id", nil)
 		return
 	}
@@ -81,7 +108,18 @@ func (h *AdminHandler) LockUser(c *gin.Context) {
 }
 
 // UnlockUser godoc
-// @Summary Unlock a user account (P2.3)
+//
+//	@Summary      Unlock user account
+//	@Description  Unlocks a user account and resets failed login counters.
+//	@Tags         Admin
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Param        id   path      int  true  "Target user ID"
+//	@Success      200  {object}  swagger.NullDataEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      404  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/admin/users/{id}/unlock [post]
 func (h *AdminHandler) UnlockUser(c *gin.Context) {
 	adminID, ok := ctxUserID(c)
 	if !ok {
@@ -90,7 +128,7 @@ func (h *AdminHandler) UnlockUser(c *gin.Context) {
 	}
 
 	targetIDParsed, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
+	if err != nil || targetIDParsed > math.MaxUint {
 		response.Respond(c, http.StatusBadRequest, "invalid user id", nil)
 		return
 	}
@@ -104,7 +142,18 @@ func (h *AdminHandler) UnlockUser(c *gin.Context) {
 }
 
 // ForceLogout godoc
-// @Summary Force revoke all sessions and tokens of a user (P2.3)
+//
+//	@Summary      Force logout user
+//	@Description  Revokes all active sessions, refresh tokens, and access tokens for a user.
+//	@Tags         Admin
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Param        id   path      int  true  "Target user ID"
+//	@Success      200  {object}  swagger.NullDataEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Failure      404  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/admin/users/{id}/force-logout [post]
 func (h *AdminHandler) ForceLogout(c *gin.Context) {
 	adminID, ok := ctxUserID(c)
 	if !ok {
@@ -113,7 +162,7 @@ func (h *AdminHandler) ForceLogout(c *gin.Context) {
 	}
 
 	targetIDParsed, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
+	if err != nil || targetIDParsed > math.MaxUint {
 		response.Respond(c, http.StatusBadRequest, "invalid user id", nil)
 		return
 	}
@@ -127,7 +176,16 @@ func (h *AdminHandler) ForceLogout(c *gin.Context) {
 }
 
 // ListSessions godoc
-// @Summary List all active sessions in tenant (P2.3)
+//
+//	@Summary      List tenant sessions
+//	@Description  Lists all active user sessions within the tenant.
+//	@Tags         Admin
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Success      200  {object}  swagger.AdminSessionsEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      403  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/admin/sessions [get]
 func (h *AdminHandler) ListSessions(c *gin.Context) {
 	sessions, err := h.svc.ListTenantSessions(c.Request.Context())
 	if err != nil {
@@ -139,7 +197,17 @@ func (h *AdminHandler) ListSessions(c *gin.Context) {
 }
 
 // ExportAuditLog godoc
-// @Summary Stream export audit logs in CSV or NDJSON (P2.3)
+//
+//	@Summary      Export audit logs
+//	@Description  Exports tenant security audit logs in CSV or NDJSON format.
+//	@Tags         Admin
+//	@Security     BearerAuth
+//	@Produce      text/csv,application/x-ndjson
+//	@Param        format  query     string  false  "Output format (csv or ndjson)"
+//	@Success      200     {string}  string  "Audit export data stream"
+//	@Failure      401     {object}  swagger.ErrorEnvelope
+//	@Failure      403     {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/admin/audit-log/export [get]
 func (h *AdminHandler) ExportAuditLog(c *gin.Context) {
 	format := c.DefaultQuery("format", "csv")
 	data, contentType, err := h.svc.ExportAuditLogs(c.Request.Context(), format)

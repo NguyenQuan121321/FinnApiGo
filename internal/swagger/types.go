@@ -251,3 +251,100 @@ type PasskeysListEnvelope struct {
 	Message string           `json:"message" example:"passkeys fetched"`
 	Data    PasskeysListData `json:"data"`
 }
+
+// UserAuditLogData is the payload of GET /api/v1/auth/me/audit-log.
+type UserAuditLogData struct {
+	Items []models.AuditLog `json:"items"`
+	Total int64             `json:"total" example:"15"`
+	Page  int               `json:"page" example:"1"`
+	Limit int               `json:"limit" example:"20"`
+}
+
+// UserAuditLogEnvelope wraps GET /api/v1/auth/me/audit-log response.
+type UserAuditLogEnvelope struct {
+	Code    int              `json:"code" example:"200"`
+	Message string           `json:"message" example:"audit log"`
+	Data    UserAuditLogData `json:"data"`
+}
+
+// MFAMethodsData is the payload of GET /api/v1/auth/mfa/methods.
+type MFAMethodsData struct {
+	TOTPEnabled            bool   `json:"totpEnabled" example:"true"`
+	PasskeysCount          int    `json:"passkeysCount" example:"1"`
+	RecoveryCodesRemaining int    `json:"recoveryCodesRemaining" example:"8"`
+	DefaultMethod          string `json:"defaultMethod" example:"totp"`
+}
+
+// MFAMethodsEnvelope wraps GET /api/v1/auth/mfa/methods response.
+type MFAMethodsEnvelope struct {
+	Code    int            `json:"code" example:"200"`
+	Message string         `json:"message" example:"mfa methods"`
+	Data    MFAMethodsData `json:"data"`
+}
+
+// --------------------------------------------------------------------------
+// Phase 2 Enterprise: Admin, Trusted Devices, Webhooks
+// --------------------------------------------------------------------------
+
+// AdminUsersData is the payload of GET /api/v1/admin/users.
+type AdminUsersData struct {
+	Items []UserProfile `json:"items"`
+	Total int64         `json:"total" example:"42"`
+	Page  int           `json:"page" example:"1"`
+	Limit int           `json:"limit" example:"20"`
+}
+
+// AdminUsersEnvelope wraps GET /api/v1/admin/users response.
+type AdminUsersEnvelope struct {
+	Code    int            `json:"code" example:"200"`
+	Message string         `json:"message" example:"users retrieved"`
+	Data    AdminUsersData `json:"data"`
+}
+
+// AdminSessionsData is the payload of GET /api/v1/admin/sessions.
+type AdminSessionsData struct {
+	Sessions []SessionInfo `json:"sessions"`
+}
+
+// AdminSessionsEnvelope wraps GET /api/v1/admin/sessions response.
+type AdminSessionsEnvelope struct {
+	Code    int               `json:"code" example:"200"`
+	Message string            `json:"message" example:"tenant sessions retrieved"`
+	Data    AdminSessionsData `json:"data"`
+}
+
+// TrustedDeviceInfoData is a single trusted device projection.
+type TrustedDeviceInfoData struct {
+	ID         uint      `json:"id" example:"1"`
+	DeviceName string    `json:"deviceName" example:"Chrome MacBook Pro"`
+	IPAddress  string    `json:"ipAddress" example:"192.168.1.50"`
+	ExpiresAt  time.Time `json:"expiresAt" example:"2026-10-03T18:00:00Z"`
+	LastUsedAt time.Time `json:"lastUsedAt" example:"2026-09-03T18:00:00Z"`
+}
+
+// TrustedDevicesListData is the payload of GET /api/v1/auth/trusted-devices.
+type TrustedDevicesListData struct {
+	Devices []TrustedDeviceInfoData `json:"devices"`
+}
+
+// TrustedDevicesListEnvelope wraps GET /api/v1/auth/trusted-devices response.
+type TrustedDevicesListEnvelope struct {
+	Code    int                    `json:"code" example:"200"`
+	Message string                 `json:"message" example:"trusted devices retrieved"`
+	Data    TrustedDevicesListData `json:"data"`
+}
+
+// WebhookEndpointData is the payload of POST /api/v1/admin/webhooks.
+type WebhookEndpointData struct {
+	ID     string `json:"id" example:"wh_12345678"`
+	URL    string `json:"url" example:"https://example.com/webhook"`
+	Events string `json:"events" example:"user.created,user.locked"`
+	Secret string `json:"secret" example:"sec_abcdef123456"`
+}
+
+// WebhookEndpointEnvelope wraps POST /api/v1/admin/webhooks response.
+type WebhookEndpointEnvelope struct {
+	Code    int                 `json:"code" example:"201"`
+	Message string              `json:"message" example:"webhook endpoint created"`
+	Data    WebhookEndpointData `json:"data"`
+}

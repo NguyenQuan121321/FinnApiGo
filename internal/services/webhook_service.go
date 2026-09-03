@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/models"
@@ -40,7 +39,6 @@ type WebhookService struct {
 	httpClient     *http.Client
 	allowLocalhost bool
 	stopCh         chan struct{}
-	wg             sync.WaitGroup
 }
 
 func NewWebhookService(repo WebhookRepo) *WebhookService {
@@ -185,7 +183,7 @@ func (s *WebhookService) DeliverOne(ctx context.Context, d *models.WebhookDelive
 		_ = s.repo.UpdateDeliveryStatus(ctx, d.ID, status, d.Attempts, nextRetry, nil, err.Error())
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		_ = s.repo.UpdateDeliveryStatus(ctx, d.ID, "delivered", d.Attempts, nil, &resp.StatusCode, "")

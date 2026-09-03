@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -24,7 +25,15 @@ func NewTrustedDeviceHandler(svc TrustedDeviceServiceInterface) *TrustedDeviceHa
 }
 
 // ListDevices godoc
-// @Summary List trusted devices for the user (P2.4)
+//
+//	@Summary      List trusted devices
+//	@Description  Lists caller's active trusted devices eligible for 30-day MFA bypass.
+//	@Tags         TrustedDevices
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Success      200  {object}  swagger.TrustedDevicesListEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/trusted-devices [get]
 func (h *TrustedDeviceHandler) ListDevices(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -42,7 +51,17 @@ func (h *TrustedDeviceHandler) ListDevices(c *gin.Context) {
 }
 
 // RevokeDevice godoc
-// @Summary Revoke a trusted device (P2.4)
+//
+//	@Summary      Revoke trusted device
+//	@Description  Revokes MFA bypass trust for a specific device.
+//	@Tags         TrustedDevices
+//	@Security     BearerAuth
+//	@Produce      json
+//	@Param        id   path      int  true  "Device ID"
+//	@Success      200  {object}  swagger.NullDataEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Failure      404  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/trusted-devices/{id} [delete]
 func (h *TrustedDeviceHandler) RevokeDevice(c *gin.Context) {
 	uid, ok := ctxUserID(c)
 	if !ok {
@@ -51,7 +70,7 @@ func (h *TrustedDeviceHandler) RevokeDevice(c *gin.Context) {
 	}
 
 	idParsed, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
+	if err != nil || idParsed > math.MaxUint {
 		response.Respond(c, http.StatusBadRequest, "invalid device id", nil)
 		return
 	}

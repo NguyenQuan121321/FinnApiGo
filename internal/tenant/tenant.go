@@ -4,10 +4,10 @@ import "context"
 
 type contextKey string
 
-const (
-	contextKeyTenantID contextKey = "tenant_id"
-	DefaultTenantID               = "default"
-)
+const contextKeyTenantID contextKey = "tenant_id"
+
+// DefaultTenantID is the fallback tenant for single-tenant / backwards-compatible mode.
+const DefaultTenantID = "default"
 
 // FromContext extracts the tenant ID from context.Context.
 // Returns DefaultTenantID ("default") if none is set.

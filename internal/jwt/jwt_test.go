@@ -250,6 +250,36 @@ func TestJWT_RotatingManagerDedupesEqualSecrets_K2(t *testing.T) {
 	}
 }
 
+func TestJWT_IssueAccessAndEnterprise(t *testing.T) {
+	mgr := NewJWTManager("access-secret-32-bytes-minimum!", "test-issuer")
+
+	// Test IssueAccess
+	tok1, err := mgr.IssueAccess(42, "admin", "admin@example.com", time.Hour, 3, "session-123")
+	if err != nil {
+		t.Fatalf("IssueAccess failed: %v", err)
+	}
+	claims1, err := mgr.Verify(tok1)
+	if err != nil {
+		t.Fatalf("Verify tok1 failed: %v", err)
+	}
+	if claims1.UserID != 42 || claims1.Role != "admin" || claims1.PwdVer != 3 || claims1.SID != "session-123" || claims1.Type != TokenTypeAccess {
+		t.Fatalf("unexpected claims1: %+v", claims1)
+	}
+
+	// Test IssueAccessEnterprise
+	tok2, err := mgr.IssueAccessEnterprise(99, "manager", "manager@org.com", time.Hour, 5, "sess-org", "tenant-alpha", []string{"users:read", "audit:read"})
+	if err != nil {
+		t.Fatalf("IssueAccessEnterprise failed: %v", err)
+	}
+	claims2, err := mgr.Verify(tok2)
+	if err != nil {
+		t.Fatalf("Verify tok2 failed: %v", err)
+	}
+	if claims2.UserID != 99 || claims2.TenantID != "tenant-alpha" || len(claims2.Permissions) != 2 || claims2.Permissions[0] != "users:read" {
+		t.Fatalf("unexpected claims2: %+v", claims2)
+	}
+}
+
 // headerKid extracts the kid header without verifying the token (test only).
 func headerKid(t *testing.T, tokenStr string) string {
 	t.Helper()

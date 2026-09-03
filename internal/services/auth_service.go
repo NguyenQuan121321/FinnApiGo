@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -310,15 +311,17 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 	// not turn the registration into a 500 (a client retry then collides with
 	// ErrEmailExists). Degrade to success + error log + audit; the
 	// resend-verification endpoint is the recovery path.
-	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
-		slog.Error("register: verification email delivery failed",
-			"user_id", user.ID, "email", user.Email, "err", err)
-		uid := user.ID
-		s.audits.Record(ctx, &models.AuditLog{
-			UserID: &uid, Email: user.Email,
-			Event: models.AuditEventVerifyEmailSendFailed, Success: false,
-			Detail: err.Error(), IPAddress: in.IP,
-		})
+	if s.notify != nil {
+		if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
+			slog.Error("register: verification email delivery failed",
+				"user_id", user.ID, "email", user.Email, "err", err)
+			uid := user.ID
+			s.audits.Record(ctx, &models.AuditLog{
+				UserID: &uid, Email: user.Email,
+				Event: models.AuditEventVerifyEmailSendFailed, Success: false,
+				Detail: err.Error(), IPAddress: in.IP,
+			})
+		}
 	}
 	return FromUser(user), nil
 }
@@ -1202,7 +1205,7 @@ func (s *AuthService) ConfirmChangeEmail(ctx context.Context, token, ip string) 
 		return ErrInvalidToken
 	}
 	uidParsed, err := strconv.ParseUint(parts[0], 10, 64)
-	if err != nil {
+	if err != nil || uidParsed > math.MaxUint {
 		return ErrInvalidToken
 	}
 	uid := uint(uidParsed)
@@ -1630,7 +1633,7 @@ func (s *AuthService) RevokeSession(ctx context.Context, sessionID string, userI
 	if s.sessions == nil {
 		// Legacy fallback: refresh-token rows as sessions (P0.3 pre-migration).
 		id, err := strconv.ParseUint(sessionID, 10, 64)
-		if err != nil {
+		if err != nil || id > math.MaxUint {
 			return ErrSessionNotFound
 		}
 		if err := s.tokens.RevokeByID(ctx, uint(id), userID); err != nil {

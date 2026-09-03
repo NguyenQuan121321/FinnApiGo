@@ -284,3 +284,47 @@ func TestRoutes_MetricsAndHealthz_P2(t *testing.T) {
 		t.Errorf("nil Metrics must leave /metrics unmounted, got %d", w.Code)
 	}
 }
+
+func TestPhase2RoutesAndReadyzCoverage(t *testing.T) {
+	jwtMgr := jwt.NewJWTManager("test-jwt-secret-key-32-chars-long!!", "test-issuer")
+	adminToken, _ := jwtMgr.IssueAccessEnterprise(1, "admin", "admin@example.com", time.Hour, 1, "sess-1", "default", []string{"users:read", "users:write"})
+
+	deps := Deps{
+		Auth:           handlers.NewAuthHandler(nil, nil),
+		MFA:            handlers.NewMFAHandler(nil, nil, time.Minute),
+		Sessions:       handlers.NewSessionHandler(nil),
+		Admin:          handlers.NewAdminHandler(nil),
+		TrustedDevice:  handlers.NewTrustedDeviceHandler(nil),
+		Webhook:        handlers.NewWebhookHandler(nil),
+		RateLimit:      middleware.NewRateLimiter(100, 100, time.Minute),
+		JWT:            jwtMgr,
+		SwaggerEnabled: true,
+	}
+	router := Register(deps)
+
+	// Check readyz with db == nil
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("/readyz status=%d, want 200", w.Code)
+	}
+
+	// Check Swagger UI route
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil))
+	if w.Code == http.StatusNotFound {
+		t.Errorf("expected swagger route to be mounted")
+	}
+
+	// Check trusted-devices route
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/trusted-devices", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Check admin users route
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+}

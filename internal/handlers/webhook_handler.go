@@ -28,7 +28,19 @@ type createWebhookRequest struct {
 }
 
 // CreateEndpoint godoc
-// @Summary Register a webhook endpoint (P2.5)
+//
+//	@Summary      Register webhook endpoint
+//	@Description  Registers an outbound webhook subscription with HMAC-SHA256 signature support.
+//	@Tags         Webhooks
+//	@Security     BearerAuth
+//	@Accept       json
+//	@Produce      json
+//	@Param        body  body      createWebhookRequest  true  "Webhook endpoint parameters"
+//	@Success      201   {object}  swagger.WebhookEndpointEnvelope
+//	@Failure      400   {object}  swagger.ErrorEnvelope
+//	@Failure      401   {object}  swagger.ErrorEnvelope
+//	@Failure      403   {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/admin/webhooks [post]
 func (h *WebhookHandler) CreateEndpoint(c *gin.Context) {
 	var req createWebhookRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
