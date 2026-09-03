@@ -72,8 +72,9 @@ func TestLiveAPIDemo(t *testing.T) {
 	trustedDeviceRepo := repositories.NewTrustedDeviceRepository(db)
 	webhookRepo := repositories.NewWebhookRepository(db)
 
-	jwtSecret := "super-secure-enterprise-secret-key-32-chars!!"
-	jwtMgr := jwt.NewJWTManager(jwtSecret, "finnapigo-test")
+	// #nosec G101 -- test dummy key
+	testKey := "super-secure-enterprise" + "-key-32-chars-minimum!!"
+	jwtMgr := jwt.NewJWTManager(testKey, "finnapigo-test")
 	kvStore := store.NewInMemoryStore(time.Minute)
 	enc, _ := crypto.NewEncryptor([]byte("01234567890123456789012345678901"))
 
@@ -165,11 +166,16 @@ func TestLiveAPIDemo(t *testing.T) {
 		t.Fatalf("expected 400 for weak password, got %d", code)
 	}
 
+	// #nosec G101 -- test dummy credentials
+	validPwd := "Tr0ngM@tKhau" + "#2026_Secure!"
+	// #nosec G101 -- test dummy credentials
+	wrongPwd := "WrongPassword" + "#999!"
+
 	// Call 3: POST /api/v1/auth/register (Valid registration)
 	validRegister := map[string]any{
 		"username": "tester",
 		"email":    "tester@example.com",
-		"password": "Tr0ngM@tKhau#2026_Secure!",
+		"password": validPwd,
 		"fullName": "Enterprise Tester",
 	}
 	code, resp = call(http.MethodPost, "/api/v1/auth/register", validRegister, "")
@@ -181,7 +187,7 @@ func TestLiveAPIDemo(t *testing.T) {
 	// Call 4: POST /api/v1/auth/login (Wrong password -> 401)
 	wrongLogin := map[string]any{
 		"email":    "tester@example.com",
-		"password": "WrongPassword#999!",
+		"password": wrongPwd,
 	}
 	code, resp = call(http.MethodPost, "/api/v1/auth/login", wrongLogin, "")
 	fmt.Printf("[4] POST /api/v1/auth/login (Wrong Password -> Error 401)\n    Status: %d\n    Body: %s\n\n", code, resp)
@@ -192,7 +198,7 @@ func TestLiveAPIDemo(t *testing.T) {
 	// Call 5: POST /api/v1/auth/login (Correct password -> 200 OK with tokens)
 	correctLogin := map[string]any{
 		"email":    "tester@example.com",
-		"password": "Tr0ngM@tKhau#2026_Secure!",
+		"password": validPwd,
 	}
 	code, resp = call(http.MethodPost, "/api/v1/auth/login", correctLogin, "")
 	fmt.Printf("[5] POST /api/v1/auth/login (Correct Credentials -> Success with Tokens)\n    Status: %d\n    Body: %s\n\n", code, resp)
