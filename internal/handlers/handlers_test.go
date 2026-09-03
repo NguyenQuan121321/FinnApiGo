@@ -30,7 +30,7 @@ func (f fakeAuthService) Register(context.Context, services.RegisterInput) (serv
 func (fakeAuthService) Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, *services.MFAPendingResult, error) {
 	return services.TokenPair{}, services.UserProfile{}, nil, nil
 }
-func (fakeAuthService) Logout(context.Context, string, string) error  { return nil }
+func (fakeAuthService) Logout(context.Context, string, string, string) error  { return nil }
 func (fakeAuthService) LogoutAll(context.Context, uint, string) error { return nil }
 func (fakeAuthService) Refresh(context.Context, string, string, string) (services.TokenPair, error) {
 	return services.TokenPair{}, nil
@@ -53,6 +53,13 @@ func (fakeAuthService) ResendVerifyEmail(context.Context, string, string) error 
 func (fakeAuthService) CompleteMFALogin(context.Context, services.CompleteMFALoginInput) (services.TokenPair, services.UserProfile, error) {
 	return services.TokenPair{}, services.UserProfile{}, nil
 }
+func (f fakeAuthService) GetUserAuditLog(context.Context, uint, int, int) ([]services.UserAuditLogItem, int64, error) {
+	return []services.UserAuditLogItem{{ID: 1, Event: "login", Success: true}}, 1, nil
+}
+func (fakeAuthService) RequestChangeEmail(context.Context, uint, services.ChangeEmailRequestInput, string) error { return nil }
+func (fakeAuthService) ConfirmChangeEmail(context.Context, string, string) error { return nil }
+func (fakeAuthService) DeactivateAccount(context.Context, uint, string, string, string, string) error { return nil }
+func (fakeAuthService) EraseAccount(context.Context, uint, string, string, string, string) error { return nil }
 
 type fakeTOTPService struct{ err error }
 
@@ -68,6 +75,12 @@ func (f fakeTOTPService) ViewRecoveryCodes(context.Context, uint, string) ([]str
 }
 func (f fakeTOTPService) RegenerateRecoveryCodes(context.Context, uint) ([]string, error) {
 	return []string{"fresh"}, f.err
+}
+func (f fakeTOTPService) Disable(context.Context, uint, string, string, string, string) error {
+	return f.err
+}
+func (f fakeTOTPService) GetMFAMethods(context.Context, uint) (services.MFAMethodsResult, error) {
+	return services.MFAMethodsResult{TOTPEnabled: true, PasskeysCount: 1, RecoveryCodesRemaining: 5, DefaultMethod: "passkey"}, f.err
 }
 
 func serve(t *testing.T, h gin.HandlerFunc, body string, userID *uint) *httptest.ResponseRecorder {
@@ -91,8 +104,8 @@ func TestStatusForError(t *testing.T) {
 		status int
 	}{
 		{services.ErrInvalidCredentials, 401}, {services.ErrInvalidToken, 401}, {services.ErrInvalidCode, 401},
-		{services.ErrAccountLocked, 403}, {services.ErrAccountDisabled, 403},
-		{services.ErrEmailNotVerified, 403}, {services.ErrUserNotFound, 404}, {services.ErrSessionNotFound, 404},
+		{services.ErrAccountLocked, 401}, {services.ErrAccountDisabled, 401},
+		{services.ErrEmailNotVerified, 401}, {services.ErrUserNotFound, 404}, {services.ErrSessionNotFound, 404},
 		{services.ErrEmailExists, 409},
 		{services.ErrUsernameExists, 409}, {services.ErrInvalidInput, 400}, {services.ErrPasswordTooWeak, 400},
 		{services.ErrCaptchaRequired, 400}, {services.ErrDisposableEmail, 422}, {services.ErrRateLimited, 429}, {errors.New("unexpected"), 500},
@@ -212,6 +225,18 @@ func TestSetPassword_RequiresAccessToken(t *testing.T) {
 	}
 	if got := do("Bearer " + reset); got != http.StatusUnauthorized {
 		t.Fatalf("reset token: status=%d", got)
+	}
+}
+
+func TestMyAuditLog_HandlerSuccess(t *testing.T) {
+	uid := uint(1)
+	h := NewAuthHandler(fakeAuthService{}, nil)
+	w := serve(t, h.MyAuditLog, "", &uid)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"items"`) || !strings.Contains(w.Body.String(), `"total":1`) {
+		t.Fatalf("unexpected body: %s", w.Body.String())
 	}
 }
 
@@ -381,6 +406,27 @@ func TestRegenerateRecoveryCodes_HandlerReturnsFreshSet(t *testing.T) {
 	}
 }
 
+func TestDisableTOTP_HandlerSuccess(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
+	w := serve(t, h.DisableTOTP, `{"password":"Password1","code":"123456"}`, &uid)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestGetMethods_HandlerReturnsMethods(t *testing.T) {
+	uid := uint(1)
+	h := NewMFAHandler(fakeTOTPService{}, nil, 0)
+	w := serve(t, h.GetMethods, "", &uid)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"defaultMethod":"passkey"`) {
+		t.Fatalf("expected passkey defaultMethod in body: %s", w.Body.String())
+	}
+}
+
 // ---- fake session service ----
 
 type fakeSessionService struct {
@@ -389,10 +435,10 @@ type fakeSessionService struct {
 	revokeErr error
 }
 
-func (f *fakeSessionService) ListSessions(_ context.Context, _ uint) ([]services.SessionInfo, error) {
+func (f *fakeSessionService) ListSessions(_ context.Context, _ uint, _ string) ([]services.SessionInfo, error) {
 	return f.sessions, f.listErr
 }
-func (f *fakeSessionService) RevokeSession(_ context.Context, _, _ uint, _ string) error {
+func (f *fakeSessionService) RevokeSession(_ context.Context, _ string, _ uint, _ string) error {
 	return f.revokeErr
 }
 
@@ -435,8 +481,8 @@ func serveDELETE(t *testing.T, path string, h gin.HandlerFunc, userID *uint) *ht
 func TestSessionHandler_List(t *testing.T) {
 	uid := uint(1)
 	sessions := []services.SessionInfo{
-		{ID: 1, DeviceName: "Chrome on Windows", IPAddress: "1.2.3.4"},
-		{ID: 2, DeviceName: "Safari on iPhone", IPAddress: "5.6.7.8"},
+		{ID: "sess-1", DeviceName: "Chrome on Windows", IPAddress: "1.2.3.4"},
+		{ID: "sess-2", DeviceName: "Safari on iPhone", IPAddress: "5.6.7.8"},
 	}
 	h := NewSessionHandler(&fakeSessionService{sessions: sessions})
 	w := serveGET(t, h.List, &uid)
@@ -486,10 +532,8 @@ func TestSessionHandler_Revoke_InvalidID(t *testing.T) {
 	for _, tc := range []struct {
 		name, path string
 	}{
-		{"zero", "/sessions/0"},
-		{"non-numeric", "/sessions/abc"},
-		{"negative", "/sessions/-1"},
-		{"overflow", "/sessions/99999999999999999999999"},
+		{"empty-whitespace", "/sessions/%20"},
+		{"oversized", "/sessions/" + strings.Repeat("a", 65)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := serveDELETE(t, tc.path, h.Revoke, &uid)
@@ -507,43 +551,39 @@ func TestParseSessionID(t *testing.T) {
 	cases := []struct {
 		name string
 		id   string
-		want uint
+		want string
 		ok   bool
 	}{
-		{"valid", "42", 42, true},
-		{"empty", "", 0, false},
-		{"zero", "0", 0, false},
-		{"alpha", "abc", 0, false},
-		{"negative", "-1", 0, false},
-		{"mixed", "4a2", 0, false},
-		{"overflow", "99999999999999999999999", 0, false},
+		{"valid uuid", "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", true},
+		{"valid legacy id", "42", "42", true},
+		{"empty", "", "", false},
+		{"whitespace", "   ", "", false},
+		{"oversized", strings.Repeat("a", 65), "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := gin.New()
-			var got uint
+			var got string
 			var gotOK bool
 			r.DELETE("/sessions/:id", func(c *gin.Context) {
 				got, gotOK = parseSessionID(c)
 			})
 			w := httptest.NewRecorder()
 			path := "/sessions/" + tc.id
-			if tc.id == "" {
-				path = "/sessions/%20" // reachable stand-in for an empty param
+			if tc.id == "" || strings.TrimSpace(tc.id) == "" {
+				path = "/sessions/%20" // reachable stand-in for an empty/whitespace param
 			}
 			r.ServeHTTP(w, httptest.NewRequest(http.MethodDelete, path, nil))
-			// For the empty case the router may not invoke the handler at all;
-			// parseSessionID("") is verified directly below.
-			if tc.id != "" && (got != tc.want || gotOK != tc.ok) {
-				t.Fatalf("parseSessionID(%q) = (%d,%v), want (%d,%v)", tc.id, got, gotOK, tc.want, tc.ok)
+			if tc.id != "" && strings.TrimSpace(tc.id) != "" && (got != tc.want || gotOK != tc.ok) {
+				t.Fatalf("parseSessionID(%q) = (%q,%v), want (%q,%v)", tc.id, got, gotOK, tc.want, tc.ok)
 			}
 		})
 	}
 	// Direct call for the truly-empty param (router normally blocks it).
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Params = gin.Params{{Key: "id", Value: ""}}
-	if id, ok := parseSessionID(c); ok || id != 0 {
-		t.Fatalf("parseSessionID(empty) = (%d,%v), want (0,false)", id, ok)
+	if id, ok := parseSessionID(c); ok || id != "" {
+		t.Fatalf("parseSessionID(empty) = (%q,%v), want ('',false)", id, ok)
 	}
 }
 

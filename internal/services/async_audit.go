@@ -206,3 +206,27 @@ func (w *AsyncAuditWriter) Close() {
 
 // closeWaitTimeout bounds the shutdown wait in Close.
 const closeWaitTimeout = 10 * time.Second
+
+// FindByUserIDPaginated delegates query to the underlying repository (P1.4).
+func (w *AsyncAuditWriter) FindByUserIDPaginated(ctx context.Context, userID uint, page, limit int) ([]models.AuditLog, int64, error) {
+	if w.repo == nil {
+		return nil, 0, nil
+	}
+	return w.repo.FindByUserIDPaginated(ctx, userID, page, limit)
+}
+
+// AnonymizeUser delegates GDPR right-to-erasure anonymization to the underlying repository (P1.3).
+func (w *AsyncAuditWriter) AnonymizeUser(ctx context.Context, userID uint) error {
+	if w.repo == nil {
+		return nil
+	}
+	return w.repo.AnonymizeUser(ctx, userID)
+}
+
+// StreamAll delegates audit streaming to the underlying repository (P2.3).
+func (w *AsyncAuditWriter) StreamAll(ctx context.Context, tenantID string) ([]models.AuditLog, error) {
+	if w.repo == nil {
+		return nil, nil
+	}
+	return w.repo.StreamAll(ctx, tenantID)
+}

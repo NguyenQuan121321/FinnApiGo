@@ -11,6 +11,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/response"
+	"github.com/finnapigo/finnapigo/internal/services"
 )
 
 // TOTPService is the MFA mechanism exposed under /api/v1/auth/mfa.
@@ -25,6 +26,10 @@ type TOTPService interface {
 	// RegenerateRecoveryCodes invalidates the old set and issues a new one.
 	// TOTP/sudo enforcement lives in the route middleware, not the service.
 	RegenerateRecoveryCodes(context.Context, uint) ([]string, error)
+	// Disable deactivates the user's TOTP device and purges recovery codes (P1.1).
+	Disable(ctx context.Context, userID uint, sudoToken, password, code, ip string) error
+	// GetMFAMethods aggregates all configured MFA methods (P1.5).
+	GetMFAMethods(ctx context.Context, userID uint) (services.MFAMethodsResult, error)
 }
 
 // MFAHandler exposes the TOTP endpoints under /api/v1/auth/mfa.
@@ -222,6 +227,66 @@ func (h *MFAHandler) RegenerateRecoveryCodes(c *gin.Context) {
 		return
 	}
 	response.Respond(c, http.StatusOK, "New recovery codes generated", gin.H{"recoveryCodes": nonNil(codes)})
+}
+
+// TOTPDisableRequest is the optional body for POST /api/v1/auth/mfa/totp/disable (P1.1).
+type TOTPDisableRequest struct {
+	Password string `json:"password"`
+	Code     string `json:"code"`
+}
+
+// DisableTOTP godoc
+//
+//	@Summary      Disable TOTP
+//	@Description  Disables TOTP authentication for the caller. Requires either an active sudo token (X-Sudo-Token) or current password + (TOTP code or recovery code).
+//	@Tags         MFA
+//	@Accept       json
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Param        body  body      handlers.TOTPDisableRequest  false  "Password and TOTP/recovery code (optional if X-Sudo-Token provided)"
+//	@Success      200   {object}  swagger.NullDataEnvelope
+//	@Failure      400   {object}  swagger.ErrorEnvelope
+//	@Failure      401   {object}  swagger.ErrorEnvelope
+//	@Failure      403   {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/totp/disable [post]
+func (h *MFAHandler) DisableTOTP(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok || h.totp == nil {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	var req TOTPDisableRequest
+	_ = c.ShouldBindJSON(&req)
+	sudoToken := c.GetHeader(middleware.SudoHeader)
+	if err := h.totp.Disable(c.Request.Context(), uid, sudoToken, req.Password, req.Code, clientIP(c)); err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "TOTP disabled", nil)
+}
+
+// GetMethods godoc
+//
+//	@Summary      List MFA methods
+//	@Description  Aggregates active MFA methods, remaining recovery codes, and default method for the caller.
+//	@Tags         MFA
+//	@Produce      json
+//	@Security     BearerAuth
+//	@Success      200  {object}  swagger.MFAMethodsEnvelope
+//	@Failure      401  {object}  swagger.ErrorEnvelope
+//	@Router       /api/v1/auth/mfa/methods [get]
+func (h *MFAHandler) GetMethods(c *gin.Context) {
+	uid, ok := ctxUserID(c)
+	if !ok || h.totp == nil {
+		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
+		return
+	}
+	methods, err := h.totp.GetMFAMethods(c.Request.Context(), uid)
+	if err != nil {
+		respondError(c, err)
+		return
+	}
+	response.Respond(c, http.StatusOK, "MFA methods", methods)
 }
 
 // ctxString reads a string-valued context key set by the auth middleware.

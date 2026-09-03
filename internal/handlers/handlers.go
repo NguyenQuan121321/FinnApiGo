@@ -19,18 +19,15 @@ import (
 // is preferable to silently returning 400.
 func statusForError(err error) (int, string) {
 	switch {
-	case errors.Is(err, services.ErrInvalidCredentials):
-		return http.StatusUnauthorized, err.Error()
+	case errors.Is(err, services.ErrInvalidCredentials),
+		errors.Is(err, services.ErrAccountLocked),
+		errors.Is(err, services.ErrAccountDisabled),
+		errors.Is(err, services.ErrEmailNotVerified):
+		return http.StatusUnauthorized, "invalid email or password"
 	case errors.Is(err, services.ErrInvalidToken):
 		return http.StatusUnauthorized, err.Error()
 	case errors.Is(err, services.ErrInvalidCode):
 		return http.StatusUnauthorized, err.Error()
-	case errors.Is(err, services.ErrAccountLocked):
-		return http.StatusForbidden, err.Error()
-	case errors.Is(err, services.ErrAccountDisabled):
-		return http.StatusForbidden, err.Error()
-	case errors.Is(err, services.ErrEmailNotVerified):
-		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrSudoRequired):
 		return http.StatusForbidden, err.Error()
 	case errors.Is(err, services.ErrTOTPUnrecoverable):
@@ -44,7 +41,9 @@ func statusForError(err error) (int, string) {
 		errors.Is(err, services.ErrPasswordAlreadySet):
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, services.ErrInvalidInput), errors.Is(err, services.ErrPasswordTooWeak),
-		errors.Is(err, services.ErrCaptchaRequired):
+		errors.Is(err, services.ErrCaptchaRequired), errors.Is(err, services.ErrCannotUnlinkOnlyMethod),
+		errors.Is(err, services.ErrCannotLockSelf), errors.Is(err, services.ErrWebhookSSRFBlocked),
+		errors.Is(err, services.ErrInvalidWebhookURL):
 		return http.StatusBadRequest, err.Error()
 	case errors.Is(err, services.ErrDisposableEmail), errors.Is(err, services.ErrPasswordBreached):
 		return http.StatusUnprocessableEntity, err.Error()

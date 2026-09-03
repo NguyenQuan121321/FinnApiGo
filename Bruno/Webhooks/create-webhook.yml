@@ -1,0 +1,26 @@
+info:
+  name: create-webhook
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/admin/webhooks"
+  body:
+    type: json
+    data: |-
+      {
+        "url": "https://webhook.site/test-endpoint",
+        "events": "user.created,user.locked,mfa.disabled"
+      }
+  auth:
+    type: bearer
+    token: "{{adminAccessToken}}"
+
+headers:
+  - name: X-Tenant-ID
+    value: "{{tenantId}}"
+    enabled: true
+
+settings:
+  encodeUrl: true

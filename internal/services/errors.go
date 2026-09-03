@@ -65,4 +65,8 @@ var (
 	// account-takeover pattern); the legitimate owner must verify the email
 	// first or sign in with their password.
 	ErrOAuthEmailTaken = errors.New("an account with this email already exists — verify the email or sign in with your password")
+	// ErrCannotUnlinkOnlyMethod (P1.6) prevents removing the sole authentication method.
+	ErrCannotUnlinkOnlyMethod = errors.New("cannot unlink the only authentication method without setting a password")
+	// ErrCannotLockSelf (P2.3) prevents admin self-lockout.
+	ErrCannotLockSelf = errors.New("cannot lock own account")
 )

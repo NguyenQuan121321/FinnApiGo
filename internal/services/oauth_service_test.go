@@ -490,3 +490,56 @@ func TestOAuthCallbackRealMFAEnforcement(t *testing.T) {
 		t.Fatalf("token uid=%d, want %d", mfaClaims.UserID, existing.ID)
 	}
 }
+
+func TestOAuthService_Unlink_SafetyAndAlert_P16(t *testing.T) {
+	users := newMockUserRepo()
+	idents := newMockOAuthIdentityRepo()
+	notify := &mockNotifier{}
+	audits := &mockAuditRepo{}
+
+	// 1. Account with NO password and NO passkey cannot unlink (prevent account lock-out)
+	u1 := &models.User{
+		Email:           "googleonly@example.com",
+		Username:        "googleonly",
+		Password:        "", // No password
+		IsActive:        true,
+		IsEmailVerified: true,
+	}
+	_ = users.Create(context.Background(), u1)
+	_ = idents.Create(context.Background(), &models.OAuthIdentity{
+		UserID:         u1.ID,
+		Provider:       "google",
+		ProviderUserID: "sub-123",
+	})
+
+	svc := NewOAuthService(
+		users, idents, newMockStore(), nil, nil, nil,
+		WithOAuthNotifier(notify),
+		WithOAuthAudits(audits),
+	)
+
+	err := svc.Unlink(context.Background(), u1.ID, "google", "127.0.0.1")
+	if !errors.Is(err, ErrCannotUnlinkOnlyMethod) {
+		t.Fatalf("expected ErrCannotUnlinkOnlyMethod when unlinking sole login method, got %v", err)
+	}
+
+	// 2. Account WITH password CAN unlink
+	hashed, _ := hash.HashPassword("Password123")
+	u1.Password = hashed
+	_ = users.Update(context.Background(), u1)
+
+	err = svc.Unlink(context.Background(), u1.ID, "google", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("unlink failed: %v", err)
+	}
+
+	// Identity is removed
+	existing, _ := idents.FindByUserIDAndProvider(context.Background(), u1.ID, "google")
+	if existing != nil {
+		t.Fatal("expected identity link removed")
+	}
+	if notify.alertCount() != 1 {
+		t.Fatalf("expected security alert sent on unlink, got %d", notify.alertCount())
+	}
+}
+

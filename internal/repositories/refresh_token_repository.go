@@ -91,6 +91,15 @@ func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID ui
 		Update("revoked", true).Error
 }
 
+// RevokeBySession revokes every refresh token linked to one session family
+// (P0.3). Used by token-reuse detection so a stolen chain kills ONLY the
+// affected device, never the user's other sessions.
+func (r *RefreshTokenRepository) RevokeBySession(ctx context.Context, sessionID string) error {
+	return r.db.WithContext(ctx).Model(&models.RefreshToken{}).
+		Where("session_id = ? AND revoked = ?", sessionID, false).
+		Update("revoked", true).Error
+}
+
 // RevokeAllForUserTx is RevokeAllForUser bound to a caller-provided
 // transaction — the credential-change flow revokes sessions inside the SAME
 // transaction as the password update (services.TxScopedTokenRevoker).

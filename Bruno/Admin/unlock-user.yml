@@ -1,0 +1,21 @@
+info:
+  name: unlock-user
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/admin/users/{{targetUserId}}/unlock"
+  body:
+    type: none
+  auth:
+    type: bearer
+    token: "{{adminAccessToken}}"
+
+headers:
+  - name: X-Tenant-ID
+    value: "{{tenantId}}"
+    enabled: true
+
+settings:
+  encodeUrl: true

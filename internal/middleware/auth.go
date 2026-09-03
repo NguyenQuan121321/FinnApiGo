@@ -18,6 +18,10 @@ const (
 	CtxUserID = "user_id"
 	CtxRole   = "role"
 	CtxEmail  = "email"
+	// CtxJTI holds the access token's unique jti (P0.2).
+	CtxJTI = "jti"
+	// CtxSID holds the access token's session UUID (P0.2 / P0.3).
+	CtxSID = "sid"
 	// CtxSudoUntil holds the expiry time.Time of the verified sudo token —
 	// set by SudoMiddleware, which must run after AuthMiddleware.
 	CtxSudoUntil = "sudo_until"
@@ -25,6 +29,23 @@ const (
 	// logger; AuthMiddleware copies it onto its denial log lines.
 	CtxRequestID = "request_id"
 )
+
+// DenylistChecker checks whether a token JTI or session UUID is denylisted (P0.2).
+type DenylistChecker interface {
+	Get(key string) (any, bool)
+}
+
+type authOptions struct {
+	denylist DenylistChecker
+}
+
+// AuthOption configures optional AuthMiddleware capabilities.
+type AuthOption func(*authOptions)
+
+// WithDenylist wires a store/cache to check for revoked jti/sid entries (P0.2).
+func WithDenylist(d DenylistChecker) AuthOption {
+	return func(o *authOptions) { o.denylist = d }
+}
 
 // denyAuth answers 401 and makes the denial observable: one slog.Warn per
 // rejection carrying the client IP and request id (A4) — before, middleware
@@ -48,15 +69,19 @@ func denyAuth(c *gin.Context, msg string) {
 type VersionSource func(ctx context.Context, userID uint) (int64, error)
 
 // AuthMiddleware verifies the Bearer JWT from the Authorization header.
-// On success it stores user_id / role / email into the Gin context for
-// downstream handlers. On failure it short-circuits with 401.
+// On success it stores user_id / role / email / jti / sid into the Gin context
+// for downstream handlers. On failure it short-circuits with 401.
 //
 // A7 — when a VersionSource is wired, access tokens whose embedded pwdver
 // falls behind the live counter (the credential changed) are rejected. If the
 // version cannot be LOADED (store + DB both unreachable) the request is
 // allowed through with a warning: the residual exposure is bounded by the
 // access TTL, the documented worst case.
-func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource) gin.HandlerFunc {
+func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...AuthOption) gin.HandlerFunc {
+	var opt authOptions
+	for _, fn := range opts {
+		fn(&opt)
+	}
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if header == "" {
@@ -78,6 +103,21 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource) gin.Handle
 			denyAuth(c, "invalid token type")
 			return
 		}
+		// P0.2 — denylist check: if the token's JTI or SID was revoked, abort 401.
+		if opt.denylist != nil {
+			if claims.ID != "" {
+				if _, revoked := opt.denylist.Get("denylist:jti:" + claims.ID); revoked {
+					denyAuth(c, "token revoked")
+					return
+				}
+			}
+			if claims.SID != "" {
+				if _, revoked := opt.denylist.Get("denylist:sid:" + claims.SID); revoked {
+					denyAuth(c, "session revoked")
+					return
+				}
+			}
+		}
 		if pwdVersion != nil {
 			current, err := pwdVersion(c.Request.Context(), claims.UserID)
 			if err != nil {
@@ -91,6 +131,8 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource) gin.Handle
 		c.Set(CtxUserID, claims.UserID)
 		c.Set(CtxRole, claims.Role)
 		c.Set(CtxEmail, claims.Email)
+		c.Set(CtxJTI, claims.ID)
+		c.Set(CtxSID, claims.SID)
 		c.Next()
 	}
 }

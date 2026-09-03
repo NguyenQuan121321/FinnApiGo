@@ -18,10 +18,11 @@ const (
 //     requires "temporary lock" semantics, which cannot be expressed with a
 //     single boolean is_active field.
 type User struct {
-	ID                  uint       `gorm:"primaryKey"           json:"id"`
-	Username            string     `gorm:"size:50;uniqueIndex;not null" json:"username"`
-	Email               string     `gorm:"size:255;uniqueIndex;not null" json:"email"`
-	Password            string     `gorm:"size:255;not null"           json:"-"` // never serialized
+	ID                  uint       `gorm:"primaryKey"                                                                  json:"id"`
+	TenantID            string     `gorm:"size:36;not null;default:default;uniqueIndex:idx_users_tenant_username;uniqueIndex:idx_users_tenant_email;index" json:"tenantId"`
+	Username            string     `gorm:"size:50;not null;uniqueIndex:idx_users_tenant_username"                      json:"username"`
+	Email               string     `gorm:"size:255;not null;uniqueIndex:idx_users_tenant_email"                        json:"email"`
+	Password            string     `gorm:"size:255;not null"                                                           json:"-"` // never serialized
 	FullName            string     `gorm:"size:255"                    json:"fullName"`
 	Role                string     `gorm:"size:20;not null;default:user" json:"role"`
 	IsActive            bool       `gorm:"not null;default:true"       json:"isActive"`

@@ -32,6 +32,14 @@ type Claims struct {
 	// issue time; AuthMiddleware rejects the token once the live version is
 	// higher (credential changed — A7).
 	PwdVer int64 `json:"pwdver,omitempty"`
+	// SID (access tokens only) is the server-side session UUID the token was
+	// issued for (P0.2). Revoking a session denylists this value so every
+	// outstanding access token of that session dies before its exp.
+	SID string `json:"sid,omitempty"`
+	// TenantID identifies the tenant isolation partition (P2.1).
+	TenantID string `json:"tid,omitempty"`
+	// Permissions list the fine-grained RBAC capabilities granted (P2.2).
+	Permissions []string `json:"perms,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -109,11 +117,27 @@ func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.
 }
 
 // IssueAccess issues an ACCESS token embedding the user's current password
-// version (A7). Callers must pass the live users.pwd_version so the next
-// credential change invalidates the token.
-func (m *JWTManager) IssueAccess(userID uint, role, email string, ttl time.Duration, pwdVer int64) (string, error) {
+// version (A7) and the server-side session UUID it belongs to (P0.2). Every
+// access token gets a unique jti so Logout can denylist it for its remaining
+// lifetime, plus the session id (sid) so revoking a session kills all of that
+// session's outstanding access tokens at once. Callers must pass the live
+// users.pwd_version so the next credential change invalidates the token.
+func (m *JWTManager) IssueAccess(userID uint, role, email string, ttl time.Duration, pwdVer int64, sessionID string) (string, error) {
 	claims := m.baseClaims(userID, role, email, TokenTypeAccess, ttl)
 	claims.PwdVer = pwdVer
+	claims.ID = uuid.New().String()
+	claims.SID = sessionID
+	return m.sign(claims)
+}
+
+// IssueAccessEnterprise issues an access token carrying tenant isolation (P2.1) and RBAC permissions (P2.2).
+func (m *JWTManager) IssueAccessEnterprise(userID uint, role, email string, ttl time.Duration, pwdVer int64, sessionID, tenantID string, perms []string) (string, error) {
+	claims := m.baseClaims(userID, role, email, TokenTypeAccess, ttl)
+	claims.PwdVer = pwdVer
+	claims.ID = uuid.New().String()
+	claims.SID = sessionID
+	claims.TenantID = tenantID
+	claims.Permissions = perms
 	return m.sign(claims)
 }
 

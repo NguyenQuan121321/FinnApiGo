@@ -18,6 +18,492 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/api/v1/admin/audit-log/export": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Exports tenant security audit logs in CSV or NDJSON format.",
+                "produces": [
+                    "text/csv",
+                    "application/x-ndjson"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "Export audit logs",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Output format (csv or ndjson)",
+                        "name": "format",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Audit export data stream",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/sessions": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Lists all active user sessions within the tenant.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "List tenant sessions",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.AdminSessionsEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/users": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns a paginated list of users within the current tenant.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "List tenant users",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Page number",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Page limit",
+                        "name": "limit",
+                        "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "Search term",
+                        "name": "search",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.AdminUsersEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/users/{id}/force-logout": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Revokes all active sessions, refresh tokens, and access tokens for a user.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "Force logout user",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Target user ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/users/{id}/lock": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Locks a user account for a specified duration or indefinitely.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "Lock user account",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Target user ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Lock duration parameters",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/internal_handlers.lockUserRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/users/{id}/unlock": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Unlocks a user account and resets failed login counters.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Admin"
+                ],
+                "summary": "Unlock user account",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Target user ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/admin/webhooks": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Registers an outbound webhook subscription with HMAC-SHA256 signature support.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Webhooks"
+                ],
+                "summary": "Register webhook endpoint",
+                "parameters": [
+                    {
+                        "description": "Webhook endpoint parameters",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/internal_handlers.createWebhookRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "201": {
+                        "description": "Created",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.WebhookEndpointEnvelope"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/change-email/confirm": {
+            "post": {
+                "description": "Confirms email change using the single-use token from the verification email. Inactive sessions are revoked and password version bumped.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "Confirm email change",
+                "parameters": [
+                    {
+                        "description": "Confirmation token",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_finnapigo_finnapigo_internal_services.ChangeEmailConfirmInput"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/change-email/request": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Stages an email change request. Verifies password, checks disposable and colliding domains, sends verification to the new email and security alert to current email.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "Request email change",
+                "parameters": [
+                    {
+                        "description": "Current password and new email",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/github_com_finnapigo_finnapigo_internal_services.ChangeEmailRequestInput"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "422": {
+                        "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/auth/change-password": {
             "post": {
                 "security": [
@@ -68,6 +554,56 @@ const docTemplate = `{
                     },
                     "422": {
                         "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/deactivate": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Deactivates caller account (is_active=false), revokes all sessions and denylists caller's access token. Requires either X-Sudo-Token header or password.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "Deactivate account",
+                "parameters": [
+                    {
+                        "description": "Account password (optional if X-Sudo-Token provided)",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handlers.DeactivateRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
                         "schema": {
                             "$ref": "#/definitions/swagger.ErrorEnvelope"
                         }
@@ -391,6 +927,99 @@ const docTemplate = `{
                         }
                     }
                 }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Scrambles user credentials, deletes credentials (TOTP, passkeys, OAuth), anonymizes audit records, revokes all sessions. Requires either X-Sudo-Token header or password.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "Permanently erase account (GDPR)",
+                "parameters": [
+                    {
+                        "description": "Account password (optional if X-Sudo-Token provided)",
+                        "name": "request",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handlers.EraseMeRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/me/audit-log": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Returns paginated security event log for the authenticated user.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Auth"
+                ],
+                "summary": "Get personal audit log",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Page number (default 1)",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "Items per page (default 20, max 100)",
+                        "name": "limit",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.UserAuditLogEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
             }
         },
         "/api/v1/auth/mfa/login-verify": {
@@ -443,6 +1072,37 @@ const docTemplate = `{
                     },
                     "429": {
                         "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/mfa/methods": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Aggregates active MFA methods, remaining recovery codes, and default method for the caller.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MFA"
+                ],
+                "summary": "List MFA methods",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.MFAMethodsEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
                         "schema": {
                             "$ref": "#/definitions/swagger.ErrorEnvelope"
                         }
@@ -740,6 +1400,62 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/v1/auth/mfa/totp/disable": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Disables TOTP authentication for the caller. Requires either an active sudo token (X-Sudo-Token) or current password + (TOTP code or recovery code).",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "MFA"
+                ],
+                "summary": "Disable TOTP",
+                "parameters": [
+                    {
+                        "description": "Password and TOTP/recovery code (optional if X-Sudo-Token provided)",
+                        "name": "body",
+                        "in": "body",
+                        "schema": {
+                            "$ref": "#/definitions/internal_handlers.TOTPDisableRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/auth/mfa/totp/enable": {
             "post": {
                 "security": [
@@ -999,6 +1715,58 @@ const docTemplate = `{
                     },
                     "429": {
                         "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/oauth/{provider}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Disconnects a third-party OAuth provider from the account. Refuses to unlink if it is the user's only remaining authentication method without a usable password.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "OAuth"
+                ],
+                "summary": "Unlink an OAuth provider",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider name (e.g. google)",
+                        "name": "provider",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/swagger.ErrorEnvelope"
                         }
@@ -1268,8 +2036,8 @@ const docTemplate = `{
                 "summary": "Revoke a session",
                 "parameters": [
                     {
-                        "type": "integer",
-                        "description": "Session ID",
+                        "type": "string",
+                        "description": "Session ID (UUID)",
                         "name": "id",
                         "in": "path",
                         "required": true
@@ -1359,6 +2127,83 @@ const docTemplate = `{
                     },
                     "422": {
                         "description": "Unprocessable Entity",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/trusted-devices": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Lists caller's active trusted devices eligible for 30-day MFA bypass.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "TrustedDevices"
+                ],
+                "summary": "List trusted devices",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.TrustedDevicesListEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    }
+                }
+            }
+        },
+        "/api/v1/auth/trusted-devices/{id}": {
+            "delete": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Revokes MFA bypass trust for a specific device.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "TrustedDevices"
+                ],
+                "summary": "Revoke trusted device",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "Device ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.NullDataEnvelope"
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
                         "schema": {
                             "$ref": "#/definitions/swagger.ErrorEnvelope"
                         }
@@ -1492,6 +2337,48 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "github_com_finnapigo_finnapigo_internal_models.AuditLog": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "string"
+                },
+                "detail": {
+                    "type": "string"
+                },
+                "email": {
+                    "description": "identity hint pre-login",
+                    "type": "string"
+                },
+                "event": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "ipAddress": {
+                    "type": "string"
+                },
+                "prevHash": {
+                    "description": "P2.6 hash-chain",
+                    "type": "string"
+                },
+                "recordHash": {
+                    "description": "P2.6 tamper-evident HMAC",
+                    "type": "string"
+                },
+                "success": {
+                    "type": "boolean"
+                },
+                "tenantId": {
+                    "type": "string"
+                },
+                "userId": {
+                    "description": "nil if pre-auth",
+                    "type": "integer"
+                }
+            }
+        },
         "github_com_finnapigo_finnapigo_internal_models.PasskeyCredential": {
             "type": "object",
             "properties": {
@@ -1524,6 +2411,32 @@ const docTemplate = `{
                 }
             }
         },
+        "github_com_finnapigo_finnapigo_internal_services.ChangeEmailConfirmInput": {
+            "type": "object",
+            "required": [
+                "token"
+            ],
+            "properties": {
+                "token": {
+                    "type": "string"
+                }
+            }
+        },
+        "github_com_finnapigo_finnapigo_internal_services.ChangeEmailRequestInput": {
+            "type": "object",
+            "required": [
+                "newEmail",
+                "password"
+            ],
+            "properties": {
+                "newEmail": {
+                    "type": "string"
+                },
+                "password": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_handlers.ChangePasswordRequest": {
             "type": "object",
             "required": [
@@ -1539,6 +2452,22 @@ const docTemplate = `{
                 "oldPassword": {
                     "type": "string",
                     "maxLength": 128
+                }
+            }
+        },
+        "internal_handlers.DeactivateRequest": {
+            "type": "object",
+            "properties": {
+                "password": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handlers.EraseMeRequest": {
+            "type": "object",
+            "properties": {
+                "password": {
+                    "type": "string"
                 }
             }
         },
@@ -1711,6 +2640,17 @@ const docTemplate = `{
                 }
             }
         },
+        "internal_handlers.TOTPDisableRequest": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string"
+                },
+                "password": {
+                    "type": "string"
+                }
+            }
+        },
         "internal_handlers.VerifyEmailRequest": {
             "type": "object",
             "required": [
@@ -1719,6 +2659,96 @@ const docTemplate = `{
             "properties": {
                 "token": {
                     "type": "string"
+                }
+            }
+        },
+        "internal_handlers.createWebhookRequest": {
+            "type": "object",
+            "required": [
+                "events",
+                "url"
+            ],
+            "properties": {
+                "events": {
+                    "type": "string"
+                },
+                "url": {
+                    "type": "string"
+                }
+            }
+        },
+        "internal_handlers.lockUserRequest": {
+            "type": "object",
+            "properties": {
+                "durationSeconds": {
+                    "type": "integer",
+                    "example": 3600
+                }
+            }
+        },
+        "swagger.AdminSessionsData": {
+            "type": "object",
+            "properties": {
+                "sessions": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/swagger.SessionInfo"
+                    }
+                }
+            }
+        },
+        "swagger.AdminSessionsEnvelope": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "example": 200
+                },
+                "data": {
+                    "$ref": "#/definitions/swagger.AdminSessionsData"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "tenant sessions retrieved"
+                }
+            }
+        },
+        "swagger.AdminUsersData": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/swagger.UserProfile"
+                    }
+                },
+                "limit": {
+                    "type": "integer",
+                    "example": 20
+                },
+                "page": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "total": {
+                    "type": "integer",
+                    "example": 42
+                }
+            }
+        },
+        "swagger.AdminUsersEnvelope": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "example": 200
+                },
+                "data": {
+                    "$ref": "#/definitions/swagger.AdminUsersData"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "users retrieved"
                 }
             }
         },
@@ -1801,6 +2831,43 @@ const docTemplate = `{
                 "message": {
                     "type": "string",
                     "example": "login successful"
+                }
+            }
+        },
+        "swagger.MFAMethodsData": {
+            "type": "object",
+            "properties": {
+                "defaultMethod": {
+                    "type": "string",
+                    "example": "totp"
+                },
+                "passkeysCount": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "recoveryCodesRemaining": {
+                    "type": "integer",
+                    "example": 8
+                },
+                "totpEnabled": {
+                    "type": "boolean",
+                    "example": true
+                }
+            }
+        },
+        "swagger.MFAMethodsEnvelope": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "example": 200
+                },
+                "data": {
+                    "$ref": "#/definitions/swagger.MFAMethodsData"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "mfa methods"
                 }
             }
         },
@@ -2011,12 +3078,16 @@ const docTemplate = `{
                     "example": "2026-01-22T10:30:00Z"
                 },
                 "id": {
-                    "type": "integer",
-                    "example": 7
+                    "type": "string",
+                    "example": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
                 },
                 "ipAddress": {
                     "type": "string",
                     "example": "192.168.1.100"
+                },
+                "isCurrent": {
+                    "type": "boolean",
+                    "example": true
                 },
                 "lastActiveAt": {
                     "type": "string",
@@ -2121,6 +3192,97 @@ const docTemplate = `{
                 }
             }
         },
+        "swagger.TrustedDeviceInfoData": {
+            "type": "object",
+            "properties": {
+                "deviceName": {
+                    "type": "string",
+                    "example": "Chrome MacBook Pro"
+                },
+                "expiresAt": {
+                    "type": "string",
+                    "example": "2026-10-03T18:00:00Z"
+                },
+                "id": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "ipAddress": {
+                    "type": "string",
+                    "example": "192.168.1.50"
+                },
+                "lastUsedAt": {
+                    "type": "string",
+                    "example": "2026-09-03T18:00:00Z"
+                }
+            }
+        },
+        "swagger.TrustedDevicesListData": {
+            "type": "object",
+            "properties": {
+                "devices": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/swagger.TrustedDeviceInfoData"
+                    }
+                }
+            }
+        },
+        "swagger.TrustedDevicesListEnvelope": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "example": 200
+                },
+                "data": {
+                    "$ref": "#/definitions/swagger.TrustedDevicesListData"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "trusted devices retrieved"
+                }
+            }
+        },
+        "swagger.UserAuditLogData": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/github_com_finnapigo_finnapigo_internal_models.AuditLog"
+                    }
+                },
+                "limit": {
+                    "type": "integer",
+                    "example": 20
+                },
+                "page": {
+                    "type": "integer",
+                    "example": 1
+                },
+                "total": {
+                    "type": "integer",
+                    "example": 15
+                }
+            }
+        },
+        "swagger.UserAuditLogEnvelope": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "example": 200
+                },
+                "data": {
+                    "$ref": "#/definitions/swagger.UserAuditLogData"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "audit log"
+                }
+            }
+        },
         "swagger.UserProfile": {
             "type": "object",
             "properties": {
@@ -2171,6 +3333,43 @@ const docTemplate = `{
                 "message": {
                     "type": "string",
                     "example": "profile fetched"
+                }
+            }
+        },
+        "swagger.WebhookEndpointData": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "string",
+                    "example": "user.created,user.locked"
+                },
+                "id": {
+                    "type": "string",
+                    "example": "wh_12345678"
+                },
+                "secret": {
+                    "type": "string",
+                    "example": "sec_abcdef123456"
+                },
+                "url": {
+                    "type": "string",
+                    "example": "https://example.com/webhook"
+                }
+            }
+        },
+        "swagger.WebhookEndpointEnvelope": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer",
+                    "example": 201
+                },
+                "data": {
+                    "$ref": "#/definitions/swagger.WebhookEndpointData"
+                },
+                "message": {
+                    "type": "string",
+                    "example": "webhook endpoint created"
                 }
             }
         }

@@ -87,6 +87,17 @@ func (f *fakePasskeyRepo) RevokeByID(_ context.Context, id, userID uint) error {
 	return nil
 }
 
+func (f *fakePasskeyRepo) RevokeAllForUser(_ context.Context, userID uint) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, r := range f.rows {
+		if r.UserID == userID {
+			r.Revoked = true
+		}
+	}
+	return nil
+}
+
 // newPasskeyTestService builds the ceremony service on fakes (no DB).
 func newPasskeyTestService(t *testing.T) (PasskeyService, *fakePasskeyRepo, *mockUserRepo, *store.InMemoryStore) {
 	t.Helper()

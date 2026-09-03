@@ -23,6 +23,19 @@ func (r *TOTPRepository) FindByUserID(ctx context.Context, userID uint) (*models
 	return &d, err
 }
 
+// Disable marks the user's TOTP device as disabled and clears secrets (P1.1).
+func (r *TOTPRepository) Disable(ctx context.Context, userID uint) error {
+	return r.db.WithContext(ctx).Model(&models.TOTPDevice{}).
+		Where("user_id = ?", userID).
+		Updates(map[string]interface{}{
+			"enabled":                   false,
+			"secret":                    "",
+			"secret_encrypted":          "",
+			"pending_secret_encrypted":  "",
+			"updated_at":                time.Now(),
+		}).Error
+}
+
 // ReplaceRecoveryCodes atomically swaps the user's entire recovery-code set:
 // all existing rows (used and unused) are deleted and the new batch inserted
 // within one transaction, so a regenerate can never leave a mixed old/new set

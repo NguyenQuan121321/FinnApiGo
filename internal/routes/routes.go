@@ -19,6 +19,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/response"
+	"github.com/finnapigo/finnapigo/internal/store"
 )
 
 // Deps bundles everything the router needs. Constructed in main.go.
@@ -62,6 +63,16 @@ type Deps struct {
 	// Keep disabled in production unless the documentation endpoint is
 	// required by API consumers behind appropriate access controls.
 	SwaggerEnabled bool
+	// Store backs AuthMiddleware's access-token and session denylist (P0.2).
+	Store store.Store
+	// Admin handles tenant administration endpoints (P2.3).
+	Admin *handlers.AdminHandler
+	// TrustedDevice handles trusted-device remember-me endpoints (P2.4).
+	TrustedDevice *handlers.TrustedDeviceHandler
+	// Webhook handles webhook registration endpoints (P2.5).
+	Webhook *handlers.WebhookHandler
+	// RBACChecker checks dynamic permissions for RequirePermission (P2.2).
+	RBACChecker middleware.RBACPermissionChecker
 }
 
 // Register builds the full route tree and returns the configured engine.
@@ -78,6 +89,7 @@ func Register(deps Deps) *gin.Engine {
 	// list restricts header trust to exactly those peers.
 	_ = r.SetTrustedProxies(deps.TrustedProxies)
 	r.Use(gin.Recovery())
+	r.Use(middleware.TenantMiddleware())
 	// Browser clients (frontends, test harnesses) on another origin need the
 	// allowlisted CORS headers, and their preflight OPTIONS must never fall
 	// through to a 404.
@@ -138,6 +150,7 @@ func Register(deps Deps) *gin.Engine {
 	auth.POST("/reset-password", deps.RateLimit.Handler(), deps.Auth.ResetPassword)
 	auth.POST("/verify-email", deps.RateLimit.Handler(), deps.Auth.VerifyEmail)
 	auth.POST("/resend-verification", deps.RateLimit.Handler(), deps.Auth.ResendVerifyEmail)
+	auth.POST("/change-email/confirm", deps.RateLimit.Handler(), deps.Auth.ConfirmChangeEmail)
 
 	// ---- Google OAuth 2.0 / OpenID Connect ----
 	if deps.OAuth != nil {
@@ -150,7 +163,12 @@ func Register(deps Deps) *gin.Engine {
 
 	// ---- Authenticated core-auth endpoints ----
 	authed := auth.Group("")
-	authed.Use(middleware.AuthMiddleware(deps.JWT, deps.PwdVersion))
+	var authOpts []middleware.AuthOption
+	if deps.Store != nil {
+		authOpts = append(authOpts, middleware.WithDenylist(deps.Store))
+	}
+	authMW := middleware.AuthMiddleware(deps.JWT, deps.PwdVersion, authOpts...)
+	authed.Use(authMW)
 	authed.POST("/logout", deps.Auth.Logout)
 	authed.POST("/logout-all", deps.Auth.LogoutAll)
 	authed.POST("/change-password", deps.Auth.ChangePassword)
@@ -159,6 +177,13 @@ func Register(deps Deps) *gin.Engine {
 	// change-password above.
 	authed.POST("/set-password", deps.Auth.SetPassword)
 	authed.GET("/me", deps.Auth.Me)
+	authed.DELETE("/me", deps.RateLimit.Handler(), deps.Auth.EraseMe)
+	authed.GET("/me/audit-log", deps.RateLimit.Handler(), deps.Auth.MyAuditLog)
+	authed.POST("/change-email/request", deps.RateLimit.Handler(), deps.Auth.RequestChangeEmail)
+	authed.POST("/deactivate", deps.RateLimit.Handler(), deps.Auth.DeactivateAccount)
+	if deps.OAuth != nil {
+		authed.DELETE("/oauth/:provider", deps.RateLimit.Handler(), deps.OAuth.Unlink)
+	}
 
 	// ---- Session & device management (authenticated) ----
 	// GET    /api/v1/auth/sessions      — list the caller's active devices
@@ -166,6 +191,12 @@ func Register(deps Deps) *gin.Engine {
 	if deps.Sessions != nil {
 		authed.GET("/sessions", deps.Sessions.List)
 		authed.DELETE("/sessions/:id", deps.Sessions.Revoke)
+	}
+
+	// ---- Trusted devices (P2.4) ----
+	if deps.TrustedDevice != nil {
+		authed.GET("/trusted-devices", deps.RateLimit.Handler(), deps.TrustedDevice.ListDevices)
+		authed.DELETE("/trusted-devices/:id", deps.RateLimit.Handler(), deps.TrustedDevice.RevokeDevice)
 	}
 
 	// ---- MFA login-verify (mfa_pending token ONLY) ----
@@ -193,12 +224,15 @@ func Register(deps Deps) *gin.Engine {
 		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.VerifyTOTP)
 		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.ValidateTOTP)
 		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.ViewRecoveryCodes)
+		mfa.POST("/totp/disable", deps.RateLimit.Handler(), deps.TOTPCluster.Handler(), deps.MFA.DisableTOTP)
 	} else {
 		mfa.POST("/totp/enable", deps.RateLimit.Handler(), deps.MFA.EnableTOTP)
 		mfa.POST("/totp/verify", deps.RateLimit.Handler(), deps.MFA.VerifyTOTP)
 		mfa.POST("/totp/validate", deps.RateLimit.Handler(), deps.MFA.ValidateTOTP)
 		mfa.POST("/totp/recovery-codes", deps.RateLimit.Handler(), deps.MFA.ViewRecoveryCodes)
+		mfa.POST("/totp/disable", deps.RateLimit.Handler(), deps.MFA.DisableTOTP)
 	}
+	mfa.GET("/methods", deps.RateLimit.Handler(), deps.MFA.GetMethods)
 
 	// ---- Passkey / WebAuthn (Phase 9 — the ONLY approved API extension) ----
 	// POST /api/v1/auth/mfa/passkey/register/challenge + /verify — the
@@ -223,6 +257,26 @@ func Register(deps Deps) *gin.Engine {
 	// current TOTP code), so a stolen access token alone cannot mint fresh
 	// recovery codes. No TOTP validation happens here, hence no TOTPCluster.
 	mfa.POST("/totp/recovery-codes/regenerate", deps.RateLimit.Handler(), middleware.SudoMiddleware(deps.JWT), deps.MFA.RegenerateRecoveryCodes)
+
+	// ---- Admin API Surface (P2.3, RBAC gated) ----
+	if deps.Admin != nil {
+		admin := api.Group("/admin")
+		admin.Use(authMW)
+		if deps.RateLimit != nil {
+			admin.Use(deps.RateLimit.Handler())
+		}
+		admin.GET("/users", middleware.RequirePermission("users:read", deps.RBACChecker), deps.Admin.ListUsers)
+		admin.POST("/users/:id/lock", middleware.RequirePermission("users:write", deps.RBACChecker), deps.Admin.LockUser)
+		admin.POST("/users/:id/unlock", middleware.RequirePermission("users:write", deps.RBACChecker), deps.Admin.UnlockUser)
+		admin.POST("/users/:id/force-logout", middleware.RequirePermission("users:write", deps.RBACChecker), deps.Admin.ForceLogout)
+		admin.GET("/sessions", middleware.RequirePermission("sessions:read", deps.RBACChecker), deps.Admin.ListSessions)
+		admin.GET("/audit-log/export", middleware.RequirePermission("audit:export", deps.RBACChecker), deps.Admin.ExportAuditLog)
+
+		// Webhook endpoint management (P2.5)
+		if deps.Webhook != nil {
+			admin.POST("/webhooks", middleware.RequirePermission("webhooks:write", deps.RBACChecker), deps.Webhook.CreateEndpoint)
+		}
+	}
 
 	return r
 }

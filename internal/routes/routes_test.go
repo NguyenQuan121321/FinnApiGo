@@ -104,8 +104,8 @@ func TestSessionRoutes(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("authenticated revoke: status=%d body=%s", w.Code, w.Body.String())
 	}
-	if svc.revokedID != 3 || svc.revokeUserID != uid {
-		t.Fatalf("revoke got (%d for user %d), want (3 for user %d)", svc.revokedID, svc.revokeUserID, uid)
+	if svc.revokedID != "3" || svc.revokeUserID != uid {
+		t.Fatalf("revoke got (%s for user %d), want (3 for user %d)", svc.revokedID, svc.revokeUserID, uid)
 	}
 }
 
@@ -142,16 +142,16 @@ func TestSessionRoutes_TrustedProxyIP(t *testing.T) {
 // stubSessionService records calls for assertions.
 type stubSessionService struct {
 	lastIP       string
-	revokedID    uint
+	revokedID    string
 	revokeUserID uint
 }
 
-func (s *stubSessionService) ListSessions(_ context.Context, userID uint) ([]services.SessionInfo, error) {
+func (s *stubSessionService) ListSessions(_ context.Context, userID uint, currentSID string) ([]services.SessionInfo, error) {
 	// Return one row so the JSON envelope is meaningful.
-	return []services.SessionInfo{{ID: 1, DeviceName: "Chrome on Windows"}}, nil
+	return []services.SessionInfo{{ID: "1", DeviceName: "Chrome on Windows"}}, nil
 }
 
-func (s *stubSessionService) RevokeSession(_ context.Context, id, userID uint, ip string) error {
+func (s *stubSessionService) RevokeSession(_ context.Context, id string, userID uint, ip string) error {
 	s.revokedID, s.revokeUserID, s.lastIP = id, userID, ip
 	return nil
 }
@@ -283,4 +283,48 @@ func TestRoutes_MetricsAndHealthz_P2(t *testing.T) {
 	}() != http.StatusNotFound {
 		t.Errorf("nil Metrics must leave /metrics unmounted, got %d", w.Code)
 	}
+}
+
+func TestPhase2RoutesAndReadyzCoverage(t *testing.T) {
+	jwtMgr := jwt.NewJWTManager("test-jwt-secret-key-32-chars-long!!", "test-issuer")
+	adminToken, _ := jwtMgr.IssueAccessEnterprise(1, "admin", "admin@example.com", time.Hour, 1, "sess-1", "default", []string{"users:read", "users:write"})
+
+	deps := Deps{
+		Auth:           handlers.NewAuthHandler(nil, nil),
+		MFA:            handlers.NewMFAHandler(nil, nil, time.Minute),
+		Sessions:       handlers.NewSessionHandler(nil),
+		Admin:          handlers.NewAdminHandler(nil),
+		TrustedDevice:  handlers.NewTrustedDeviceHandler(nil),
+		Webhook:        handlers.NewWebhookHandler(nil),
+		RateLimit:      middleware.NewRateLimiter(100, 100, time.Minute),
+		JWT:            jwtMgr,
+		SwaggerEnabled: true,
+	}
+	router := Register(deps)
+
+	// Check readyz with db == nil
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("/readyz status=%d, want 200", w.Code)
+	}
+
+	// Check Swagger UI route
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil))
+	if w.Code == http.StatusNotFound {
+		t.Errorf("expected swagger route to be mounted")
+	}
+
+	// Check trusted-devices route
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/trusted-devices", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	// Check admin users route
+	req = httptest.NewRequest(http.MethodGet, "/api/v1/admin/users", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
 }

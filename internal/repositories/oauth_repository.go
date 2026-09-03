@@ -58,3 +58,17 @@ func (r *OAuthIdentityRepository) FindByUserIDAndProvider(ctx context.Context, u
 	}
 	return &identity, nil
 }
+
+// DeleteByUserIDAndProvider removes the identity link for a local user + provider (P1.6).
+func (r *OAuthIdentityRepository) DeleteByUserIDAndProvider(ctx context.Context, userID uint, provider string) error {
+	return r.db.WithContext(ctx).
+		Where("user_id = ? AND provider = ?", userID, provider).
+		Delete(&models.OAuthIdentity{}).Error
+}
+
+// DeleteAllByUserID removes all OAuth identity links for a user (P1.3 erasure).
+func (r *OAuthIdentityRepository) DeleteAllByUserID(ctx context.Context, userID uint) error {
+	return r.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Delete(&models.OAuthIdentity{}).Error
+}

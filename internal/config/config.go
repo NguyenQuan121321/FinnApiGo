@@ -234,6 +234,8 @@ type SecurityConfig struct {
 	// BreachedPasswordTimeout bounds each HIBP range query (inline on the
 	// password-set paths).
 	BreachedPasswordTimeout time.Duration
+	// MinPasswordScore sets the minimum zxcvbn score (0-4, default 3, P1.7).
+	MinPasswordScore int
 }
 
 // CaptchaConfig drives the optional CAPTCHA on /register and post-fail /login.
@@ -367,6 +369,7 @@ func Load() (*Config, error) {
 			KeyDir:                  l.env("KEY_DIR", ""),
 			BreachedPasswordCheck:   l.envBool("BREACHED_PASSWORD_CHECK", true),
 			BreachedPasswordTimeout: l.envDuration("BREACHED_PASSWORD_TIMEOUT", 5*time.Second),
+			MinPasswordScore:        l.envInt("MIN_PASSWORD_SCORE", 3),
 		},
 		Captcha: CaptchaConfig{
 			Provider: l.env("CAPTCHA_PROVIDER", ""),

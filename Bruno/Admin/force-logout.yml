@@ -1,0 +1,21 @@
+info:
+  name: force-logout
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/admin/users/{{targetUserId}}/force-logout"
+  body:
+    type: none
+  auth:
+    type: bearer
+    token: "{{adminAccessToken}}"
+
+headers:
+  - name: X-Tenant-ID
+    value: "{{tenantId}}"
+    enabled: true
+
+settings:
+  encodeUrl: true

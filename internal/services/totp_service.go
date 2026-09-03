@@ -62,7 +62,28 @@ type TOTPService struct {
 	enc *crypto.Encryptor
 	// jwtMgr verifies the sudo token required to rotate an ACTIVE device
 	// (C6). Nil fails closed — sudo can never be proven without it.
-	jwtMgr *jwt.JWTManager
+	jwtMgr   *jwt.JWTManager
+	users    UserRepo
+	notify   Notifier
+	passkeys PasskeyRepo
+}
+
+// TOTPOption configures optional capabilities on TOTPService.
+type TOTPOption func(*TOTPService)
+
+// WithTOTPUserRepo wires UserRepo for password verification on disable (P1.1).
+func WithTOTPUserRepo(repo UserRepo) TOTPOption {
+	return func(s *TOTPService) { s.users = repo }
+}
+
+// WithTOTPNotifier wires Notifier for security alerts on disable (P1.1).
+func WithTOTPNotifier(n Notifier) TOTPOption {
+	return func(s *TOTPService) { s.notify = n }
+}
+
+// WithTOTPPasskeys wires PasskeyRepo for methods aggregation (P1.5).
+func WithTOTPPasskeys(p PasskeyRepo) TOTPOption {
+	return func(s *TOTPService) { s.passkeys = p }
 }
 
 // NewTOTPService constructs the service. store may be nil (replay protection
@@ -73,7 +94,7 @@ type TOTPService struct {
 // enc seals the displayable recovery-code copies with AES-256-GCM (see
 // cmd/server wiring for how the key is sourced). jwtMgr verifies sudo tokens
 // for re-enrollment of active devices.
-func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor, jwtMgr *jwt.JWTManager) *TOTPService {
+func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer string, cfg config.AuthConfig, enc *crypto.Encryptor, jwtMgr *jwt.JWTManager, opts ...TOTPOption) *TOTPService {
 	if cfg.TOTPMaxAttempts <= 0 {
 		cfg.TOTPMaxAttempts = 5
 	}
@@ -86,7 +107,11 @@ func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer s
 	if cfg.RecoveryCodeBytes <= 0 {
 		cfg.RecoveryCodeBytes = 16
 	}
-	return &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, enc: enc, jwtMgr: jwtMgr}
+	s := &TOTPService{repo: repo, store: store, audits: audits, issuer: issuer, cfg: cfg, enc: enc, jwtMgr: jwtMgr}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Enable starts (or restarts) TOTP enrollment: it generates a fresh shared
@@ -367,6 +392,104 @@ func (s *TOTPService) RegenerateRecoveryCodes(ctx context.Context, userID uint) 
 	}
 	s.recordSuccess(ctx, userID, models.AuditEventRecoveryCodesRegenerated, "recovery codes regenerated")
 	return codes, nil
+}
+
+// Disable turns off TOTP for the user (P1.1).
+// Requires either a valid sudo token (X-Sudo-Token) OR current password + (TOTP code or recovery code).
+// Disables device, deletes recovery codes, bumps pwd_version, records audit, and sends email alert.
+func (s *TOTPService) Disable(ctx context.Context, userID uint, sudoToken, password, code, ip string) error {
+	device, err := s.repo.FindByUserID(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("totp disable: find device: %w", err)
+	}
+	if device == nil || !device.Enabled {
+		return nil // idempotent success if already disabled
+	}
+
+	// 1. Authorize via sudoToken or (password + code)
+	if sudoToken != "" && s.verifySudoToken(sudoToken, userID) == nil {
+		// Sudo token accepted
+	} else {
+		// Fall back to password + code
+		if s.users == nil || password == "" {
+			return ErrSudoRequired
+		}
+		user, err := s.users.FindByID(ctx, userID)
+		if err != nil || user == nil {
+			return ErrUserNotFound
+		}
+		if !hash.CheckPassword(user.Password, password) {
+			return ErrInvalidCredentials
+		}
+		if code == "" {
+			return ErrInvalidCode
+		}
+		if err := s.Validate(ctx, userID, code); err != nil {
+			return ErrInvalidCode
+		}
+	}
+
+	// 2. Disable device and purge recovery codes
+	if err := s.repo.Disable(ctx, userID); err != nil {
+		return fmt.Errorf("totp disable: %w", err)
+	}
+	if err := s.repo.ReplaceRecoveryCodes(ctx, userID, nil); err != nil {
+		return fmt.Errorf("totp disable: delete recovery codes: %w", err)
+	}
+
+	// 3. Bump pwd_version to invalidate outstanding tokens
+	if s.users != nil {
+		_ = s.users.BumpPwdVersion(ctx, userID)
+	}
+
+	// 4. Audit event
+	s.recordSuccess(ctx, userID, models.AuditEventTOTPDisabled, "mfa device disabled")
+
+	// 5. Send security alert email
+	if s.notify != nil && s.users != nil {
+		if u, err := s.users.FindByID(ctx, userID); err == nil && u != nil {
+			_ = s.notify.SendSecurityAlert(ctx, u.Email, "mfa_disabled", "Two-factor authentication (TOTP) has been disabled on your account.")
+		}
+	}
+
+	return nil
+}
+
+// GetMFAMethods aggregates the user's active MFA methods for GET /api/v1/auth/mfa/methods (P1.5).
+func (s *TOTPService) GetMFAMethods(ctx context.Context, userID uint) (MFAMethodsResult, error) {
+	device, err := s.repo.FindByUserID(ctx, userID)
+	if err != nil {
+		return MFAMethodsResult{}, err
+	}
+	totpEnabled := device != nil && device.Enabled
+
+	recoveryCodes, err := s.repo.ActiveRecoveryCodes(ctx, userID)
+	if err != nil {
+		return MFAMethodsResult{}, err
+	}
+	recoveryRemaining := len(recoveryCodes)
+
+	passkeysCount := 0
+	if s.passkeys != nil {
+		pks, err := s.passkeys.ListByUser(ctx, userID, false)
+		if err == nil {
+			passkeysCount = len(pks)
+		}
+	}
+
+	defaultMethod := "none"
+	if passkeysCount > 0 {
+		defaultMethod = "passkey"
+	} else if totpEnabled {
+		defaultMethod = "totp"
+	}
+
+	return MFAMethodsResult{
+		TOTPEnabled:            totpEnabled,
+		PasskeysCount:          passkeysCount,
+		RecoveryCodesRemaining: recoveryRemaining,
+		DefaultMethod:          defaultMethod,
+	}, nil
 }
 
 // newRecoveryCodes generates a batch of high-entropy recovery codes, atomically

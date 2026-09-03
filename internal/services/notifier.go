@@ -68,3 +68,18 @@ func (n *ConsoleNotifier) SendNewLoginAlert(ctx context.Context, to, ip, deviceN
 		"ip", ip, "device", deviceName)
 	return nil
 }
+
+// SendDuplicateRegisterAlert logs an attempted duplicate registration alert (P0.1).
+func (n *ConsoleNotifier) SendDuplicateRegisterAlert(ctx context.Context, to string) error {
+	slog.Info("[MAIL]", "to", to, "from", n.From, "subject", "Security alert: duplicate registration attempt")
+	return nil
+}
+
+// SendSecurityAlert logs generic security events (P0.3 / P1.1 / P1.2).
+func (n *ConsoleNotifier) SendSecurityAlert(ctx context.Context, to, event, detail string) error {
+	slog.Info("[MAIL]", "to", to, "from", n.From, "subject", event, "detail", detail)
+	return nil
+}
+
+var _ Notifier = (*ConsoleNotifier)(nil)
+

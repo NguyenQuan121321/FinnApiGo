@@ -5,10 +5,12 @@
 /bin/
 /dist/
 
-# Local environment / secrets
+# Local environment / secrets / agent metadata
 .env
 .env.*
 !.env.example
+.agent/
+.agent
 
 # Editor / OS
 .vscode/

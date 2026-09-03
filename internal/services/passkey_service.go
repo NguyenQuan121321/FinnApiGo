@@ -35,6 +35,7 @@ type PasskeyRepo interface {
 	ListByUser(ctx context.Context, userID uint, includeRevoked bool) ([]models.PasskeyCredential, error)
 	TouchUsage(ctx context.Context, id uint, signCount uint32, usedAt time.Time) error
 	RevokeByID(ctx context.Context, id, userID uint) error
+	RevokeAllForUser(ctx context.Context, userID uint) error
 }
 
 // PasskeyConfig carries the WebAuthn relying-party identity (W7).

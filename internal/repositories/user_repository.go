@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/tenant"
 )
 
 // UserRepository implements services.UserRepo backed by GORM.
@@ -28,12 +29,20 @@ func NewUserRepository(db *gorm.DB) *UserRepository {
 }
 
 func (r *UserRepository) Create(ctx context.Context, user *models.User) error {
+	if user.TenantID == "" {
+		user.TenantID = tenant.FromContext(ctx)
+	}
 	return r.db.WithContext(ctx).Create(user).Error
 }
 
 func (r *UserRepository) FindByID(ctx context.Context, id uint) (*models.User, error) {
 	var u models.User
-	if err := r.db.WithContext(ctx).First(&u, id).Error; err != nil {
+	tid := tenant.FromContext(ctx)
+	q := r.db.WithContext(ctx).Where("id = ?", id)
+	if tid != "" && tid != tenant.DefaultTenantID {
+		q = q.Where("tenant_id = ?", tid)
+	}
+	if err := q.First(&u).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -44,7 +53,12 @@ func (r *UserRepository) FindByID(ctx context.Context, id uint) (*models.User, e
 
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*models.User, error) {
 	var u models.User
-	if err := r.db.WithContext(ctx).Where("email = ?", email).First(&u).Error; err != nil {
+	tid := tenant.FromContext(ctx)
+	q := r.db.WithContext(ctx).Where("email = ?", email)
+	if tid != "" {
+		q = q.Where("tenant_id = ?", tid)
+	}
+	if err := q.First(&u).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -55,7 +69,12 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*models
 
 func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*models.User, error) {
 	var u models.User
-	if err := r.db.WithContext(ctx).Where("username = ?", username).First(&u).Error; err != nil {
+	tid := tenant.FromContext(ctx)
+	q := r.db.WithContext(ctx).Where("username = ?", username)
+	if tid != "" {
+		q = q.Where("tenant_id = ?", tid)
+	}
+	if err := q.First(&u).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -150,4 +169,46 @@ func (r *UserRepository) SetFirstPassword(ctx context.Context, userID uint, hash
 func (r *UserRepository) SetEmailVerified(ctx context.Context, user *models.User, verified bool) error {
 	user.IsEmailVerified = verified
 	return r.db.WithContext(ctx).Model(user).Update("is_email_verified", verified).Error
+}
+
+// ListPaginated retrieves users within a tenant with optional search filter (P2.3 admin).
+func (r *UserRepository) ListPaginated(ctx context.Context, tenantID string, page, limit int, search string) ([]models.User, int64, error) {
+	if tenantID == "" {
+		tenantID = tenant.FromContext(ctx)
+	}
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+	var total int64
+	q := r.db.WithContext(ctx).Model(&models.User{})
+	if tenantID != "" {
+		q = q.Where("tenant_id = ?", tenantID)
+	}
+	if search != "" {
+		searchTerm := "%" + search + "%"
+		q = q.Where("username LIKE ? OR email LIKE ? OR full_name LIKE ?", searchTerm, searchTerm, searchTerm)
+	}
+	if err := q.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var users []models.User
+	err := q.Order("id DESC").Offset(offset).Limit(limit).Find(&users).Error
+	return users, total, err
+}
+
+// SetLock sets or clears the lockout timestamp and resets failed attempts on unlock (P2.3 admin).
+func (r *UserRepository) SetLock(ctx context.Context, userID uint, lockedUntil *time.Time) error {
+	updates := map[string]any{
+		"locked_until": lockedUntil,
+	}
+	if lockedUntil == nil {
+		updates["failed_login_attempts"] = 0
+	}
+	return r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(updates).Error
 }

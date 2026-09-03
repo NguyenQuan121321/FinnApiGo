@@ -32,6 +32,12 @@ type RefreshToken struct {
 	// or rotated). Lets the user see "last seen 2 minutes ago" per device.
 	LastActiveAt time.Time `json:"lastActiveAt"`
 
+	// SessionID links the token to its login-session family (P0.3): rotation
+	// reuses the same session id, and reuse detection revokes exactly that
+	// family instead of every session the user owns. Nullable/empty for rows
+	// created before migration 0003.
+	SessionID string `gorm:"size:36;index" json:"sessionId"`
+
 	CreatedAt time.Time `json:"createdAt"`
 }
 

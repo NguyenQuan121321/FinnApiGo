@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -19,9 +19,12 @@ import (
 	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/netutil"
 	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/store"
 	"github.com/go-sql-driver/mysql"
+	"github.com/google/uuid"
+	"github.com/nbutton23/zxcvbn-go"
 	"gorm.io/gorm"
 )
 
@@ -55,19 +58,49 @@ type AuthService struct {
 	geo           geo.Resolver    // IP -> location label; nil-safe (Unknown)
 	totpRepo      TOTPRepo        // nil-safe — MFA check skipped when nil
 	totpValidator TOTPValidator   // nil-safe — MFA completion unavailable when nil
+	// sessions persists the server-side session entity (P0.3). Nil-safe
+	// (legacy tests): token issuance degrades to session-less rows and reuse
+	// detection falls back to the documented global revocation.
+	sessions SessionRepo
 	// breached screens new passwords against known breach corpora (NIST
 	// 800-63B). Nil-safe: no screening when not wired (see
 	// WithBreachedPasswordChecker).
 	breached *BreachedPasswordChecker
+	// minPasswordScore defines the minimum zxcvbn score (P1.7, default 0 in tests, 3 in prod).
+	minPasswordScore int
+	passkeys         PasskeyRepo
+	oauthIdents      OAuthIdentityRepo
 }
 
 // AuthServiceOption customizes optional service capabilities without growing
 // the positional constructor further.
 type AuthServiceOption func(*AuthService)
 
+// WithSessionRepo wires server-side session persistence (P0.3). Without it
+// the service keeps the legacy behavior: refresh-token rows act as their own
+// (unlinked) families and reuse detection revokes globally.
+func WithSessionRepo(repo SessionRepo) AuthServiceOption {
+	return func(s *AuthService) { s.sessions = repo }
+}
+
 // WithBreachedPasswordChecker wires the HIBP-style breached-password screener.
 func WithBreachedPasswordChecker(c *BreachedPasswordChecker) AuthServiceOption {
 	return func(s *AuthService) { s.breached = c }
+}
+
+// WithMinPasswordScore configures zxcvbn password strength scoring threshold (P1.7).
+func WithMinPasswordScore(minScore int) AuthServiceOption {
+	return func(s *AuthService) { s.minPasswordScore = minScore }
+}
+
+// WithAuthPasskeys wires PasskeyRepo for credential erasure upon GDPR right-to-erasure (P1.3).
+func WithAuthPasskeys(p PasskeyRepo) AuthServiceOption {
+	return func(s *AuthService) { s.passkeys = p }
+}
+
+// WithAuthOAuthIdents wires OAuthIdentityRepo for identity link erasure upon GDPR right-to-erasure (P1.3).
+func WithAuthOAuthIdents(o OAuthIdentityRepo) AuthServiceOption {
+	return func(s *AuthService) { s.oauthIdents = o }
 }
 
 // NewAuthService constructs the service. Repos are interfaces so mocks can be
@@ -146,7 +179,15 @@ func (s *AuthService) applyCredentialChange(ctx context.Context, user *models.Us
 	tr, okTok := s.tokens.(TxScopedTokenRevoker)
 	if okUser && okTok {
 		err := tc.CredentialChangeTx(ctx, user.ID, hashedPassword, func(tx *gorm.DB) error {
-			return tr.RevokeAllForUserTx(tx, user.ID)
+			if err := tr.RevokeAllForUserTx(tx, user.ID); err != nil {
+				return err
+			}
+			// P0.3 — the session families die in the same transaction, so a
+			// crash can never leave a live session row for a dead credential.
+			if s.sessions != nil {
+				return s.sessions.RevokeAllForUserTx(tx, user.ID)
+			}
+			return nil
 		})
 		if err != nil {
 			return err
@@ -168,7 +209,13 @@ func (s *AuthService) applyCredentialChange(ctx context.Context, user *models.Us
 	if err := s.bumpPwdVersion(ctx, user.ID); err != nil {
 		return err
 	}
-	return s.tokens.RevokeAllForUser(ctx, user.ID)
+	if err := s.tokens.RevokeAllForUser(ctx, user.ID); err != nil {
+		return err
+	}
+	if s.sessions != nil {
+		return s.sessions.RevokeAllForUser(ctx, user.ID)
+	}
+	return nil
 }
 
 // passwordBreached consults the breached-password screener. Nil checker →
@@ -186,9 +233,11 @@ func (s *AuthService) passwordBreached(ctx context.Context, pw string) bool {
 func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfile, error) {
 	in.Username = strings.TrimSpace(in.Username)
 	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
-	in.FullName = strings.TrimSpace(in.FullName)
-
-	if err := validatePassword(in.Password); err != nil {
+	emailLocalPart := ""
+	if parts := strings.Split(in.Email, "@"); len(parts) > 0 {
+		emailLocalPart = parts[0]
+	}
+	if err := validatePassword(in.Password, s.minPasswordScore, in.Username, emailLocalPart); err != nil {
 		return UserProfile{}, err
 	}
 	// NIST 800-63B — screen new passwords against known breach corpora. The
@@ -215,16 +264,16 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 		return UserProfile{}, ErrDisposableEmail
 	}
 
-	// uniqueness checks (email + username)
+	// uniqueness checks (email + username) — P0.1 uniform anti-enum response
 	if existing, err := s.users.FindByEmail(ctx, in.Email); err != nil {
 		return UserProfile{}, fmt.Errorf("register: find email: %w", err)
 	} else if existing != nil {
-		return UserProfile{}, ErrEmailExists
+		return s.handleDuplicateRegistration(ctx, existing.Email, in.IP, in.Username)
 	}
 	if existing, err := s.users.FindByUsername(ctx, in.Username); err != nil {
 		return UserProfile{}, fmt.Errorf("register: find username: %w", err)
 	} else if existing != nil {
-		return UserProfile{}, ErrUsernameExists
+		return s.handleDuplicateRegistration(ctx, existing.Email, in.IP, in.Username)
 	}
 
 	hashed, err := hash.HashPassword(in.Password)
@@ -240,12 +289,14 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 		Role:     models.RoleUser,
 		IsActive: true,
 	}
-	// §1.7 — TOCTOU race: two concurrent registers with the same email/username
-	// can both pass the existence checks. The unique DB index rejects the second
-	// insert. We inspect the error here and map MySQL duplicate-key (1062)
-	// to the correct sentinel error instead of a generic 500.
+	// §1.7 / P0.1 — TOCTOU race: two concurrent registers with the same email/username
+	// can both pass the existence checks. If the DB rejects with duplicate-key,
+	// deliver the neutral anti-enumeration response rather than failing with 500.
 	if err := s.users.Create(ctx, user); err != nil {
-		return UserProfile{}, mapDuplicateKey(in.Email, in.Username, err)
+		if isMySQLDup(err) {
+			return s.handleDuplicateRegistration(ctx, in.Email, in.IP, in.Username)
+		}
+		return UserProfile{}, err
 	}
 
 	// §1.1 — Issue a verification JWT and deliver it via the notifier.
@@ -260,17 +311,80 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 	// not turn the registration into a 500 (a client retry then collides with
 	// ErrEmailExists). Degrade to success + error log + audit; the
 	// resend-verification endpoint is the recovery path.
-	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
-		slog.Error("register: verification email delivery failed",
-			"user_id", user.ID, "email", user.Email, "err", err)
-		uid := user.ID
-		s.audits.Record(ctx, &models.AuditLog{
-			UserID: &uid, Email: user.Email,
-			Event: models.AuditEventVerifyEmailSendFailed, Success: false,
-			Detail: err.Error(), IPAddress: in.IP,
-		})
+	if s.notify != nil {
+		if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
+			slog.Error("register: verification email delivery failed",
+				"user_id", user.ID, "email", user.Email, "err", err)
+			uid := user.ID
+			s.audits.Record(ctx, &models.AuditLog{
+				UserID: &uid, Email: user.Email,
+				Event: models.AuditEventVerifyEmailSendFailed, Success: false,
+				Detail: err.Error(), IPAddress: in.IP,
+			})
+		}
 	}
 	return FromUser(user), nil
+}
+
+// handleDuplicateRegistration logs the attempt, fires a throttled notification
+// email to the existing account owner, and returns a neutral UserProfile (201)
+// so attackers cannot probe for registered emails/usernames (P0.1 anti-enumeration).
+func (s *AuthService) handleDuplicateRegistration(ctx context.Context, ownerEmail, ip, attemptedUsername string) (UserProfile, error) {
+	s.audits.Record(ctx, &models.AuditLog{
+		Event:     models.AuditEventRegisterDuplicate,
+		Email:     ownerEmail,
+		IPAddress: ip,
+		Success:   false,
+		Detail:    fmt.Sprintf("attempted registration with existing email or username (attempted username: %s)", attemptedUsername),
+	})
+	// Layered throttling: reuse verify-resend global, per-IP, and per-email caps
+	// so duplicate registration attempts cannot be weaponized into an email-bombing oracle.
+	if s.shouldThrottleDuplicateRegisterAlert(ownerEmail, ip) {
+		slog.Warn("register: duplicate alert suppressed by rate limit", "email", ownerEmail, "ip", ip)
+	} else if s.notify != nil {
+		go func() {
+			defer func() { _ = recover() }()
+			alertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), newIPAlertTimeout)
+			defer cancel()
+			if err := s.notify.SendDuplicateRegisterAlert(alertCtx, ownerEmail); err != nil {
+				slog.Warn("register: duplicate alert send failed", "email", ownerEmail, "err", err)
+			}
+		}()
+	}
+	// Return neutral synthetic profile (HTTP 201 Created)
+	return UserProfile{
+		Username:        attemptedUsername,
+		Email:           ownerEmail,
+		Role:            models.RoleUser,
+		IsActive:        true,
+		IsEmailVerified: false,
+		CreatedAt:       time.Now().UTC(),
+	}, nil
+}
+
+func (s *AuthService) shouldThrottleDuplicateRegisterAlert(email, ip string) bool {
+	if s.store == nil {
+		return false
+	}
+	// 1. Global cap
+	if s.rlCfg.VerifyResendGlobalMax > 0 {
+		if n := s.store.IncrBy("reg:dup:global", 1, s.rlCfg.VerifyResendGlobalWindow); n > int64(s.rlCfg.VerifyResendGlobalMax) {
+			return true
+		}
+	}
+	// 2. Per-IP cap
+	if ip != "" && s.rlCfg.VerifyResendPerIPMax > 0 {
+		if n := s.store.IncrBy(ipCounterKey("reg:dup:ip:", ip), 1, s.rlCfg.VerifyResendPerIPWindow); n > int64(s.rlCfg.VerifyResendPerIPMax) {
+			return true
+		}
+	}
+	// 3. Per-email cap
+	if email != "" && s.rlCfg.VerifyResendPerEmailMax > 0 {
+		if n := s.store.IncrBy("reg:dup:email:"+email, 1, s.rlCfg.VerifyResendWindow); n > int64(s.rlCfg.VerifyResendPerEmailMax) {
+			return true
+		}
+	}
+	return false
 }
 
 // ----- 2. Login -----
@@ -395,7 +509,7 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 		return TokenPair{}, UserProfile{}, ErrInvalidToken
 	}
 
-	pair, err := s.issueTokenPair(ctx, user, in.IP, in.UA)
+	pair, err := s.issueTokenPair(ctx, user, in.IP, in.UA, "")
 	if err != nil {
 		return TokenPair{}, UserProfile{}, err
 	}
@@ -444,7 +558,7 @@ func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.Us
 		}
 	}
 
-	pair, err := s.issueTokenPair(ctx, user, ip, ua)
+	pair, err := s.issueTokenPair(ctx, user, ip, ua, "")
 	if err != nil {
 		return TokenPair{}, UserProfile{}, nil, err
 	}
@@ -457,9 +571,17 @@ func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.Us
 
 // ----- 3. Logout -----
 
-// Logout revokes the supplied refresh token (idempotent — revoking an
-// already-revoked or unknown token is not an error, to avoid leaking state).
-func (s *AuthService) Logout(ctx context.Context, refreshToken, ip string) error {
+// Logout revokes the supplied refresh token AND its session family, and
+// denylists the caller's access-token jti for the token's remaining lifetime
+// (P0.2 — before this, the access token stayed valid until its exp). The
+// accessJTI comes from AuthMiddleware's context; an empty value (legacy
+// token) degrades to refresh-token-only revocation. Idempotent — revoking an
+// already-revoked or unknown token is not an error, to avoid leaking state.
+func (s *AuthService) Logout(ctx context.Context, refreshToken, accessJTI, ip string) error {
+	// P0.2 — the caller's own access token dies NOW, regardless of what the
+	// refresh-token lookup below finds.
+	s.denylistAccessToken(accessJTI)
+
 	hash := hash.HashToken(refreshToken)
 	rt, err := s.tokens.FindByHash(ctx, hash)
 	if err != nil {
@@ -473,21 +595,46 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken, ip string) error
 	if err := s.tokens.Revoke(ctx, rt); err != nil && !errors.Is(err, repositories.ErrTokenAlreadyRevoked) {
 		return err
 	}
+	// Kill the whole family the token belongs to: the session row (so it
+	// disappears from the device list), its remaining refresh tokens, and a
+	// sid denylist entry so sibling ACCESS tokens die before their exp.
+	if rt.SessionID != "" && s.sessions != nil {
+		if sess, serr := s.sessions.FindByID(ctx, rt.SessionID); serr == nil {
+			_ = s.sessions.RevokeByID(ctx, rt.SessionID, rt.UserID)
+			_ = s.tokens.RevokeBySession(ctx, rt.SessionID)
+			s.denylistSession(sess)
+		}
+	}
 	uid := rt.UserID
 	s.audits.Record(ctx, &models.AuditLog{
 		UserID: &uid, Event: models.AuditEventLogout, IPAddress: ip, Success: true,
 	})
+	if accessJTI != "" {
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID: &uid, Event: models.AuditEventAccessTokenRevoked,
+			IPAddress: ip, Success: true, Detail: "logout denylisted access jti",
+		})
+	}
 	return nil
 }
 
 // ----- 3b. LogoutAll -----
 
-// LogoutAll revokes every active refresh token for the authenticated user —
-// a "sign out everywhere" action (§4). Callers should provide the current
-// refresh token separately if they want it revoked too (or call Logout first).
+// LogoutAll revokes every active session family for the authenticated user —
+// a "sign out everywhere" action (§4) — and bumps the password version (A7)
+// so outstanding ACCESS tokens are rejected by AuthMiddleware immediately,
+// not at their exp (P0.2).
 func (s *AuthService) LogoutAll(ctx context.Context, userID uint, ip string) error {
 	if err := s.tokens.RevokeAllForUser(ctx, userID); err != nil {
 		return err
+	}
+	if s.sessions != nil {
+		if err := s.sessions.RevokeAllForUser(ctx, userID); err != nil {
+			return err
+		}
+	}
+	if err := s.bumpPwdVersion(ctx, userID); err != nil {
+		return fmt.Errorf("logout-all: bump pwd version: %w", err)
 	}
 	s.audits.Record(ctx, &models.AuditLog{
 		UserID: &userID, Event: models.AuditEventLogout, IPAddress: ip,
@@ -499,8 +646,12 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uint, ip string) err
 // ----- 4. Refresh token (rotation) -----
 
 // Refresh validates the presented refresh token, revokes it, and issues a NEW
-// access + refresh pair (rotation). Reuse of the old token is therefore detected.
-// The caller's ip/ua are stamped onto the new session and used for audit events.
+// access + refresh pair (rotation) inside the SAME session family. Reuse of
+// an already-revoked token is a theft signal: with sessions wired (P0.3) only
+// that session's chain dies — the user's OTHER devices keep working — and the
+// owner is notified. Legacy session-less rows fall back to the documented
+// global revocation. The caller's ip/ua are stamped onto the family and used
+// for audit events.
 func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) (TokenPair, error) {
 	hash := hash.HashToken(refreshToken)
 	rt, err := s.tokens.FindByHash(ctx, hash)
@@ -512,16 +663,12 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 		return TokenPair{}, ErrInvalidToken
 	}
 
-	// §Session — a revoked session can NEVER rotate. Block instantly and treat
-	// it as a reuse/theft signal: revoke ALL of the user's sessions (per the
-	// existing security spec) and record a high-severity audit event.
+	// §Session — a revoked chain can NEVER rotate. Block instantly and treat
+	// it as a reuse/theft signal: revoke the affected family (P0.3 isolation)
+	// and record a high-severity audit event.
 	if rt.Revoked {
 		TokenReuseDetections.Add(1)
-		_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
-		s.audits.Record(ctx, &models.AuditLog{
-			UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
-			IPAddress: ip, Success: false, Detail: "revoked refresh token presented",
-		})
+		s.handleTokenReuse(ctx, rt, ip, "revoked refresh token presented")
 		return TokenPair{}, ErrInvalidToken
 	}
 
@@ -538,23 +685,38 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 		return TokenPair{}, ErrInvalidToken
 	}
 
-	// Rotate: revoke the old, issue a new pair (carrying the caller's device
-	// metadata so the "sessions" list reflects the rotating device). Revoke is
-	// a compare-and-set — losing the race means a concurrent request already
-	// consumed this token, which is reuse by definition (C1).
+	// A token whose session family was revoked separately (user pressed
+	// "revoke device", or a sibling rotation already killed the chain) is
+	// equally dead — presenting it is reuse of a revoked family.
+	if rt.SessionID != "" && s.sessions != nil {
+		sess, err := s.sessions.FindByID(ctx, rt.SessionID)
+		if err != nil {
+			return TokenPair{}, fmt.Errorf("refresh: find session: %w", err)
+		}
+		if sess == nil {
+			return TokenPair{}, ErrInvalidToken
+		}
+		if sess.Revoked || time.Now().After(sess.ExpiresAt) {
+			TokenReuseDetections.Add(1)
+			s.handleTokenReuse(ctx, rt, ip, "revoked session presented")
+			return TokenPair{}, ErrInvalidToken
+		}
+	}
+
+	// Rotate: revoke the old, issue a new pair INSIDE the same family
+	// (carrying the caller's device metadata so the "sessions" list reflects
+	// the rotating device). Revoke is a compare-and-set — losing the race
+	// means a concurrent request already consumed this token, which is reuse
+	// by definition (C1).
 	if err := s.tokens.Revoke(ctx, rt); err != nil {
 		if errors.Is(err, repositories.ErrTokenAlreadyRevoked) {
 			TokenReuseDetections.Add(1)
-			_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
-			s.audits.Record(ctx, &models.AuditLog{
-				UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
-				IPAddress: ip, Success: false, Detail: "concurrent refresh lost revoke race",
-			})
+			s.handleTokenReuse(ctx, rt, ip, "concurrent refresh lost revoke race")
 			return TokenPair{}, ErrInvalidToken
 		}
 		return TokenPair{}, err
 	}
-	pair, err := s.issueTokenPair(ctx, user, ip, ua)
+	pair, err := s.issueTokenPair(ctx, user, ip, ua, rt.SessionID)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -563,6 +725,68 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 		UserID: &user.ID, Event: models.AuditEventRefreshToken, IPAddress: ip, Success: true,
 	})
 	return pair, nil
+}
+
+// handleTokenReuse contains the P0.3 isolation policy: when the reused token
+// belongs to a session family, kill ONLY that family (session row + its
+// refresh-token chain + a sid denylist entry killing its outstanding access
+// tokens) and notify the owner; legacy session-less rows keep the documented
+// global revocation. Failures are best-effort — the caller already rejected
+// the request; this is containment + forensics.
+func (s *AuthService) handleTokenReuse(ctx context.Context, rt *models.RefreshToken, ip, detail string) {
+	if rt.SessionID != "" && s.sessions != nil {
+		sess, err := s.sessions.FindByID(ctx, rt.SessionID)
+		if err != nil {
+			slog.Error("refresh: reuse containment lookup failed", "session_id", rt.SessionID, "err", err)
+		}
+		if err := s.sessions.RevokeByID(ctx, rt.SessionID, rt.UserID); err != nil &&
+			!errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Error("refresh: reuse containment revoke failed", "session_id", rt.SessionID, "err", err)
+		}
+		if err := s.tokens.RevokeBySession(ctx, rt.SessionID); err != nil {
+			slog.Error("refresh: reuse containment token revoke failed", "session_id", rt.SessionID, "err", err)
+		}
+		s.denylistSession(sess)
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
+			IPAddress: ip, Success: false, Detail: detail + " (session family revoked)",
+		})
+		if sess != nil {
+			s.notifySecurityAsync(ctx, rt.UserID, "Suspicious sign-in activity detected",
+				"A refresh token from one of your devices was reused after being revoked. That device's session has been ended. If this was not you, change your password immediately.")
+		}
+		return
+	}
+	// Legacy row (pre-0003 migration): no family to isolate — the old policy
+	// applies. The sid-less access tokens die via their own exp.
+	_ = s.tokens.RevokeAllForUser(ctx, rt.UserID)
+	s.audits.Record(ctx, &models.AuditLog{
+		UserID: &rt.UserID, Event: models.AuditEventTokenReuse,
+		IPAddress: ip, Success: false, Detail: detail,
+	})
+}
+
+// notifySecurityAsync delivers a security-transparency email off the request
+// path (bounded timeout, never panics, never blocks the caller). The lookup
+// is best-effort: an owner who cannot be found simply is not notified — the
+// audit row is the durable record.
+func (s *AuthService) notifySecurityAsync(ctx context.Context, userID uint, event, body string) {
+	if s.notify == nil {
+		return
+	}
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil || user == nil || user.Email == "" {
+		return
+	}
+	to := user.Email
+	go func() {
+		defer func() { _ = recover() }() // a notification must never kill a request goroutine
+		alertCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), newIPAlertTimeout)
+		defer cancel()
+		if err := s.notify.SendSecurityAlert(alertCtx, to, event, body); err != nil {
+			slog.Warn("security alert delivery failed", "user_id", userID, "event", event, "err", err)
+		}
+	}()
 }
 
 // ----- 5. Forgot password -----
@@ -702,15 +926,19 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 	if err != nil || claims.Type != jwt.TokenTypeReset {
 		return ErrInvalidToken
 	}
-	if err := validatePassword(in.NewPassword); err != nil {
-		return err
-	}
 	user, err := s.users.FindByID(ctx, claims.UserID)
 	if err != nil {
 		return err
 	}
 	if user == nil {
 		return ErrUserNotFound
+	}
+	emailLocalPart := ""
+	if parts := strings.Split(user.Email, "@"); len(parts) > 0 {
+		emailLocalPart = parts[0]
+	}
+	if err := validatePassword(in.NewPassword, s.minPasswordScore, user.Username, emailLocalPart); err != nil {
+		return err
 	}
 	if s.passwordBreached(ctx, in.NewPassword) {
 		return ErrPasswordBreached
@@ -761,7 +989,11 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 	if !hash.CheckPassword(user.Password, in.OldPassword) {
 		return ErrInvalidCredentials
 	}
-	if err := validatePassword(in.NewPassword); err != nil {
+	emailLocalPart := ""
+	if parts := strings.Split(user.Email, "@"); len(parts) > 0 {
+		emailLocalPart = parts[0]
+	}
+	if err := validatePassword(in.NewPassword, s.minPasswordScore, user.Username, emailLocalPart); err != nil {
 		return err
 	}
 	if s.passwordBreached(ctx, in.NewPassword) {
@@ -808,9 +1040,6 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 // change-password bypass. The guard lives in the SERVICE layer (not only in
 // the handler) so any future caller of this method inherits the protection.
 func (s *AuthService) SetPassword(ctx context.Context, userID uint, newPassword, ip string) error {
-	if err := validatePassword(newPassword); err != nil {
-		return err
-	}
 	user, err := s.users.FindByID(ctx, userID)
 	if err != nil {
 		return err
@@ -822,6 +1051,13 @@ func (s *AuthService) SetPassword(ctx context.Context, userID uint, newPassword,
 	// must use ChangePassword, which verifies the old password first.
 	if user.Password != "" {
 		return ErrPasswordAlreadySet
+	}
+	emailLocalPart := ""
+	if parts := strings.Split(user.Email, "@"); len(parts) > 0 {
+		emailLocalPart = parts[0]
+	}
+	if err := validatePassword(newPassword, s.minPasswordScore, user.Username, emailLocalPart); err != nil {
+		return err
 	}
 	if s.passwordBreached(ctx, newPassword) {
 		return ErrPasswordBreached
@@ -870,6 +1106,300 @@ func (s *AuthService) Me(ctx context.Context, userID uint) (UserProfile, error) 
 	return FromUser(user), nil
 }
 
+// GetUserAuditLog returns paginated, sanitized security events for the caller (P1.4).
+func (s *AuthService) GetUserAuditLog(ctx context.Context, userID uint, page, limit int) ([]UserAuditLogItem, int64, error) {
+	if s.audits == nil {
+		return []UserAuditLogItem{}, 0, nil
+	}
+	logs, total, err := s.audits.FindByUserIDPaginated(ctx, userID, page, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	items := make([]UserAuditLogItem, len(logs))
+	for i, l := range logs {
+		items[i] = UserAuditLogItem{
+			ID:        l.ID,
+			Event:     l.Event,
+			IPAddress: l.IPAddress,
+			Success:   l.Success,
+			CreatedAt: l.CreatedAt,
+		}
+	}
+	return items, total, nil
+}
+
+// RequestChangeEmail initiates the email change ceremony (P1.2).
+// Verifies password, validates disposable-email and collision checks,
+// stages a 1h token in the store, sends verification to new email, and alert to old email.
+func (s *AuthService) RequestChangeEmail(ctx context.Context, userID uint, in ChangeEmailRequestInput, ip string) error {
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return ErrUserNotFound
+	}
+	if !hash.CheckPassword(user.Password, in.Password) {
+		return ErrInvalidCredentials
+	}
+
+	newEmail := strings.ToLower(strings.TrimSpace(in.NewEmail))
+	if newEmail == "" || newEmail == user.Email {
+		return ErrInvalidInput
+	}
+	if isDisposableEmail(newEmail) {
+		return ErrDisposableEmail
+	}
+	existing, err := s.users.FindByEmail(ctx, newEmail)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return ErrEmailExists
+	}
+
+	token := uuid.New().String()
+	storeKey := "change_email:" + token
+	payload := fmt.Sprintf("%d:%s:%s", user.ID, user.Email, newEmail)
+	if s.store != nil {
+		s.store.Set(storeKey, payload, time.Hour)
+	}
+
+	if s.notify != nil {
+		_ = s.notify.SendEmailVerification(ctx, newEmail, token)
+		_ = s.notify.SendSecurityAlert(ctx, user.Email, "email_change_requested", fmt.Sprintf("A request was made to change your email address to %s. If you did not make this request, secure your account immediately.", newEmail))
+	}
+
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID:    &user.ID,
+			Email:     user.Email,
+			Event:     models.AuditEventEmailChangeRequested,
+			IPAddress: ip,
+			Success:   true,
+			Detail:    "staged change to " + newEmail,
+		})
+	}
+	return nil
+}
+
+// ConfirmChangeEmail completes the email change ceremony (P1.2).
+// Consumes the staged token, re-checks collision, updates the email in DB,
+// revokes all existing sessions/tokens, bumps pwd_version, and sends confirmation to old email.
+func (s *AuthService) ConfirmChangeEmail(ctx context.Context, token, ip string) error {
+	if s.store == nil || token == "" {
+		return ErrInvalidToken
+	}
+	storeKey := "change_email:" + token
+	val, ok := s.store.Take(storeKey)
+	if !ok || val == nil {
+		return ErrInvalidToken
+	}
+	payload, ok := val.(string)
+	if !ok || payload == "" {
+		return ErrInvalidToken
+	}
+
+	parts := strings.Split(payload, ":")
+	if len(parts) != 3 {
+		return ErrInvalidToken
+	}
+	uidParsed, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil || uidParsed > math.MaxUint {
+		return ErrInvalidToken
+	}
+	uid := uint(uidParsed)
+	oldEmail := parts[1]
+	newEmail := parts[2]
+
+	// Anti-race collision check
+	existing, err := s.users.FindByEmail(ctx, newEmail)
+	if err != nil {
+		return err
+	}
+	if existing != nil && existing.ID != uid {
+		return ErrEmailExists
+	}
+
+	user, err := s.users.FindByID(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return ErrUserNotFound
+	}
+
+	user.Email = newEmail
+	user.IsEmailVerified = true
+	if err := s.users.Update(ctx, user); err != nil {
+		return err
+	}
+
+	// Invalidate all tokens and sessions
+	_ = s.tokens.RevokeAllForUser(ctx, uid)
+	if s.sessions != nil {
+		_ = s.sessions.RevokeAllForUser(ctx, uid)
+	}
+	_ = s.bumpPwdVersion(ctx, uid)
+
+	if s.notify != nil {
+		_ = s.notify.SendSecurityAlert(ctx, oldEmail, "email_changed", fmt.Sprintf("Your account email was successfully updated to %s. All existing sessions were revoked.", newEmail))
+	}
+
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID:    &user.ID,
+			Email:     newEmail,
+			Event:     models.AuditEventEmailChanged,
+			IPAddress: ip,
+			Success:   true,
+			Detail:    "email changed from " + oldEmail,
+		})
+	}
+	return nil
+}
+
+// verifySudoOrPassword proves caller identity for sensitive operations (P1.3).
+// Returns nil if either:
+// 1. sudoToken is a valid TokenTypeSudo JWT for this user.
+// 2. password matches the user's current password.
+func (s *AuthService) verifySudoOrPassword(ctx context.Context, user *models.User, sudoToken, password string) error {
+	if sudoToken != "" && s.jwt != nil {
+		claims, err := s.jwt.Verify(sudoToken)
+		if err == nil && claims.Type == jwt.TokenTypeSudo && claims.UserID == user.ID && claims.ExpiresAt != nil {
+			return nil
+		}
+	}
+	if password != "" && user.Password != "" {
+		if hash.CheckPassword(user.Password, password) {
+			return nil
+		}
+		return ErrInvalidCredentials
+	}
+	return ErrSudoRequired
+}
+
+// DeactivateAccount deactivates the caller's account (P1.3).
+// Gated by sudo token or password.
+// Sets is_active=false, revokes refresh tokens and sessions, bumps pwd_version,
+// and denylists the caller's access token jti.
+func (s *AuthService) DeactivateAccount(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error {
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return ErrUserNotFound
+	}
+	if err := s.verifySudoOrPassword(ctx, user, sudoToken, password); err != nil {
+		return err
+	}
+
+	user.IsActive = false
+	if err := s.users.Update(ctx, user); err != nil {
+		return err
+	}
+
+	// Revoke sessions and tokens
+	_ = s.tokens.RevokeAllForUser(ctx, userID)
+	if s.sessions != nil {
+		_ = s.sessions.RevokeAllForUser(ctx, userID)
+	}
+	_ = s.bumpPwdVersion(ctx, userID)
+	s.denylistAccessToken(accessJTI)
+
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID:    &user.ID,
+			Email:     user.Email,
+			Event:     models.AuditEventAccountDeactivated,
+			IPAddress: ip,
+			Success:   true,
+			Detail:    "account self-deactivated",
+		})
+	}
+	if s.notify != nil {
+		_ = s.notify.SendSecurityAlert(ctx, user.Email, "account_deactivated", "Your account has been deactivated. Contact support if you wish to reactivate it.")
+	}
+
+	return nil
+}
+
+// EraseAccount executes GDPR right-to-erasure for the caller (P1.3).
+// Gated by sudo token or password.
+// Anonymizes email and username, clears password and full name, deletes
+// TOTP rows and recovery codes, unlinks OAuth identities, anonymizes audit email,
+// revokes all sessions/tokens, bumps pwd_version, and denylists caller's access token.
+func (s *AuthService) EraseAccount(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error {
+	user, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return ErrUserNotFound
+	}
+	if err := s.verifySudoOrPassword(ctx, user, sudoToken, password); err != nil {
+		return err
+	}
+
+	oldEmail := user.Email
+	erasedSuffix := uuid.New().String()
+	user.Email = fmt.Sprintf("deleted_%s@anonymized.invalid", erasedSuffix)
+	user.Username = fmt.Sprintf("deleted_%s", erasedSuffix[:12])
+	user.Password = ""
+	user.FullName = ""
+	user.IsActive = false
+	user.IsEmailVerified = false
+	if err := s.users.Update(ctx, user); err != nil {
+		return err
+	}
+
+	// Purge TOTP device and recovery codes if wired
+	if s.totpRepo != nil {
+		_ = s.totpRepo.Disable(ctx, userID)
+		_ = s.totpRepo.ReplaceRecoveryCodes(ctx, userID, nil)
+	}
+
+	// Purge WebAuthn passkeys if wired
+	if s.passkeys != nil {
+		_ = s.passkeys.RevokeAllForUser(ctx, userID)
+	}
+
+	// Purge OAuth identity links if wired
+	if s.oauthIdents != nil {
+		_ = s.oauthIdents.DeleteAllByUserID(ctx, userID)
+	}
+
+	// Anonymize audit logs if supported by the repository
+	if s.audits != nil {
+		_ = s.audits.AnonymizeUser(ctx, userID)
+	}
+
+	// Revoke sessions and tokens
+	_ = s.tokens.RevokeAllForUser(ctx, userID)
+	if s.sessions != nil {
+		_ = s.sessions.RevokeAllForUser(ctx, userID)
+	}
+	_ = s.bumpPwdVersion(ctx, userID)
+	s.denylistAccessToken(accessJTI)
+
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID:    &user.ID,
+			Email:     "anonymized@gdpr.local",
+			Event:     models.AuditEventAccountErased,
+			IPAddress: ip,
+			Success:   true,
+			Detail:    "account erased via GDPR right-to-erasure",
+		})
+	}
+	if s.notify != nil {
+		_ = s.notify.SendSecurityAlert(ctx, oldEmail, "account_erased", "Your account data has been permanently erased per your request.")
+	}
+
+	return nil
+}
+
 // ----- 9. Verify email -----
 
 // VerifyEmail accepts a type=verify-email JWT and marks the account verified.
@@ -901,14 +1431,67 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 
 // ----- internal helpers -----
 
-// issueTokenPair mints an access JWT + opaque refresh token (hash stored).
-// The caller's ip/ua are stamped onto the new refresh-token row so it doubles
-// as a session/device record (location is resolved via the geo resolver).
-// The access token embeds the user's password version so the next credential
-// change kills it (A7).
-func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, error) {
+// denylist key prefixes + TTL helpers (P0.2). The denylist is store-backed
+// (Redis across instances, in-memory per process otherwise). Entries live
+// only as long as the tokens they kill — the access TTL / the session's
+// remaining lifetime — so the keyspace self-bounds.
+const (
+	denylistJTIPrefix = "denylist:jti:"
+	denylistSIDPrefix = "denylist:sid:"
+)
+
+// denylistAccessToken marks one access-token jti revoked for the remaining
+// access-token lifetime (bounded by AccessTTL — jti expiry is not carried in
+// Logout's inputs, and over-stating the TTL only delays key expiry).
+func (s *AuthService) denylistAccessToken(jti string) {
+	if s.store == nil || jti == "" {
+		return
+	}
+	s.store.Set(denylistJTIPrefix+jti, "revoked", s.jwtCfg.AccessTTL)
+}
+
+// denylistSession marks a session family revoked so every outstanding access
+// token carrying its sid dies immediately (P0.3). TTL is the session's
+// remaining lifetime so the key disappears with the family it killed.
+func (s *AuthService) denylistSession(sess *models.Session) {
+	if s.store == nil || sess == nil || sess.ID == "" {
+		return
+	}
+	ttl := time.Until(sess.ExpiresAt)
+	if ttl <= 0 {
+		ttl = s.jwtCfg.AccessTTL // already expired — keep a minimal grace window
+	}
+	s.store.Set(denylistSIDPrefix+sess.ID, "revoked", ttl)
+}
+
+// issueTokenPair mints a session (unless family reuse is requested), an
+// access JWT carrying the session's sid + a unique jti, and an opaque refresh
+// token (hash stored) linked to the same session. A non-empty reuseSessionID
+// rotates WITHIN an existing family (refresh rotation); empty creates a new
+// login session. The access token embeds the user's password version so the
+// next credential change kills it (A7).
+func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua, reuseSessionID string) (TokenPair, error) {
+	sid := reuseSessionID
+	if sid == "" && s.sessions != nil {
+		sid = uuid.NewString()
+		now := time.Now()
+		sess := &models.Session{
+			ID: sid, UserID: user.ID,
+			IPAddress: ip, UserAgent: ua,
+			DeviceName:       device.Parse(ua),
+			LocationEstimate: s.resolveLocation(ctx, ip),
+			LastActiveAt:     now,
+			ExpiresAt:        now.Add(s.jwtCfg.RefreshTTL),
+		}
+		if err := s.sessions.Create(ctx, sess); err != nil {
+			return TokenPair{}, err
+		}
+	} else if sid != "" && s.sessions != nil {
+		// Rotation within the family: keep the session row's view current.
+		_ = s.sessions.Touch(ctx, sid, ip, ua, device.Parse(ua), s.resolveLocation(ctx, ip), time.Now())
+	}
 	access, err := s.jwt.IssueAccess(user.ID, user.Role, user.Email,
-		s.jwtCfg.AccessTTL, user.PwdVersion)
+		s.jwtCfg.AccessTTL, user.PwdVersion, sid)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -926,6 +1509,7 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip,
 		DeviceName:       device.Parse(ua),
 		LocationEstimate: s.resolveLocation(ctx, ip),
 		LastActiveAt:     now,
+		SessionID:        sid,
 	}
 	if err := s.tokens.Create(ctx, rt); err != nil {
 		return TokenPair{}, err
@@ -990,9 +1574,35 @@ func (s *AuthService) maybeNotifyNewIPLogin(ctx context.Context, user *models.Us
 // ----- 10. Session & Device Management -----
 
 // ListSessions returns all active (non-expired, non-revoked) sessions for the
-// authenticated user, as sanitized SessionInfo projections (token hash omitted).
-// Ordered most-recently-active first by the repository.
-func (s *AuthService) ListSessions(ctx context.Context, userID uint) ([]SessionInfo, error) {
+// authenticated user, as sanitized SessionInfo projections. currentSID (the
+// caller's own session, from the access token's sid claim) marks the
+// "this device" row (P1.8). Ordered most-recently-active first by the
+// repository. With no session repo wired (legacy mode) it falls back to the
+// refresh-token rows and marks none as current.
+func (s *AuthService) ListSessions(ctx context.Context, userID uint, currentSID string) ([]SessionInfo, error) {
+	if s.sessions != nil {
+		rows, err := s.sessions.FindActiveByUser(ctx, userID)
+		if err != nil {
+			return nil, fmt.Errorf("list sessions: %w", err)
+		}
+		out := make([]SessionInfo, 0, len(rows))
+		for i := range rows {
+			sess := &rows[i]
+			out = append(out, SessionInfo{
+				ID:               sess.ID,
+				IPAddress:        sess.IPAddress,
+				UserAgent:        sess.UserAgent,
+				DeviceName:       sess.DeviceName,
+				LocationEstimate: sess.LocationEstimate,
+				CreatedAt:        sess.CreatedAt,
+				LastActiveAt:     sess.LastActiveAt,
+				ExpiresAt:        sess.ExpiresAt,
+				IsCurrent:        sess.ID == currentSID,
+			})
+		}
+		return out, nil
+	}
+	// Legacy fallback: refresh-token rows as sessions (P0.3 pre-migration).
 	rows, err := s.tokens.FindActiveByUser(ctx, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
@@ -1001,7 +1611,7 @@ func (s *AuthService) ListSessions(ctx context.Context, userID uint) ([]SessionI
 	for i := range rows {
 		rt := &rows[i]
 		out = append(out, SessionInfo{
-			ID:               rt.ID,
+			ID:               strconv.FormatUint(uint64(rt.ID), 10),
 			IPAddress:        rt.IPAddress,
 			UserAgent:        rt.UserAgent,
 			DeviceName:       rt.DeviceName,
@@ -1014,16 +1624,48 @@ func (s *AuthService) ListSessions(ctx context.Context, userID uint) ([]SessionI
 	return out, nil
 }
 
-// RevokeSession revokes a single session (device) by id, scoped to the caller's
-// userID so one user cannot revoke another user's session (IDOR defense).
-// The device is then instantly blocked from rotating its refresh token.
-func (s *AuthService) RevokeSession(ctx context.Context, id, userID uint, ip string) error {
-	if err := s.tokens.RevokeByID(ctx, id, userID); err != nil {
+// RevokeSession revokes a single session (device) by its UUID, scoped to the
+// caller's userID so one user cannot revoke another user's session (IDOR
+// defense). The whole family dies together: the session row, its
+// refresh-token chain, and — via the sid denylist — its outstanding ACCESS
+// tokens (P0.2/P0.3).
+func (s *AuthService) RevokeSession(ctx context.Context, sessionID string, userID uint, ip string) error {
+	if s.sessions == nil {
+		// Legacy fallback: refresh-token rows as sessions (P0.3 pre-migration).
+		id, err := strconv.ParseUint(sessionID, 10, 64)
+		if err != nil || id > math.MaxUint {
+			return ErrSessionNotFound
+		}
+		if err := s.tokens.RevokeByID(ctx, uint(id), userID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrSessionNotFound
+			}
+			return fmt.Errorf("revoke session: %w", err)
+		}
+		uid := userID
+		s.audits.Record(ctx, &models.AuditLog{
+			UserID: &uid, Event: models.AuditEventSessionRevoked,
+			IPAddress: ip, Success: true,
+		})
+		return nil
+	}
+	sess, err := s.sessions.FindByID(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+	if sess == nil || sess.UserID != userID {
+		return ErrSessionNotFound
+	}
+	if err := s.sessions.RevokeByID(ctx, sessionID, userID); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrSessionNotFound
 		}
 		return fmt.Errorf("revoke session: %w", err)
 	}
+	if err := s.tokens.RevokeBySession(ctx, sessionID); err != nil {
+		return fmt.Errorf("revoke session: revoke family tokens: %w", err)
+	}
+	s.denylistSession(sess)
 	uid := userID
 	s.audits.Record(ctx, &models.AuditLog{
 		UserID: &uid, Event: models.AuditEventSessionRevoked,
@@ -1212,27 +1854,15 @@ func (s *AuthService) consumeSingleUseToken(ctx context.Context, jti string, ttl
 // /64 prefix. Unauthenticated endpoints mint attacker-keyed state; without
 // the collapse, one host cycling addresses inside its /64 makes the store
 // accumulate millions of hour-TTL keys (evicting jti/replay guards or OOMing
-// the in-memory store). IPv4 addresses are used verbatim — the /64 mask is
-// meaningless for them.
+// the in-memory store). The masking lives in netutil.CanonicalIP so the
+// middleware limiter keys on the exact same form (V4 parity).
 func ipCounterKey(prefix, ip string) string {
-	if ip == "" {
-		return prefix + ip
-	}
-	parsed := net.ParseIP(ip)
-	if parsed == nil {
-		return prefix + ip
-	}
-	if v4 := parsed.To4(); v4 != nil {
-		return prefix + v4.String()
-	}
-	if v6 := parsed.To16(); v6 != nil {
-		return prefix + v6.Mask(net.CIDRMask(64, 128)).String()
-	}
-	return prefix + ip
+	return prefix + netutil.CanonicalIP(ip)
 }
 
-// validatePassword enforces a basic complexity policy (length + classes + cap).
-func validatePassword(pw string) error {
+// validatePassword enforces complexity, dictionary checks against username/email,
+// and optional zxcvbn password scoring (P1.7).
+func validatePassword(pw string, minScore int, userInputs ...string) error {
 	if len(pw) < 8 {
 		return ErrPasswordTooWeak
 	}
@@ -1252,6 +1882,28 @@ func validatePassword(pw string) error {
 	if !hasLetter || !hasNumber {
 		return ErrPasswordTooWeak
 	}
+
+	// Reject if password contains username or local-part of email (case-insensitive)
+	pwLower := strings.ToLower(pw)
+	var sanitizedInputs []string
+	for _, input := range userInputs {
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input == "" {
+			continue
+		}
+		sanitizedInputs = append(sanitizedInputs, input)
+		if len(input) >= 3 && strings.Contains(pwLower, input) {
+			return ErrPasswordTooWeak
+		}
+	}
+
+	if minScore > 0 {
+		score := zxcvbn.PasswordStrength(pw, sanitizedInputs).Score
+		if score < minScore {
+			return ErrPasswordTooWeak
+		}
+	}
+
 	return nil
 }
 
@@ -1301,7 +1953,7 @@ func (s *AuthService) IssuePasskeyTokenPair(ctx context.Context, user *models.Us
 	if !user.IsActive {
 		return TokenPair{}, UserProfile{}, ErrAccountDisabled
 	}
-	pair, err := s.issueTokenPair(ctx, user, ip, ua)
+	pair, err := s.issueTokenPair(ctx, user, ip, ua, "")
 	if err != nil {
 		return TokenPair{}, UserProfile{}, err
 	}

@@ -1017,3 +1017,87 @@ func TestTOTP_SealedUnrecoverable_MappedError(t *testing.T) {
 		t.Fatalf("want ErrTOTPUnrecoverable, got %v", err)
 	}
 }
+
+func TestTOTPService_Disable_P11(t *testing.T) {
+	repo := newMockTOTPRepo()
+	users := newMockUserRepo()
+	notify := &mockNotifier{}
+	u := &models.User{
+		ID:       1,
+		Email:    "alice@example.com",
+		Password: "hashed-password",
+	}
+	h, _ := hash.HashPassword("Password123")
+	u.Password = h
+	_ = users.Create(context.Background(), u)
+
+	svc := newTestTOTPService(t, repo, nil, nil)
+	svc.users = users
+	svc.notify = notify
+
+	// 1. Enable and verify device
+	_, codes := enableAndVerify(t, svc, 1)
+	if len(codes) == 0 {
+		t.Fatal("expected recovery codes on enable")
+	}
+	d, _ := repo.FindByUserID(context.Background(), 1)
+	if d == nil || !d.Enabled {
+		t.Fatal("expected device enabled")
+	}
+
+	// 2. Disable with invalid password should fail
+	err := svc.Disable(context.Background(), 1, "", "WrongPassword", codes[0], "127.0.0.1")
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
+	}
+
+	// 3. Disable with bad code should fail
+	err = svc.Disable(context.Background(), 1, "", "Password123", "bad-code", "127.0.0.1")
+	if !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("expected ErrInvalidCode, got %v", err)
+	}
+
+	// 4. Disable with valid password + recovery code should succeed
+	err = svc.Disable(context.Background(), 1, "", "Password123", codes[0], "127.0.0.1")
+	if err != nil {
+		t.Fatalf("disable failed: %v", err)
+	}
+
+	// Verify device is disabled and codes are purged
+	d, _ = repo.FindByUserID(context.Background(), 1)
+	if d.Enabled {
+		t.Fatal("device should be disabled")
+	}
+	activeCodes, _ := repo.ActiveRecoveryCodes(context.Background(), 1)
+	if len(activeCodes) != 0 {
+		t.Fatalf("expected 0 recovery codes after disable, got %d", len(activeCodes))
+	}
+	if notify.alertCount() != 1 {
+		t.Fatalf("expected 1 security alert on disable, got %d", notify.alertCount())
+	}
+}
+
+func TestTOTPService_GetMFAMethods_P15(t *testing.T) {
+	repo := newMockTOTPRepo()
+	svc := newTestTOTPService(t, repo, nil, nil)
+
+	// Initially no MFA
+	res, err := svc.GetMFAMethods(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TOTPEnabled || res.DefaultMethod != "none" {
+		t.Fatalf("expected no MFA, got %+v", res)
+	}
+
+	// Enable TOTP
+	_, codes := enableAndVerify(t, svc, 1)
+	res, err = svc.GetMFAMethods(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.TOTPEnabled || res.DefaultMethod != "totp" || res.RecoveryCodesRemaining != len(codes) {
+		t.Fatalf("expected TOTP enabled with default totp, got %+v", res)
+	}
+}
+

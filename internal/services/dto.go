@@ -89,10 +89,10 @@ func FromUser(u *models.User) UserProfile {
 	}
 }
 
-// SessionInfo is the sanitized projection of one active refresh-token row for
-// the "your devices / sessions" list. It deliberately omits the token hash.
+// SessionInfo is the sanitized projection of one active session/device row
+// for the "your devices / sessions" list (P0.3 / P1.8). ID is the session UUID.
 type SessionInfo struct {
-	ID               uint      `json:"id"`
+	ID               string    `json:"id"`
 	IPAddress        string    `json:"ipAddress"`
 	UserAgent        string    `json:"userAgent"`
 	DeviceName       string    `json:"deviceName"`
@@ -100,4 +100,34 @@ type SessionInfo struct {
 	CreatedAt        time.Time `json:"createdAt"`
 	LastActiveAt     time.Time `json:"lastActiveAt"`
 	ExpiresAt        time.Time `json:"expiresAt"`
+	IsCurrent        bool      `json:"isCurrent"`
 }
+
+// MFAMethodsResult is the aggregated MFA status for GET /api/v1/auth/mfa/methods (P1.5).
+type MFAMethodsResult struct {
+	TOTPEnabled            bool   `json:"totpEnabled"`
+	PasskeysCount          int    `json:"passkeysCount"`
+	RecoveryCodesRemaining int    `json:"recoveryCodesRemaining"`
+	DefaultMethod          string `json:"defaultMethod"`
+}
+
+// ChangeEmailRequestInput is the input for POST /api/v1/auth/change-email/request (P1.2).
+type ChangeEmailRequestInput struct {
+	Password string `json:"password" binding:"required"`
+	NewEmail string `json:"newEmail" binding:"required,email"`
+}
+
+// ChangeEmailConfirmInput is the input for POST /api/v1/auth/change-email/confirm (P1.2).
+type ChangeEmailConfirmInput struct {
+	Token string `json:"token" binding:"required"`
+}
+
+// UserAuditLogItem is the user-facing sanitized audit entry for GET /api/v1/auth/me/audit-log (P1.4).
+type UserAuditLogItem struct {
+	ID        uint      `json:"id"`
+	Event     string    `json:"event"`
+	IPAddress string    `json:"ipAddress"`
+	Success   bool      `json:"success"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+

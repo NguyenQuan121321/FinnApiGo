@@ -1,4 +1,33 @@
 definitions:
+  github_com_finnapigo_finnapigo_internal_models.AuditLog:
+    properties:
+      createdAt:
+        type: string
+      detail:
+        type: string
+      email:
+        description: identity hint pre-login
+        type: string
+      event:
+        type: string
+      id:
+        type: integer
+      ipAddress:
+        type: string
+      prevHash:
+        description: P2.6 hash-chain
+        type: string
+      recordHash:
+        description: P2.6 tamper-evident HMAC
+        type: string
+      success:
+        type: boolean
+      tenantId:
+        type: string
+      userId:
+        description: nil if pre-auth
+        type: integer
+    type: object
   github_com_finnapigo_finnapigo_internal_models.PasskeyCredential:
     properties:
       attestationType:
@@ -20,6 +49,23 @@ definitions:
       userId:
         type: integer
     type: object
+  github_com_finnapigo_finnapigo_internal_services.ChangeEmailConfirmInput:
+    properties:
+      token:
+        type: string
+    required:
+    - token
+    type: object
+  github_com_finnapigo_finnapigo_internal_services.ChangeEmailRequestInput:
+    properties:
+      newEmail:
+        type: string
+      password:
+        type: string
+    required:
+    - newEmail
+    - password
+    type: object
   internal_handlers.ChangePasswordRequest:
     properties:
       newPassword:
@@ -32,6 +78,16 @@ definitions:
     required:
     - newPassword
     - oldPassword
+    type: object
+  internal_handlers.DeactivateRequest:
+    properties:
+      password:
+        type: string
+    type: object
+  internal_handlers.EraseMeRequest:
+    properties:
+      password:
+        type: string
     type: object
   internal_handlers.ForgotPasswordRequest:
     properties:
@@ -155,12 +211,80 @@ definitions:
     required:
     - code
     type: object
+  internal_handlers.TOTPDisableRequest:
+    properties:
+      code:
+        type: string
+      password:
+        type: string
+    type: object
   internal_handlers.VerifyEmailRequest:
     properties:
       token:
         type: string
     required:
     - token
+    type: object
+  internal_handlers.createWebhookRequest:
+    properties:
+      events:
+        type: string
+      url:
+        type: string
+    required:
+    - events
+    - url
+    type: object
+  internal_handlers.lockUserRequest:
+    properties:
+      durationSeconds:
+        example: 3600
+        type: integer
+    type: object
+  swagger.AdminSessionsData:
+    properties:
+      sessions:
+        items:
+          $ref: '#/definitions/swagger.SessionInfo'
+        type: array
+    type: object
+  swagger.AdminSessionsEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.AdminSessionsData'
+      message:
+        example: tenant sessions retrieved
+        type: string
+    type: object
+  swagger.AdminUsersData:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/swagger.UserProfile'
+        type: array
+      limit:
+        example: 20
+        type: integer
+      page:
+        example: 1
+        type: integer
+      total:
+        example: 42
+        type: integer
+    type: object
+  swagger.AdminUsersEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.AdminUsersData'
+      message:
+        example: users retrieved
+        type: string
     type: object
   swagger.ErrorEnvelope:
     properties:
@@ -217,6 +341,32 @@ definitions:
         $ref: '#/definitions/swagger.LoginData'
       message:
         example: login successful
+        type: string
+    type: object
+  swagger.MFAMethodsData:
+    properties:
+      defaultMethod:
+        example: totp
+        type: string
+      passkeysCount:
+        example: 1
+        type: integer
+      recoveryCodesRemaining:
+        example: 8
+        type: integer
+      totpEnabled:
+        example: true
+        type: boolean
+    type: object
+  swagger.MFAMethodsEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.MFAMethodsData'
+      message:
+        example: mfa methods
         type: string
     type: object
   swagger.NullDataEnvelope:
@@ -362,11 +512,14 @@ definitions:
         example: "2026-01-22T10:30:00Z"
         type: string
       id:
-        example: 7
-        type: integer
+        example: 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+        type: string
       ipAddress:
         example: 192.168.1.100
         type: string
+      isCurrent:
+        example: true
+        type: boolean
       lastActiveAt:
         example: "2026-01-15T11:00:00Z"
         type: string
@@ -438,6 +591,69 @@ definitions:
         example: token refreshed
         type: string
     type: object
+  swagger.TrustedDeviceInfoData:
+    properties:
+      deviceName:
+        example: Chrome MacBook Pro
+        type: string
+      expiresAt:
+        example: "2026-10-03T18:00:00Z"
+        type: string
+      id:
+        example: 1
+        type: integer
+      ipAddress:
+        example: 192.168.1.50
+        type: string
+      lastUsedAt:
+        example: "2026-09-03T18:00:00Z"
+        type: string
+    type: object
+  swagger.TrustedDevicesListData:
+    properties:
+      devices:
+        items:
+          $ref: '#/definitions/swagger.TrustedDeviceInfoData'
+        type: array
+    type: object
+  swagger.TrustedDevicesListEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.TrustedDevicesListData'
+      message:
+        example: trusted devices retrieved
+        type: string
+    type: object
+  swagger.UserAuditLogData:
+    properties:
+      items:
+        items:
+          $ref: '#/definitions/github_com_finnapigo_finnapigo_internal_models.AuditLog'
+        type: array
+      limit:
+        example: 20
+        type: integer
+      page:
+        example: 1
+        type: integer
+      total:
+        example: 15
+        type: integer
+    type: object
+  swagger.UserAuditLogEnvelope:
+    properties:
+      code:
+        example: 200
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.UserAuditLogData'
+      message:
+        example: audit log
+        type: string
+    type: object
   swagger.UserProfile:
     properties:
       createdAt:
@@ -476,6 +692,32 @@ definitions:
         example: profile fetched
         type: string
     type: object
+  swagger.WebhookEndpointData:
+    properties:
+      events:
+        example: user.created,user.locked
+        type: string
+      id:
+        example: wh_12345678
+        type: string
+      secret:
+        example: sec_abcdef123456
+        type: string
+      url:
+        example: https://example.com/webhook
+        type: string
+    type: object
+  swagger.WebhookEndpointEnvelope:
+    properties:
+      code:
+        example: 201
+        type: integer
+      data:
+        $ref: '#/definitions/swagger.WebhookEndpointData'
+      message:
+        example: webhook endpoint created
+        type: string
+    type: object
 info:
   contact:
     name: FinnApiGo
@@ -486,6 +728,320 @@ info:
   title: FinnApiGo Auth API
   version: 1.0.0
 paths:
+  /api/v1/admin/audit-log/export:
+    get:
+      description: Exports tenant security audit logs in CSV or NDJSON format.
+      parameters:
+      - description: Output format (csv or ndjson)
+        in: query
+        name: format
+        type: string
+      produces:
+      - text/csv
+      - application/x-ndjson
+      responses:
+        "200":
+          description: Audit export data stream
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Export audit logs
+      tags:
+      - Admin
+  /api/v1/admin/sessions:
+    get:
+      description: Lists all active user sessions within the tenant.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.AdminSessionsEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List tenant sessions
+      tags:
+      - Admin
+  /api/v1/admin/users:
+    get:
+      description: Returns a paginated list of users within the current tenant.
+      parameters:
+      - description: Page number
+        in: query
+        name: page
+        type: integer
+      - description: Page limit
+        in: query
+        name: limit
+        type: integer
+      - description: Search term
+        in: query
+        name: search
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.AdminUsersEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List tenant users
+      tags:
+      - Admin
+  /api/v1/admin/users/{id}/force-logout:
+    post:
+      description: Revokes all active sessions, refresh tokens, and access tokens
+        for a user.
+      parameters:
+      - description: Target user ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Force logout user
+      tags:
+      - Admin
+  /api/v1/admin/users/{id}/lock:
+    post:
+      consumes:
+      - application/json
+      description: Locks a user account for a specified duration or indefinitely.
+      parameters:
+      - description: Target user ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Lock duration parameters
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.lockUserRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Lock user account
+      tags:
+      - Admin
+  /api/v1/admin/users/{id}/unlock:
+    post:
+      description: Unlocks a user account and resets failed login counters.
+      parameters:
+      - description: Target user ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Unlock user account
+      tags:
+      - Admin
+  /api/v1/admin/webhooks:
+    post:
+      consumes:
+      - application/json
+      description: Registers an outbound webhook subscription with HMAC-SHA256 signature
+        support.
+      parameters:
+      - description: Webhook endpoint parameters
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handlers.createWebhookRequest'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/swagger.WebhookEndpointEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Register webhook endpoint
+      tags:
+      - Webhooks
+  /api/v1/auth/change-email/confirm:
+    post:
+      consumes:
+      - application/json
+      description: Confirms email change using the single-use token from the verification
+        email. Inactive sessions are revoked and password version bumped.
+      parameters:
+      - description: Confirmation token
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_finnapigo_finnapigo_internal_services.ChangeEmailConfirmInput'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      summary: Confirm email change
+      tags:
+      - Auth
+  /api/v1/auth/change-email/request:
+    post:
+      consumes:
+      - application/json
+      description: Stages an email change request. Verifies password, checks disposable
+        and colliding domains, sends verification to the new email and security alert
+        to current email.
+      parameters:
+      - description: Current password and new email
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_finnapigo_finnapigo_internal_services.ChangeEmailRequestInput'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "409":
+          description: Conflict
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "422":
+          description: Unprocessable Entity
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Request email change
+      tags:
+      - Auth
   /api/v1/auth/change-password:
     post:
       consumes:
@@ -521,6 +1077,39 @@ paths:
       security:
       - BearerAuth: []
       summary: Change the caller's password
+      tags:
+      - Auth
+  /api/v1/auth/deactivate:
+    post:
+      consumes:
+      - application/json
+      description: Deactivates caller account (is_active=false), revokes all sessions
+        and denylists caller's access token. Requires either X-Sudo-Token header or
+        password.
+      parameters:
+      - description: Account password (optional if X-Sudo-Token provided)
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/internal_handlers.DeactivateRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Deactivate account
       tags:
       - Auth
   /api/v1/auth/forgot-password:
@@ -724,6 +1313,38 @@ paths:
       tags:
       - Auth
   /api/v1/auth/me:
+    delete:
+      consumes:
+      - application/json
+      description: Scrambles user credentials, deletes credentials (TOTP, passkeys,
+        OAuth), anonymizes audit records, revokes all sessions. Requires either X-Sudo-Token
+        header or password.
+      parameters:
+      - description: Account password (optional if X-Sudo-Token provided)
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/internal_handlers.EraseMeRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Permanently erase account (GDPR)
+      tags:
+      - Auth
     get:
       description: Returns the authenticated user's sanitized profile.
       produces:
@@ -744,6 +1365,34 @@ paths:
       security:
       - BearerAuth: []
       summary: Get the caller's profile
+      tags:
+      - Auth
+  /api/v1/auth/me/audit-log:
+    get:
+      description: Returns paginated security event log for the authenticated user.
+      parameters:
+      - description: Page number (default 1)
+        in: query
+        name: page
+        type: integer
+      - description: Items per page (default 20, max 100)
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.UserAuditLogEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Get personal audit log
       tags:
       - Auth
   /api/v1/auth/mfa/login-verify:
@@ -785,6 +1434,26 @@ paths:
       summary: Complete an MFA-pending login
       tags:
       - Auth
+  /api/v1/auth/mfa/methods:
+    get:
+      description: Aggregates active MFA methods, remaining recovery codes, and default
+        method for the caller.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.MFAMethodsEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List MFA methods
+      tags:
+      - MFA
   /api/v1/auth/mfa/passkey/authenticate/challenge:
     post:
       description: Issues the PublicKeyCredentialRequestOptions for step-up login
@@ -978,6 +1647,43 @@ paths:
       summary: Revoke a passkey
       tags:
       - MFA
+  /api/v1/auth/mfa/totp/disable:
+    post:
+      consumes:
+      - application/json
+      description: Disables TOTP authentication for the caller. Requires either an
+        active sudo token (X-Sudo-Token) or current password + (TOTP code or recovery
+        code).
+      parameters:
+      - description: Password and TOTP/recovery code (optional if X-Sudo-Token provided)
+        in: body
+        name: body
+        schema:
+          $ref: '#/definitions/internal_handlers.TOTPDisableRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "403":
+          description: Forbidden
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Disable TOTP
+      tags:
+      - MFA
   /api/v1/auth/mfa/totp/enable:
     post:
       consumes:
@@ -1151,6 +1857,41 @@ paths:
       summary: Confirm TOTP enrollment
       tags:
       - MFA
+  /api/v1/auth/oauth/{provider}:
+    delete:
+      description: Disconnects a third-party OAuth provider from the account. Refuses
+        to unlink if it is the user's only remaining authentication method without
+        a usable password.
+      parameters:
+      - description: Provider name (e.g. google)
+        in: path
+        name: provider
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Unlink an OAuth provider
+      tags:
+      - OAuth
   /api/v1/auth/refresh-token:
     post:
       consumes:
@@ -1323,11 +2064,11 @@ paths:
       description: Revokes a single session by ID, scoped to the caller. The target
         device can no longer rotate its refresh token.
       parameters:
-      - description: Session ID
+      - description: Session ID (UUID)
         in: path
         name: id
         required: true
-        type: integer
+        type: string
       produces:
       - application/json
       responses:
@@ -1394,6 +2135,54 @@ paths:
       summary: Set a first password (Google-OAuth-only accounts)
       tags:
       - Auth
+  /api/v1/auth/trusted-devices:
+    get:
+      description: Lists caller's active trusted devices eligible for 30-day MFA bypass.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.TrustedDevicesListEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: List trusted devices
+      tags:
+      - TrustedDevices
+  /api/v1/auth/trusted-devices/{id}:
+    delete:
+      description: Revokes MFA bypass trust for a specific device.
+      parameters:
+      - description: Device ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/swagger.NullDataEnvelope'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/swagger.ErrorEnvelope'
+      security:
+      - BearerAuth: []
+      summary: Revoke trusted device
+      tags:
+      - TrustedDevices
   /api/v1/auth/verify-email:
     post:
       consumes:

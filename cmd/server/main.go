@@ -83,9 +83,10 @@ func run() error {
 	if msg := auditRetentionWarning(cfg); msg != "" {
 		slog.Warn(msg)
 	}
-	// X1 — release mode must acknowledge the metrics exposure policy.
-	if cfg.Server.MetricsAddr == "" && cfg.Server.GinMode == gin.ReleaseMode {
-		slog.Warn("metrics: METRICS_ADDR is unset in release mode — /metrics is served on the PUBLIC listener; set METRICS_ADDR to an internal address (e.g. 127.0.0.1:9090)")
+	// X1 / P0.6 — release mode metrics policy: either bind to dedicated METRICS_ADDR
+	// or require METRICS_TOKEN bearer authentication; unauthenticated public metrics in release fail boot.
+	if err := validateMetricsPolicy(cfg); err != nil {
+		return err
 	}
 
 	// --- Database ---
@@ -103,7 +104,7 @@ func run() error {
 	if cfg.DB.MigrateAuto {
 		slog.Warn("MIGRATE_AUTO=true — running GORM AutoMigrate at boot (dev escape hatch; production must use cmd/migrate)")
 		if err := db.AutoMigrate(
-			&models.User{}, &models.RefreshToken{},
+			&models.User{}, &models.RefreshToken{}, &models.Session{},
 			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
 			&models.OAuthIdentity{}, &models.PasskeyCredential{},
 		); err != nil {
@@ -114,6 +115,7 @@ func run() error {
 	// --- Repositories ---
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
+	sessionRepo := repositories.NewSessionRepository(db)
 	baseAuditRepo := repositories.NewAuditRepository(db)
 	// auditRepo buffers audit writes on a background worker; it is closed
 	// explicitly in the shutdown sequence (NOT deferred) so the flush is
@@ -123,6 +125,7 @@ func run() error {
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
 	totpRepo := repositories.NewTOTPRepository(db)
 	oauthIdentityRepo := repositories.NewOAuthIdentityRepository(db)
+	passkeyRepo := repositories.NewPasskeyRepository(db)
 
 	// --- Store (in-memory default; Redis when REDIS_URL set) ---
 	// §1.3/§7 — rate-limit counters, velocity windows, and jti tracking are
@@ -188,14 +191,27 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("recovery-code encryptor: %w", err)
 	}
-	totpSvc := services.NewTOTPService(totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEnc, jwtMgr)
+	totpSvc := services.NewTOTPService(
+		totpRepo, kvStore, auditRepo, cfg.JWT.Issuer, cfg.Auth, recoveryEnc, jwtMgr,
+		services.WithTOTPUserRepo(userRepo),
+		services.WithTOTPNotifier(notifier),
+		services.WithTOTPPasskeys(passkeyRepo),
+	)
 	// NIST 800-63B breached-password screening (fail-open, k-anonymity):
 	// only a 5-hex-char SHA-1 prefix of the password leaves the process.
 	var authOpts []services.AuthServiceOption
+	authOpts = append(authOpts, services.WithSessionRepo(sessionRepo))
 	if cfg.Security.BreachedPasswordCheck {
 		authOpts = append(authOpts, services.WithBreachedPasswordChecker(
 			services.NewBreachedPasswordChecker("", cfg.Security.BreachedPasswordTimeout)))
 	}
+	if cfg.Security.MinPasswordScore > 0 {
+		authOpts = append(authOpts, services.WithMinPasswordScore(cfg.Security.MinPasswordScore))
+	}
+	authOpts = append(authOpts,
+		services.WithAuthPasskeys(passkeyRepo),
+		services.WithAuthOAuthIdents(oauthIdentityRepo),
+	)
 	authSvc := services.NewAuthService(
 		userRepo, tokenRepo, usedTokenRepo, auditRepo, kvStore,
 		jwtMgr, cfg.Auth, cfg.RateLimit, cfg.JWT, notifier, captchaVerifier, nil,
@@ -207,7 +223,12 @@ func run() error {
 	var oauthHandler *handlers.OAuthHandler
 	if gClient := services.NewGoogleOAuthClient(cfg.GoogleOAuth.ClientID, cfg.GoogleOAuth.ClientSecret, cfg.GoogleOAuth.RedirectURL); gClient != nil {
 		gVerifier := services.NewProductionGoogleVerifier(cfg.GoogleOAuth.ClientID)
-		oauthSvc := services.NewOAuthService(userRepo, oauthIdentityRepo, kvStore, authSvc, gVerifier, gClient)
+		oauthSvc := services.NewOAuthService(
+			userRepo, oauthIdentityRepo, kvStore, authSvc, gVerifier, gClient,
+			services.WithOAuthNotifier(notifier),
+			services.WithOAuthAudits(auditRepo),
+			services.WithOAuthPasskeys(passkeyRepo),
+		)
 		oauthHandler = handlers.NewOAuthHandler(oauthSvc)
 		slog.Info("oauth: Google sign-in enabled")
 	} else {
@@ -218,7 +239,7 @@ func run() error {
 	var passkeyHandler *handlers.PasskeyHandler
 	if cfg.WebAuthn.RPID != "" {
 		passkeySvc, err := services.NewPasskeyService(
-			repositories.NewPasskeyRepository(db), userRepo, auditRepo, kvStore,
+			passkeyRepo, userRepo, auditRepo, kvStore,
 			authSvc, services.PasskeyConfig{
 				RPDisplayName:         cfg.WebAuthn.RPDisplayName,
 				RPID:                  cfg.WebAuthn.RPID,
@@ -240,17 +261,35 @@ func run() error {
 	mfaHandler := handlers.NewMFAHandler(totpSvc, jwtMgr, cfg.JWT.SudoTTL)
 	sessionHandler := handlers.NewSessionHandler(authSvc)
 
+	// --- Enterprise Repositories & Services (Phase 2) ---
+	rbacRepo := repositories.NewRBACRepository(db)
+	trustedDeviceRepo := repositories.NewTrustedDeviceRepository(db)
+	trustedDeviceSvc := services.NewTrustedDeviceService(trustedDeviceRepo)
+	trustedDeviceHandler := handlers.NewTrustedDeviceHandler(trustedDeviceSvc)
+
+	webhookRepo := repositories.NewWebhookRepository(db)
+	webhookSvc := services.NewWebhookService(webhookRepo)
+	webhookHandler := handlers.NewWebhookHandler(webhookSvc)
+
+	adminSvc := services.NewAdminService(userRepo, sessionRepo, tokenRepo, auditRepo, kvStore)
+	adminHandler := handlers.NewAdminHandler(adminSvc)
+
 	// --- Rate limiter ---
 	rateLimiter := middleware.NewRateLimiter(cfg.RateLimit.RPS, cfg.RateLimit.Burst, cfg.Security.RateLimiterEntryTTL, kvStore)
 	defer rateLimiter.Close()
 
 	// --- Internal-only endpoints (X1/X2): metrics + pprof off the public API ---
 	metricsH := metrics.Handler(func() float64 { return float64(auditRepo.Buffered()) })
-	// X1 — when METRICS_ADDR is set, metrics leave the public router and are
-	// served on the dedicated internal listener below.
-	publicMetricsHandler := metricsH
-	if cfg.Server.MetricsAddr != "" {
-		publicMetricsHandler = nil
+	// X1 / P0.6 — when METRICS_ADDR is set, metrics leave the public router and are
+	// served on the dedicated internal listener below. If served on public router,
+	// wrap with BearerAuth when METRICS_TOKEN is configured.
+	var publicMetricsHandler http.Handler
+	if cfg.Server.MetricsAddr == "" {
+		if cfg.Server.MetricsToken != "" {
+			publicMetricsHandler = metrics.BearerAuth(cfg.Server.MetricsToken, metricsH)
+		} else {
+			publicMetricsHandler = metricsH
+		}
 	}
 	defer startInternalServers(cfg.Server.MetricsAddr, cfg.Server.PProfAddr, cfg.Server.MetricsToken, metricsH)()
 
@@ -276,6 +315,11 @@ func run() error {
 		Tracing:             true,
 		CORSAllowedOrigins:  cfg.Server.CORSAllowedOrigins,
 		SwaggerEnabled:      cfg.Server.SwaggerEnabled,
+		Store:               kvStore,
+		Admin:               adminHandler,
+		TrustedDevice:       trustedDeviceHandler,
+		Webhook:             webhookHandler,
+		RBACChecker:         rbacRepo,
 	})
 
 	// --- HTTP server with graceful shutdown ---
@@ -380,6 +424,15 @@ func auditRetentionWarning(cfg *config.Config) string {
 		return ""
 	}
 	return "audit retention: AUDIT_RETENTION_DAYS is unset in release mode — audit rows (PII: email, IP) are kept forever; set a retention window (see README PII/retention policy)"
+}
+
+// validateMetricsPolicy enforces P0.6 / X1: in release mode, either METRICS_ADDR
+// or METRICS_TOKEN must be set to prevent exposing unauthenticated metrics publicly.
+func validateMetricsPolicy(cfg *config.Config) error {
+	if cfg.Server.GinMode == gin.ReleaseMode && cfg.Server.MetricsAddr == "" && cfg.Server.MetricsToken == "" {
+		return errors.New("metrics: in release mode, either METRICS_ADDR (internal listener) or METRICS_TOKEN (bearer auth) must be set to prevent exposing unauthenticated metrics publicly")
+	}
+	return nil
 }
 
 // startJobs runs the token/used-token/audit-retention purge on a cadence

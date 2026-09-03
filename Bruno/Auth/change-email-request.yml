@@ -1,0 +1,25 @@
+info:
+  name: change-email-request
+  type: http
+  seq: 18
+
+http:
+  method: POST
+  url: "{{baseUrl}}/api/v1/auth/change-email/request"
+  body:
+    type: json
+    data: |-
+      {
+        "password": "Password123",
+        "newEmail": "newemail@example.com"
+      }
+  auth:
+    type: bearer
+    token: "{{accessToken}}"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: true

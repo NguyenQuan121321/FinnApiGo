@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"golang.org/x/time/rate"
 
+	"github.com/finnapigo/finnapigo/internal/netutil"
 	"github.com/finnapigo/finnapigo/internal/response"
 )
 
@@ -83,7 +84,11 @@ func (rl *RateLimiter) get(ip string) *rate.Limiter {
 // responds 429 Too Many Requests.
 func (rl *RateLimiter) Handler() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ip := c.ClientIP()
+		// V4 — key on the /64-collapsed IPv6 form (parity with the
+		// service-layer counters): without the collapse, one host cycling
+		// addresses inside its /64 both bypasses the limit and bloats the
+		// store/local map with distinct keys per address.
+		ip := netutil.CanonicalIP(c.ClientIP())
 		if rl.shared != nil {
 			// Shared counter path. IncrBy failing (store outage) returns 0,
 			// which falls through to the process-local token bucket below —

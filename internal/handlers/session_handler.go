@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/response"
 	"github.com/finnapigo/finnapigo/internal/services"
 )
@@ -15,8 +16,8 @@ import (
 // Declared locally (like the other handler interfaces) so the handler can be
 // unit-tested with a fake, decoupled from the concrete service.
 type SessionService interface {
-	ListSessions(ctx context.Context, userID uint) ([]services.SessionInfo, error)
-	RevokeSession(ctx context.Context, id, userID uint, ip string) error
+	ListSessions(ctx context.Context, userID uint, currentSID string) ([]services.SessionInfo, error)
+	RevokeSession(ctx context.Context, sessionID string, userID uint, ip string) error
 }
 
 // SessionHandler exposes the session/device-management endpoints under
@@ -49,7 +50,8 @@ func (h *SessionHandler) List(c *gin.Context) {
 		response.Respond(c, http.StatusUnauthorized, "authentication required", nil)
 		return
 	}
-	sessions, err := h.svc.ListSessions(c.Request.Context(), uid)
+	currentSID := c.GetString(middleware.CtxSID)
+	sessions, err := h.svc.ListSessions(c.Request.Context(), uid, currentSID)
 	if err != nil {
 		respondError(c, err)
 		return
@@ -64,7 +66,7 @@ func (h *SessionHandler) List(c *gin.Context) {
 //	@Tags         Sessions
 //	@Security     BearerAuth
 //	@Produce      json
-//	@Param        id  path  int  true  "Session ID"
+//	@Param        id  path  string  true  "Session ID (UUID)"
 //	@Success      200  {object}  swagger.NullDataEnvelope
 //	@Failure      400  {object}  swagger.ErrorEnvelope
 //	@Failure      401  {object}  swagger.ErrorEnvelope
@@ -91,29 +93,12 @@ func (h *SessionHandler) Revoke(c *gin.Context) {
 	response.Respond(c, http.StatusOK, "session revoked", nil)
 }
 
-// parseSessionID reads the :id path param as an unsigned int. Returns
-// (0, false) on missing/non-numeric/oversized input so the caller can emit a
-// clean 400. Manual parsing (no strconv) keeps this allocation-free on the
-// hot path.
-func parseSessionID(c *gin.Context) (uint, bool) {
+// parseSessionID reads the :id path param as a string (UUID or legacy numeric ID).
+// Returns ("", false) on empty or oversized input so the caller can emit a clean 400.
+func parseSessionID(c *gin.Context) (string, bool) {
 	raw := strings.TrimSpace(c.Param("id"))
-	if raw == "" {
-		return 0, false
+	if raw == "" || len(raw) > 64 {
+		return "", false
 	}
-	var n uint64
-	for _, r := range raw {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		// Overflow guard: reject anything that cannot fit in 64 bits — real
-		// autoincrement session ids never approach this magnitude.
-		if n > (1<<63)/10 {
-			return 0, false
-		}
-		n = n*10 + uint64(r-'0')
-	}
-	if n == 0 || n > 1<<63 {
-		return 0, false
-	}
-	return uint(n), true
+	return raw, true
 }
