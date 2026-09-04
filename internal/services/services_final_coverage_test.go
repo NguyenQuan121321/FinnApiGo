@@ -80,7 +80,7 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 
 	// 1. Lock contention on Enable
 	memStore.SetNX(fmt.Sprintf("totp:rotatelock:%d", u.ID), "1", time.Minute)
-	if _, _, err := svc.Enable(ctx, u.ID, u.Email, ""); err != ErrRateLimited {
+	if _, _, err := svc.Enable(ctx, u.ID, u.Email, ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited when rotation lock held, got %v", err)
 	}
 	memStore.Delete(fmt.Sprintf("totp:rotatelock:%d", u.ID))
@@ -106,21 +106,21 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 	_ = totpRepo.Upsert(ctx, d)
 
 	// No sudo token
-	if _, _, err := svc.Enable(ctx, u.ID, u.Email, ""); err != ErrSudoRequired {
+	if _, _, err := svc.Enable(ctx, u.ID, u.Email, ""); !errors.Is(err, ErrSudoRequired) {
 		t.Fatalf("expected ErrSudoRequired with no token, got %v", err)
 	}
 	// Bad token string
-	if _, _, err := svc.Enable(ctx, u.ID, u.Email, "invalid.token"); err != ErrSudoRequired {
+	if _, _, err := svc.Enable(ctx, u.ID, u.Email, "invalid.token"); !errors.Is(err, ErrSudoRequired) {
 		t.Fatalf("expected ErrSudoRequired with invalid token, got %v", err)
 	}
 	// Wrong token type (e.g. Access token)
 	accTok, _ := jwtMgr.Issue(u.ID, "user", u.Email, jwt.TokenTypeAccess, time.Hour)
-	if _, _, err := svc.Enable(ctx, u.ID, u.Email, accTok); err != ErrSudoRequired {
+	if _, _, err := svc.Enable(ctx, u.ID, u.Email, accTok); !errors.Is(err, ErrSudoRequired) {
 		t.Fatalf("expected ErrSudoRequired with access token, got %v", err)
 	}
 	// Wrong user sudo token
 	wrongSudo, _ := jwtMgr.Issue(u.ID+99, "user", "other@ex.com", jwt.TokenTypeSudo, time.Hour)
-	if _, _, err := svc.Enable(ctx, u.ID, u.Email, wrongSudo); err != ErrSudoRequired {
+	if _, _, err := svc.Enable(ctx, u.ID, u.Email, wrongSudo); !errors.Is(err, ErrSudoRequired) {
 		t.Fatalf("expected ErrSudoRequired with wrong user sudo, got %v", err)
 	}
 	// Valid sudo token
@@ -133,20 +133,20 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 	// 4. VerifyEnable branches
 	// Brute-force lockout
 	memStore.IncrBy(fmt.Sprintf("totp:fail:%d", u.ID), 5, time.Minute)
-	if _, err := svc.VerifyEnable(ctx, u.ID, "123456"); err != ErrRateLimited {
+	if _, err := svc.VerifyEnable(ctx, u.ID, "123456"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited when brute-force exceeded, got %v", err)
 	}
 	memStore.Delete(fmt.Sprintf("totp:fail:%d", u.ID))
 
 	// Lock contention on VerifyEnable
 	memStore.SetNX(fmt.Sprintf("totp:rotatelock:%d", u.ID), "1", time.Minute)
-	if _, err := svc.VerifyEnable(ctx, u.ID, "123456"); err != ErrRateLimited {
+	if _, err := svc.VerifyEnable(ctx, u.ID, "123456"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited when rotation lock held, got %v", err)
 	}
 	memStore.Delete(fmt.Sprintf("totp:rotatelock:%d", u.ID))
 
 	// Missing device
-	if _, err := svc.VerifyEnable(ctx, 99999, "123456"); err != ErrInvalidCode {
+	if _, err := svc.VerifyEnable(ctx, 99999, "123456"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for missing device, got %v", err)
 	}
 
@@ -155,7 +155,7 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 	dConfirming.Enabled = true
 	dConfirming.PendingSecretEncrypted = ""
 	_ = totpRepo.Upsert(ctx, dConfirming)
-	if _, err := svc.VerifyEnable(ctx, u.ID, "123456"); err != ErrInvalidInput {
+	if _, err := svc.VerifyEnable(ctx, u.ID, "123456"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for enabled device without pending secret, got %v", err)
 	}
 
@@ -170,7 +170,7 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 	sealedNew, _ := enc.Encrypt(newSec)
 	dConfirming.PendingSecretEncrypted = sealedNew
 	_ = totpRepo.Upsert(ctx, dConfirming)
-	if _, err := svc.VerifyEnable(ctx, u.ID, "000000"); err != ErrInvalidCode {
+	if _, err := svc.VerifyEnable(ctx, u.ID, "000000"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for bad code, got %v", err)
 	}
 
@@ -183,7 +183,7 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 
 	// 5. ViewRecoveryCodes branches
 	// Bad TOTP code
-	if _, err := svc.ViewRecoveryCodes(ctx, u.ID, "000000"); err != ErrInvalidCode {
+	if _, err := svc.ViewRecoveryCodes(ctx, u.ID, "000000"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode on wrong totp code, got %v", err)
 	}
 	// Valid code views recovery codes
@@ -193,7 +193,7 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 		t.Fatalf("ViewRecoveryCodes failed: %v", err)
 	}
 	// Replay guard prevents immediate reuse of same code
-	if _, err := svc.ViewRecoveryCodes(ctx, u.ID, vCode); err != ErrInvalidCode {
+	if _, err := svc.ViewRecoveryCodes(ctx, u.ID, vCode); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected replay guard rejection for same code, got %v", err)
 	}
 
@@ -257,19 +257,19 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 
 	// Fallback password + code:
 	// A. User not found
-	if err := svc.Disable(ctx, 99999, "", "pass", "123456", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.Disable(ctx, 99999, "", "pass", "123456", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// B. Invalid password
-	if err := svc.Disable(ctx, u.ID, "", "WrongPassword!", "123456", "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.Disable(ctx, u.ID, "", "WrongPassword!", "123456", "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 	// C. Empty code
-	if err := svc.Disable(ctx, u.ID, "", "CorrectPassword123!", "", "1.1.1.1"); err != ErrInvalidCode {
+	if err := svc.Disable(ctx, u.ID, "", "CorrectPassword123!", "", "1.1.1.1"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for empty code, got %v", err)
 	}
 	// D. Bad code
-	if err := svc.Disable(ctx, u.ID, "", "CorrectPassword123!", "000000", "1.1.1.1"); err != ErrInvalidCode {
+	if err := svc.Disable(ctx, u.ID, "", "CorrectPassword123!", "000000", "1.1.1.1"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for wrong code, got %v", err)
 	}
 	// E. Valid password + valid recovery code disables device
@@ -286,7 +286,8 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 	secHealed, err := svc.openActiveSecret(ctx, &models.TOTPDevice{
 		UserID:          u.ID,
 		SecretEncrypted: "corrupted-ciphertext-that-fails-aes-gcm",
-		Secret:          "JBSWY3DPEHPK3PXP",
+		// #nosec G101 -- test RFC 3548 Base32 secret
+		Secret: "JBSWY3DPEHPK3PXP",
 	})
 	if err != nil || secHealed != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("openActiveSecret healing failed: %s, err=%v", secHealed, err)
@@ -485,11 +486,11 @@ func TestAuthService_EdgeAndFallbackBranches(t *testing.T) {
 		authCfg, rlCfg, jwtCfg, notify, NoOpCaptchaVerifier{}, geo.NewNoOpResolver(),
 		nil, nil,
 	)
-	if err := svcLegacy.RevokeSession(ctx, "not-a-number", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svcLegacy.RevokeSession(ctx, "not-a-number", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound for non-numeric sessionID, got %v", err)
 	}
 	tokens.revokeByIDErr = gorm.ErrRecordNotFound
-	if err := svcLegacy.RevokeSession(ctx, "123", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svcLegacy.RevokeSession(ctx, "123", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound for gorm.ErrRecordNotFound, got %v", err)
 	}
 	tokens.revokeByIDErr = errors.New("db error")
@@ -500,18 +501,18 @@ func TestAuthService_EdgeAndFallbackBranches(t *testing.T) {
 
 	// 5. RevokeSession modern mode (s.sessions != nil)
 	// Missing session
-	if err := svc.RevokeSession(ctx, "nonexistent-sess", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svc.RevokeSession(ctx, "nonexistent-sess", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound for missing session, got %v", err)
 	}
 	// Session exists but wrong user ID
 	_ = sessions.Create(ctx, &models.Session{ID: "sess-user-2", UserID: 999})
-	if err := svc.RevokeSession(ctx, "sess-user-2", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svc.RevokeSession(ctx, "sess-user-2", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound for wrong user ID, got %v", err)
 	}
 	// sessions.RevokeByID returns gorm.ErrRecordNotFound
 	_ = sessions.Create(ctx, &models.Session{ID: "sess-err-1", UserID: u.ID})
 	sessions.revokeByIDErr = gorm.ErrRecordNotFound
-	if err := svc.RevokeSession(ctx, "sess-err-1", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svc.RevokeSession(ctx, "sess-err-1", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound on gorm.ErrRecordNotFound, got %v", err)
 	}
 	sessions.revokeByIDErr = errors.New("fail revoke")
@@ -534,11 +535,11 @@ func TestAuthService_EdgeAndFallbackBranches(t *testing.T) {
 
 	// 6. SetPassword branches
 	// User not found
-	if err := svc.SetPassword(ctx, 99999, "NewPassword123!", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.SetPassword(ctx, 99999, "NewPassword123!", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound on SetPassword, got %v", err)
 	}
 	// User already has password
-	if err := svc.SetPassword(ctx, u.ID, "NewPassword123!", "1.1.1.1"); err != ErrPasswordAlreadySet {
+	if err := svc.SetPassword(ctx, u.ID, "NewPassword123!", "1.1.1.1"); !errors.Is(err, ErrPasswordAlreadySet) {
 		t.Fatalf("expected ErrPasswordAlreadySet, got %v", err)
 	}
 	// User without password, but weak password provided
@@ -642,17 +643,17 @@ func TestWebhookService_AntiSSRFAndBranches(t *testing.T) {
 	svc := NewWebhookService(nil)
 
 	// ValidateURL edge cases
-	if err := svc.ValidateURL("bad-url"); err != ErrInvalidWebhookURL {
+	if err := svc.ValidateURL("bad-url"); !errors.Is(err, ErrInvalidWebhookURL) {
 		t.Fatalf("expected ErrInvalidWebhookURL, got %v", err)
 	}
-	if err := svc.ValidateURL("ftp://example.com/hook"); err != ErrInvalidWebhookURL {
+	if err := svc.ValidateURL("ftp://example.com/hook"); !errors.Is(err, ErrInvalidWebhookURL) {
 		t.Fatalf("expected ErrInvalidWebhookURL for ftp, got %v", err)
 	}
-	if err := svc.ValidateURL("http:///no-host"); err != ErrInvalidWebhookURL {
+	if err := svc.ValidateURL("http:///no-host"); !errors.Is(err, ErrInvalidWebhookURL) {
 		t.Fatalf("expected ErrInvalidWebhookURL for empty host, got %v", err)
 	}
 	// Loopback blocked by default
-	if err := svc.ValidateURL("http://127.0.0.1:8080/hook"); err != ErrWebhookSSRFBlocked {
+	if err := svc.ValidateURL("http://127.0.0.1:8080/hook"); !errors.Is(err, ErrWebhookSSRFBlocked) {
 		t.Fatalf("expected ErrWebhookSSRFBlocked for loopback, got %v", err)
 	}
 	// SetAllowLocalhost
@@ -749,7 +750,7 @@ func TestWebhookService_AntiSSRFAndBranches(t *testing.T) {
 
 	// DeliverOne blocked by SSRF
 	svcWired.SetAllowLocalhost(false)
-	if err := svcWired.DeliverOne(ctx, d200, "test-secret", "http://127.0.0.1:8080/hook"); err != ErrWebhookSSRFBlocked {
+	if err := svcWired.DeliverOne(ctx, d200, "test-secret", "http://127.0.0.1:8080/hook"); !errors.Is(err, ErrWebhookSSRFBlocked) {
 		t.Fatalf("expected ErrWebhookSSRFBlocked, got %v", err)
 	}
 
@@ -910,13 +911,13 @@ func TestMiscHelpers_EdgeCases(t *testing.T) {
 	}
 
 	// 6. mapDuplicateKey branches
-	if err := mapDuplicateKey("a@b.com", "u", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry for key 'users.email'"}); err != ErrEmailExists {
+	if err := mapDuplicateKey("a@b.com", "u", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry for key 'users.email'"}); !errors.Is(err, ErrEmailExists) {
 		t.Fatalf("expected ErrEmailExists, got %v", err)
 	}
-	if err := mapDuplicateKey("a@b.com", "u", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry for key 'users.username'"}); err != ErrUsernameExists {
+	if err := mapDuplicateKey("a@b.com", "u", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry for key 'users.username'"}); !errors.Is(err, ErrUsernameExists) {
 		t.Fatalf("expected ErrUsernameExists, got %v", err)
 	}
-	if err := mapDuplicateKey("a@b.com", "u", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry for key 'PRIMARY'"}); err != ErrEmailExists {
+	if err := mapDuplicateKey("a@b.com", "u", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry for key 'PRIMARY'"}); !errors.Is(err, ErrEmailExists) {
 		t.Fatalf("expected ErrEmailExists for default mysql dup, got %v", err)
 	}
 	if err := mapDuplicateKey("a@b.com", "u", errors.New("non-mysql")); err == nil || !strings.Contains(err.Error(), "non-mysql") {
@@ -924,7 +925,7 @@ func TestMiscHelpers_EdgeCases(t *testing.T) {
 	}
 
 	// 7. validatePassword edge cases
-	if err := validatePassword(strings.Repeat("a", 1000), 0); err != ErrPasswordTooWeak {
+	if err := validatePassword(strings.Repeat("a", 1000), 0); !errors.Is(err, ErrPasswordTooWeak) {
 		t.Fatalf("expected ErrPasswordTooWeak for password exceeding max length, got %v", err)
 	}
 	if err := validatePassword("ValidPass123!", 0, "", "   "); err != nil {
@@ -984,17 +985,17 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 
 	// 1. ResetPassword
 	// Invalid token
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: "bad-token", NewPassword: "NewValidPwd123!"}, "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: "bad-token", NewPassword: "NewValidPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken, got %v", err)
 	}
 	// Wrong token type (e.g. Access token)
 	accTok, _ := jwtMgr.Issue(u.ID, u.Role, u.Email, jwt.TokenTypeAccess, time.Hour)
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: accTok, NewPassword: "NewValidPwd123!"}, "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: accTok, NewPassword: "NewValidPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for access token, got %v", err)
 	}
 	// User not found
 	resetTokMissingUser, _ := jwtMgr.Issue(99999, "user", "ghost@ex.com", jwt.TokenTypeReset, time.Hour)
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTokMissingUser, NewPassword: "NewValidPwd123!"}, "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTokMissingUser, NewPassword: "NewValidPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Weak password
@@ -1003,7 +1004,7 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 		t.Fatal("expected validation error on weak reset password")
 	}
 	// Breached password
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTok, NewPassword: "BreachedPwd123!"}, "1.1.1.1"); err != ErrPasswordBreached {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTok, NewPassword: "BreachedPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrPasswordBreached) {
 		t.Fatalf("expected ErrPasswordBreached, got %v", err)
 	}
 	// Successful reset
@@ -1011,17 +1012,17 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 		t.Fatalf("ResetPassword failed: %v", err)
 	}
 	// Replay of same token returns ErrInvalidToken
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTok, NewPassword: "NewValidPwd123!"}, "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTok, NewPassword: "NewValidPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on replayed reset token, got %v", err)
 	}
 
 	// 2. ChangePassword
 	// User not found
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: 99999, OldPassword: "pwd", NewPassword: "new"}, "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: 99999, OldPassword: "pwd", NewPassword: "new"}, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Wrong old password
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "WrongOldPassword!", NewPassword: "BrandNewPwd123!"}, "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "WrongOldPassword!", NewPassword: "BrandNewPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 	// Weak new password
@@ -1029,7 +1030,7 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 		t.Fatal("expected validation error on short new password")
 	}
 	// Breached new password
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "NewValidPwd123!", NewPassword: "BreachedPwd123!"}, "1.1.1.1"); err != ErrPasswordBreached {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "NewValidPwd123!", NewPassword: "BreachedPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrPasswordBreached) {
 		t.Fatalf("expected ErrPasswordBreached, got %v", err)
 	}
 	// Successful change
@@ -1044,6 +1045,7 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 	}
 
 	// 3B. With TOTP enabled
+	// #nosec G101 -- test mock Base32 secret
 	_ = totpRepo.Upsert(ctx, &models.TOTPDevice{
 		UserID:  u.ID,
 		Secret:  "JBSWY3DPEHPK3PXP",
@@ -1055,6 +1057,7 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 	}
 
 	// 4. handleTokenReuse legacy branch
+	// #nosec G101 -- test mock token hash
 	rtLegacy := &models.RefreshToken{
 		UserID:    u.ID,
 		TokenHash: "tok-reuse-leg",
@@ -1129,12 +1132,12 @@ func TestOAuthService_UnlinkAndLink(t *testing.T) {
 	})
 
 	// 1. Unlink nonexistent identity
-	if err := svc.Unlink(ctx, 99999, "google", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.Unlink(ctx, 99999, "google", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound for missing identity, got %v", err)
 	}
 
 	// 2. Unlink user's only login method (no password, no passkey) -> ErrCannotUnlinkOnlyMethod
-	if err := svc.Unlink(ctx, uOAuthOnly.ID, "google", "1.1.1.1"); err != ErrCannotUnlinkOnlyMethod {
+	if err := svc.Unlink(ctx, uOAuthOnly.ID, "google", "1.1.1.1"); !errors.Is(err, ErrCannotUnlinkOnlyMethod) {
 		t.Fatalf("expected ErrCannotUnlinkOnlyMethod, got %v", err)
 	}
 
@@ -1182,22 +1185,22 @@ func TestOAuthService_UnlinkAndLink(t *testing.T) {
 	}
 
 	// ConsumeState branches
-	if _, err := svc.ConsumeState(ctx, ""); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, ""); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid for empty state, got %v", err)
 	}
-	if _, err := svc.ConsumeState(ctx, "missing-state"); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, "missing-state"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid for missing state, got %v", err)
 	}
 	memStore.Set(oauthChallengeKey("raw-int"), 12345, time.Minute)
-	if _, err := svc.ConsumeState(ctx, "raw-int"); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, "raw-int"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid for non-string, got %v", err)
 	}
 	memStore.Set(oauthChallengeKey("bad-json"), "{invalid", time.Minute)
-	if _, err := svc.ConsumeState(ctx, "bad-json"); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, "bad-json"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid for bad json, got %v", err)
 	}
 	memStore.Set(oauthChallengeKey("empty-ver"), `{"Verifier":""}`, time.Minute)
-	if _, err := svc.ConsumeState(ctx, "empty-ver"); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, "empty-ver"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid for empty verifier, got %v", err)
 	}
 
@@ -1207,7 +1210,7 @@ func TestOAuthService_UnlinkAndLink(t *testing.T) {
 		Provider:       "google",
 		ProviderUserID: "dangling-sub",
 	})
-	if _, err := svc.findOrCreateUser(ctx, &GoogleIDTokenClaims{Sub: "dangling-sub"}, "dangling@example.com", "1.1.1.1"); err != ErrUserNotFound {
+	if _, err := svc.findOrCreateUser(ctx, &GoogleIDTokenClaims{Sub: "dangling-sub"}, "dangling@example.com", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound for dangling identity, got %v", err)
 	}
 
@@ -1258,7 +1261,7 @@ func TestAdminService_UnlockAndForceLogout(t *testing.T) {
 
 	// 1. UnlockUser
 	// Target user not found
-	if err := adminSvc.UnlockUser(ctx, 1, 99999, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.UnlockUser(ctx, 1, 99999, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Success
@@ -1268,7 +1271,7 @@ func TestAdminService_UnlockAndForceLogout(t *testing.T) {
 
 	// 2. ForceLogout
 	// Target user not found
-	if err := adminSvc.ForceLogout(ctx, 1, 99999, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.ForceLogout(ctx, 1, 99999, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Success
@@ -1292,10 +1295,10 @@ func TestAdminService_UnlockAndForceLogout(t *testing.T) {
 	}
 
 	// 4. LockUser branches
-	if err := adminSvc.LockUser(ctx, u.ID, u.ID, time.Hour, "1.1.1.1"); err != ErrCannotLockSelf {
+	if err := adminSvc.LockUser(ctx, u.ID, u.ID, time.Hour, "1.1.1.1"); !errors.Is(err, ErrCannotLockSelf) {
 		t.Fatalf("expected ErrCannotLockSelf, got %v", err)
 	}
-	if err := adminSvc.LockUser(ctx, 999, 99999, time.Hour, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.LockUser(ctx, 999, 99999, time.Hour, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// lockDuration <= 0
@@ -1395,7 +1398,7 @@ func TestSMTPNotifier_ProtocolNegotiation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 
 	host, port, _ := net.SplitHostPort(l.Addr().String())
 
@@ -1406,7 +1409,7 @@ func TestSMTPNotifier_ProtocolNegotiation(t *testing.T) {
 				return
 			}
 			go func(c net.Conn) {
-				defer c.Close()
+				defer func() { _ = c.Close() }()
 				// Send greeting
 				_, _ = c.Write([]byte("220 mock-smtp ESMTP\r\n"))
 				buf := make([]byte, 1024)
@@ -1508,7 +1511,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	_ = users.Create(ctx, uNoPwd)
 
 	// Breached password check in SetPassword
-	if err := svc.SetPassword(ctx, uNoPwd.ID, "BreachedPwd123!", "1.1.1.1"); err != ErrPasswordBreached {
+	if err := svc.SetPassword(ctx, uNoPwd.ID, "BreachedPwd123!", "1.1.1.1"); !errors.Is(err, ErrPasswordBreached) {
 		t.Fatalf("expected ErrPasswordBreached, got %v", err)
 	}
 
@@ -1534,12 +1537,12 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	}
 	// Trip per-ip cap
 	memStore.Set(ipCounterKey("chgemail:ip:", "2.2.2.2"), int64(10), time.Minute)
-	if err := svc.RequestChangeEmail(ctx, uEmailUser.ID, inChg, "2.2.2.2"); err != ErrRateLimited {
+	if err := svc.RequestChangeEmail(ctx, uEmailUser.ID, inChg, "2.2.2.2"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited for per-ip cap, got %v", err)
 	}
 	// Trip per-email cap
 	memStore.Set("chgemail:email:"+uEmailUser.Email, int64(10), time.Minute)
-	if err := svc.RequestChangeEmail(ctx, uEmailUser.ID, inChg, "3.3.3.3"); err != ErrRateLimited {
+	if err := svc.RequestChangeEmail(ctx, uEmailUser.ID, inChg, "3.3.3.3"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited for per-email cap, got %v", err)
 	}
 
@@ -1568,7 +1571,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	db.Model(uUnverified).Update("is_email_verified", false)
 
 	oauthSvc := NewOAuthService(users, oauthRepo, memStore, nil, nil, nil)
-	if _, err := oauthSvc.findOrCreateUser(ctx, &GoogleIDTokenClaims{Sub: "sub-unverified", Name: "Name"}, uUnverified.Email, "1.1.1.1"); err != ErrOAuthEmailTaken {
+	if _, err := oauthSvc.findOrCreateUser(ctx, &GoogleIDTokenClaims{Sub: "sub-unverified", Name: "Name"}, uUnverified.Email, "1.1.1.1"); !errors.Is(err, ErrOAuthEmailTaken) {
 		t.Fatalf("expected ErrOAuthEmailTaken, got %v", err)
 	}
 
@@ -1676,7 +1679,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	}
 
 	// loadUser with nonexistent user
-	if _, _, err := pImpl.loadUser(ctx, 99999); err != ErrUserNotFound {
+	if _, _, err := pImpl.loadUser(ctx, 99999); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 
@@ -1684,18 +1687,18 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	uDisabled := &models.User{Username: "disabled_pk", Email: "disabled_pk@example.com", Password: "hash", IsActive: false}
 	_ = users.Create(ctx, uDisabled)
 	db.Model(uDisabled).Update("is_active", false)
-	if _, _, err := pImpl.loadUser(ctx, uDisabled.ID); err != ErrAccountDisabled {
+	if _, _, err := pImpl.loadUser(ctx, uDisabled.ID); !errors.Is(err, ErrAccountDisabled) {
 		t.Fatalf("expected ErrAccountDisabled, got %v", err)
 	}
 
 	// takeJSON with non-string
 	memStore.Set("non-str-pk-key", 12345, time.Minute)
-	if err := pImpl.takeJSON(ctx, "non-str-pk-key", &dummyDst); err != ErrPasskeyChallenge {
+	if err := pImpl.takeJSON(ctx, "non-str-pk-key", &dummyDst); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Fatalf("expected ErrPasskeyChallenge for non-string, got %v", err)
 	}
 
 	// FinishAuthentication with nil tokens
-	if _, err := pImpl.FinishAuthentication(ctx, 99999, nil); err != ErrPasskeyNotConfigured {
+	if _, err := pImpl.FinishAuthentication(ctx, 99999, nil); !errors.Is(err, ErrPasskeyNotConfigured) {
 		t.Fatalf("expected ErrPasskeyNotConfigured for nil tokens, got %v", err)
 	}
 
@@ -1704,13 +1707,13 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 		t.Fatal("expected error on FinishRegistration with missing staged session")
 	}
 	memStore.Set(regSessionKey(99999), `{"DisplayName":"Key","Session":{}}`, time.Minute)
-	if _, err := pImpl.FinishRegistration(ctx, 99999, nil); err != ErrUserNotFound {
+	if _, err := pImpl.FinishRegistration(ctx, 99999, nil); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound on FinishRegistration with ghost user, got %v", err)
 	}
 
 	// 7. AuthService Login & Register branches
 	// Timing attack mitigation: user not found in Login
-	if _, _, _, err := svc.Login(ctx, LoginInput{Email: "nonexistent-timing@example.com", Password: "AnyPassword123!"}, "1.1.1.1", "agent"); err != ErrInvalidCredentials {
+	if _, _, _, err := svc.Login(ctx, LoginInput{Email: "nonexistent-timing@example.com", Password: "AnyPassword123!"}, "1.1.1.1", "agent"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials on timing check, got %v", err)
 	}
 
@@ -1729,7 +1732,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	}
 	_ = users.Create(ctx, uUnverifiedLogin)
 	db.Model(uUnverifiedLogin).Update("is_email_verified", false)
-	if _, _, _, err := svcReqVerify.Login(ctx, LoginInput{Email: uUnverifiedLogin.Email, Password: "Password123!"}, "1.1.1.1", "agent"); err != ErrEmailNotVerified {
+	if _, _, _, err := svcReqVerify.Login(ctx, LoginInput{Email: uUnverifiedLogin.Email, Password: "Password123!"}, "1.1.1.1", "agent"); !errors.Is(err, ErrEmailNotVerified) {
 		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
 	}
 
@@ -1744,7 +1747,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	}
 	_ = users.Create(ctx, uLocked)
 	db.Model(uLocked).Update("locked_until", &lockTime)
-	if _, _, _, err := svc.Login(ctx, LoginInput{Email: uLocked.Email, Password: "Password123!"}, "1.1.1.1", "agent"); err != ErrAccountLocked {
+	if _, _, _, err := svc.Login(ctx, LoginInput{Email: uLocked.Email, Password: "Password123!"}, "1.1.1.1", "agent"); !errors.Is(err, ErrAccountLocked) {
 		t.Fatalf("expected ErrAccountLocked, got %v", err)
 	}
 
@@ -1754,13 +1757,13 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 		Email:    "disposable@mailinator.com",
 		Password: "ValidPassword123!",
 		IP:       "1.1.1.1",
-	}); err != ErrDisposableEmail {
+	}); !errors.Is(err, ErrDisposableEmail) {
 		t.Fatalf("expected ErrDisposableEmail, got %v", err)
 	}
 
 	// ConfirmChangeEmail empty payload
 	memStore.Set("change_email:empty-payload", "", time.Minute)
-	if err := svc.ConfirmChangeEmail(ctx, "empty-payload", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "empty-payload", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for empty payload, got %v", err)
 	}
 
@@ -1849,7 +1852,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour),
 		Revoked:   false,
 	})
-	if _, err := svc.Refresh(ctx, rawTokMissing, "1.1.1.1", "agent"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokMissing, "1.1.1.1", "agent"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for nonexistent session, got %v", err)
 	}
 
@@ -1868,26 +1871,26 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 		ExpiresAt: time.Now().Add(time.Hour),
 		Revoked:   false,
 	})
-	if _, err := svc.Refresh(ctx, rawTokRev, "1.1.1.1", "agent"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokRev, "1.1.1.1", "agent"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for revoked session family, got %v", err)
 	}
 
 	// 2. ConfirmChangeEmail branches
 	// A: Bad payload format (not 3 parts)
 	memStore.Set("change_email:bad-fmt", "only-one-part", time.Minute)
-	if err := svc.ConfirmChangeEmail(ctx, "bad-fmt", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "bad-fmt", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for malformed payload, got %v", err)
 	}
 
 	// B: User ID parse failure
 	memStore.Set("change_email:bad-uid", "notanumber:old@ex.com:new@ex.com", time.Minute)
-	if err := svc.ConfirmChangeEmail(ctx, "bad-uid", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "bad-uid", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for invalid user ID, got %v", err)
 	}
 
 	// C: Target user not found
 	memStore.Set("change_email:ghost-user", "99999:old@ex.com:new@ex.com", time.Minute)
-	if err := svc.ConfirmChangeEmail(ctx, "ghost-user", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.ConfirmChangeEmail(ctx, "ghost-user", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound for ghost user, got %v", err)
 	}
 
@@ -1901,7 +1904,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	_ = users.Create(ctx, uExisting)
 
 	memStore.Set("change_email:collision-tok", fmt.Sprintf("%d:%s:%s", u.ID, u.Email, uExisting.Email), time.Minute)
-	if err := svc.ConfirmChangeEmail(ctx, "collision-tok", "1.1.1.1"); err != ErrEmailExists {
+	if err := svc.ConfirmChangeEmail(ctx, "collision-tok", "1.1.1.1"); !errors.Is(err, ErrEmailExists) {
 		t.Fatalf("expected ErrEmailExists on ConfirmChangeEmail collision, got %v", err)
 	}
 
@@ -1912,16 +1915,16 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	}
 
 	// 3. DeactivateAccount & EraseAccount: user not found, bad credential, and success
-	if err := svc.DeactivateAccount(ctx, 99999, "", "pass", "jti", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.DeactivateAccount(ctx, 99999, "", "pass", "jti", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound on DeactivateAccount, got %v", err)
 	}
-	if err := svc.DeactivateAccount(ctx, u.ID, "", "WrongPassword!", "jti", "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.DeactivateAccount(ctx, u.ID, "", "WrongPassword!", "jti", "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials on DeactivateAccount, got %v", err)
 	}
-	if err := svc.EraseAccount(ctx, 99999, "", "pass", "jti", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.EraseAccount(ctx, 99999, "", "pass", "jti", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound on EraseAccount, got %v", err)
 	}
-	if err := svc.EraseAccount(ctx, u.ID, "", "WrongPassword!", "jti", "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.EraseAccount(ctx, u.ID, "", "WrongPassword!", "jti", "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials on EraseAccount, got %v", err)
 	}
 
@@ -1947,6 +1950,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	_ = users.Create(ctx, uToErase)
 	_ = oauthRepo.Create(ctx, &models.OAuthIdentity{UserID: uToErase.ID, Provider: "google", ProviderUserID: "erase-google-sub"})
 	_ = passkeyRepo.Create(ctx, &models.PasskeyCredential{UserID: uToErase.ID, CredentialID: []byte("cred-erase"), PublicKey: []byte("pub-erase")})
+	// #nosec G101 -- test mock Base32 secret
 	_ = totpRepo.Upsert(ctx, &models.TOTPDevice{UserID: uToErase.ID, Secret: "JBSWY3DPEHPK3PXP", Enabled: true})
 
 	if err := svc.EraseAccount(ctx, uToErase.ID, "", "ValidPassword123!", "jti-erase", "1.1.1.1"); err != nil {
@@ -1954,7 +1958,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	}
 
 	// 4. Me and GetUserAuditLog
-	if _, err := svc.Me(ctx, 99999); err != ErrUserNotFound {
+	if _, err := svc.Me(ctx, 99999); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound on Me, got %v", err)
 	}
 	svcNoAudit := NewAuthService(
@@ -1970,7 +1974,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	uInactive := &models.User{Username: "inactive_pk", Email: "inact@ex.com", IsActive: false}
 	_ = users.Create(ctx, uInactive)
 	db.Model(uInactive).Update("is_active", false)
-	if _, _, err := svc.IssuePasskeyTokenPair(ctx, uInactive, "1.1.1.1", "agent"); err != ErrAccountDisabled {
+	if _, _, err := svc.IssuePasskeyTokenPair(ctx, uInactive, "1.1.1.1", "agent"); !errors.Is(err, ErrAccountDisabled) {
 		t.Fatalf("expected ErrAccountDisabled on inactive user passkey token issue, got %v", err)
 	}
 	pkPair, pkProf, err := svc.IssuePasskeyTokenPair(ctx, u, "1.1.1.1", "agent")
@@ -1990,13 +1994,13 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 
 	// Wrong token type (e.g. reset token)
 	resetTok, _ := jwtMgr.Issue(uUnverified.ID, "user", uUnverified.Email, jwt.TokenTypeReset, time.Hour)
-	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: resetTok}); err != ErrInvalidToken {
+	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: resetTok}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for wrong token type, got %v", err)
 	}
 
 	// Nonexistent user in token
 	ghostTok, _ := jwtMgr.Issue(99999, "user", "ghost@ex.com", jwt.TokenTypeEmailVerify, time.Hour)
-	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: ghostTok}); err != ErrUserNotFound {
+	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: ghostTok}); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound for ghost user token, got %v", err)
 	}
 
@@ -2006,7 +2010,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 		t.Fatalf("VerifyEmail failed: %v", err)
 	}
 	// Replay token fails
-	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: verifyTok}); err != ErrInvalidToken {
+	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: verifyTok}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on replayed token, got %v", err)
 	}
 
@@ -2032,7 +2036,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 		t.Fatalf("ListSessions failed: len=%d, err=%v", len(sessList), err)
 	}
 	// Revoke session unauthorized
-	if err := svc.RevokeSession(ctx, "sess-curr", 99999, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svc.RevokeSession(ctx, "sess-curr", 99999, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound on wrong user revoking session, got %v", err)
 	}
 	// Revoke session authorized
@@ -2041,7 +2045,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	}
 
 	// 8. CompleteMFALogin
-	if _, _, err := svc.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: 99999, Code: "123456", IP: "1.1.1.1", UA: "agent"}); err != ErrInvalidToken {
+	if _, _, err := svc.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: 99999, Code: "123456", IP: "1.1.1.1", UA: "agent"}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on ghost user CompleteMFALogin, got %v", err)
 	}
 	pairMFAComplete, profMFAComplete, err := svc.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: u.ID, Code: "123456", IP: "1.1.1.1", UA: "agent"})
@@ -2055,7 +2059,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	}
 
 	// 10. SetPassword on user who already has a password (ErrPasswordAlreadySet)
-	if err := svc.SetPassword(ctx, u.ID, "BrandNewPassword123!", "1.1.1.1"); err != ErrPasswordAlreadySet {
+	if err := svc.SetPassword(ctx, u.ID, "BrandNewPassword123!", "1.1.1.1"); !errors.Is(err, ErrPasswordAlreadySet) {
 		t.Fatalf("expected ErrPasswordAlreadySet, got %v", err)
 	}
 

@@ -2,8 +2,6 @@ package services
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -38,7 +36,7 @@ func TestCaptchaVerifiers(t *testing.T) {
 
 	// 2. TurnstileVerifier empty token
 	v := NewTurnstileVerifier("test-secret")
-	if err := v.Verify(ctx, "   "); err != ErrCaptchaRejected {
+	if err := v.Verify(ctx, "   "); !errors.Is(err, ErrCaptchaRejected) {
 		t.Fatalf("empty token should return ErrCaptchaRejected, got %v", err)
 	}
 
@@ -62,7 +60,7 @@ func TestCaptchaVerifiers(t *testing.T) {
 	defer srvFail.Close()
 
 	v.WithEndpoint(srvFail.URL)
-	if err := v.Verify(ctx, "bad-token"); err != ErrCaptchaRejected {
+	if err := v.Verify(ctx, "bad-token"); !errors.Is(err, ErrCaptchaRejected) {
 		t.Fatalf("TurnstileVerifier fail case should return ErrCaptchaRejected, got %v", err)
 	}
 
@@ -125,7 +123,7 @@ func TestGoogleVerifier_AndClaims(t *testing.T) {
 		t.Fatalf("clientID mismatch: %s", v.clientID)
 	}
 	_, err := v.Verify(context.Background(), "invalid-raw-token")
-	if err != ErrOAuthTokenVerificationFailed {
+	if !errors.Is(err, ErrOAuthTokenVerificationFailed) {
 		t.Fatalf("expected ErrOAuthTokenVerificationFailed, got %v", err)
 	}
 }
@@ -154,10 +152,10 @@ func TestConsoleNotifier_AllAlerts(t *testing.T) {
 	t.Setenv("GIN_MODE", "release")
 	t.Setenv("ALLOW_TOKEN_CONSOLE", "")
 	nRelease := NewConsoleNotifier("noreply@example.com")
-	if err := nRelease.SendPasswordReset(ctx, "u@ex.com", "tok"); err != errConsoleTokensSuppressed {
+	if err := nRelease.SendPasswordReset(ctx, "u@ex.com", "tok"); !errors.Is(err, errConsoleTokensSuppressed) {
 		t.Fatalf("expected errConsoleTokensSuppressed, got %v", err)
 	}
-	if err := nRelease.SendEmailVerification(ctx, "u@ex.com", "tok"); err != errConsoleTokensSuppressed {
+	if err := nRelease.SendEmailVerification(ctx, "u@ex.com", "tok"); !errors.Is(err, errConsoleTokensSuppressed) {
 		t.Fatalf("expected errConsoleTokensSuppressed, got %v", err)
 	}
 }
@@ -225,10 +223,7 @@ func TestBreachedPassword_AllBranches(t *testing.T) {
 	}
 
 	pwd := "SuperSecret123!"
-	sum := sha1.Sum([]byte(pwd))
-	digest := strings.ToUpper(hex.EncodeToString(sum[:]))
-	prefix := digest[:5]
-	suffix := digest[5:]
+	prefix, suffix := calculateHIBPSHA1Prefix(pwd)
 
 	// Mock server returning match
 	srvMatch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -447,7 +442,7 @@ func TestAsyncAuditWriter_Coverage(t *testing.T) {
 		Success:  true,
 	})
 
-	logs, total, err = wReal.FindByUserIDPaginated(ctx, 1, 1, 10)
+	_, _, err = wReal.FindByUserIDPaginated(ctx, 1, 1, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +510,7 @@ func TestAuthService_Me_CurrentPwdVersion_ListSessions_RevokeSession(t *testing.
 		t.Fatalf("Me failed: %v, %v", prof, err)
 	}
 	_, err = svc.Me(ctx, 999999)
-	if err != ErrUserNotFound {
+	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 
@@ -575,7 +570,7 @@ func TestAuthService_Me_CurrentPwdVersion_ListSessions_RevokeSession(t *testing.
 	if err := svc.RevokeSession(ctx, "s-456", u.ID, "1.2.3.4"); err != nil {
 		t.Fatalf("RevokeSession failed: %v", err)
 	}
-	if err := svc.RevokeSession(ctx, "nonexistent", u.ID, "1.2.3.4"); err != ErrSessionNotFound {
+	if err := svc.RevokeSession(ctx, "nonexistent", u.ID, "1.2.3.4"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 
@@ -586,6 +581,7 @@ func TestAuthService_Me_CurrentPwdVersion_ListSessions_RevokeSession(t *testing.
 		nil, nil,
 	)
 
+	// #nosec G101 -- test mock token hash, not real credentials
 	rt := &models.RefreshToken{
 		UserID:    u.ID,
 		TokenHash: "tok-hash",
@@ -601,12 +597,13 @@ func TestAuthService_Me_CurrentPwdVersion_ListSessions_RevokeSession(t *testing.
 	if err := svcLegacy.RevokeSession(ctx, fmt.Sprintf("%d", rt.ID), u.ID, "1.2.3.4"); err != nil {
 		t.Fatalf("legacy RevokeSession failed: %v", err)
 	}
-	if err := svcLegacy.RevokeSession(ctx, "not-a-number", u.ID, "1.2.3.4"); err != ErrSessionNotFound {
+	if err := svcLegacy.RevokeSession(ctx, "not-a-number", u.ID, "1.2.3.4"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound for non-numeric ID, got %v", err)
 	}
 
 	// 7. Logout & LogoutAll
 	rawRefresh := "raw-refresh-tok"
+	// #nosec G101 -- test mock token hash, not real credentials
 	rtLogout := &models.RefreshToken{
 		UserID:    u.ID,
 		TokenHash: "921820464fba282b82142475ab5215c26cc800f1c9fc63630f9a76d8b688d0f1", // sha256 of rawRefresh
@@ -663,11 +660,13 @@ func TestAuthService_AdvancedBranches(t *testing.T) {
 	// 1. handleTokenReuse with session family
 	sess := &models.Session{ID: "reuse-sess", UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)}
 	_ = sessionRepo.Create(ctx, sess)
+	// #nosec G101 -- test mock token hash, not real credentials
 	rt1 := &models.RefreshToken{UserID: u.ID, SessionID: "reuse-sess", TokenHash: "tok-reuse-1", ExpiresAt: time.Now().Add(time.Hour)}
 	_ = tokenRepo.Create(ctx, rt1)
 	svc.handleTokenReuse(ctx, rt1, "1.2.3.4", "detail reuse")
 
 	// handleTokenReuse without session family (legacy row)
+	// #nosec G101 -- test mock token hash, not real credentials
 	rtLegacy := &models.RefreshToken{UserID: u.ID, TokenHash: "tok-reuse-legacy", ExpiresAt: time.Now().Add(time.Hour)}
 	_ = tokenRepo.Create(ctx, rtLegacy)
 	svc.handleTokenReuse(ctx, rtLegacy, "1.2.3.4", "detail legacy reuse")
@@ -679,16 +678,16 @@ func TestAuthService_AdvancedBranches(t *testing.T) {
 	svcNoNotify.notifySecurityAsync(ctx, u.ID, "Event", "Body")
 
 	// 3. validatePassword
-	if err := validatePassword("short", 0); err != ErrPasswordTooWeak {
+	if err := validatePassword("short", 0); !errors.Is(err, ErrPasswordTooWeak) {
 		t.Fatalf("expected ErrPasswordTooWeak for short, got %v", err)
 	}
-	if err := validatePassword(strings.Repeat("a", 100), 0); err != ErrPasswordTooWeak {
+	if err := validatePassword(strings.Repeat("a", 100), 0); !errors.Is(err, ErrPasswordTooWeak) {
 		t.Fatalf("expected ErrPasswordTooWeak for too long, got %v", err)
 	}
-	if err := validatePassword("onlylettersnohash", 0); err != ErrPasswordTooWeak {
+	if err := validatePassword("onlylettersnohash", 0); !errors.Is(err, ErrPasswordTooWeak) {
 		t.Fatalf("expected ErrPasswordTooWeak for no digits, got %v", err)
 	}
-	if err := validatePassword("1234567890", 0); err != ErrPasswordTooWeak {
+	if err := validatePassword("1234567890", 0); !errors.Is(err, ErrPasswordTooWeak) {
 		t.Fatalf("expected ErrPasswordTooWeak for no letters, got %v", err)
 	}
 	if err := validatePassword("GoodPassword123!", 0); err != nil {
@@ -783,11 +782,11 @@ func TestAdminService_AllMethods(t *testing.T) {
 	}
 
 	// 2. LockUser cannot lock self
-	if err := adminSvc.LockUser(ctx, admin.ID, admin.ID, time.Hour, "1.1.1.1"); err != ErrCannotLockSelf {
+	if err := adminSvc.LockUser(ctx, admin.ID, admin.ID, time.Hour, "1.1.1.1"); !errors.Is(err, ErrCannotLockSelf) {
 		t.Fatalf("expected ErrCannotLockSelf, got %v", err)
 	}
 	// LockUser missing target
-	if err := adminSvc.LockUser(ctx, admin.ID, 999999, time.Hour, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.LockUser(ctx, admin.ID, 999999, time.Hour, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// LockUser success
@@ -796,7 +795,7 @@ func TestAdminService_AllMethods(t *testing.T) {
 	}
 
 	// 3. UnlockUser missing target & success
-	if err := adminSvc.UnlockUser(ctx, admin.ID, 999999, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.UnlockUser(ctx, admin.ID, 999999, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	if err := adminSvc.UnlockUser(ctx, admin.ID, user1.ID, "1.1.1.1"); err != nil {
@@ -804,7 +803,7 @@ func TestAdminService_AllMethods(t *testing.T) {
 	}
 
 	// 4. ForceLogout missing target & success
-	if err := adminSvc.ForceLogout(ctx, admin.ID, 999999, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.ForceLogout(ctx, admin.ID, 999999, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	if err := adminSvc.ForceLogout(ctx, admin.ID, user1.ID, "1.1.1.1"); err != nil {
@@ -933,17 +932,17 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 	// 2. ResetPassword
 	resetTok, _ := jwtMgr.Issue(u.ID, u.Role, u.Email, jwt.TokenTypeReset, time.Hour)
 	// Invalid token
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: "bad-token", NewPassword: "NewPassword123!"}, "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: "bad-token", NewPassword: "NewPassword123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken, got %v", err)
 	}
 	// Wrong token type (access token passed as reset token)
 	accTok, _ := jwtMgr.Issue(u.ID, u.Role, u.Email, jwt.TokenTypeAccess, time.Hour)
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: accTok, NewPassword: "NewPassword123!"}, "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: accTok, NewPassword: "NewPassword123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for wrong token type, got %v", err)
 	}
 	// Missing user in token
 	ghostResetTok, _ := jwtMgr.Issue(999999, models.RoleUser, "ghost@ex.com", jwt.TokenTypeReset, time.Hour)
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: ghostResetTok, NewPassword: "NewPassword123!"}, "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: ghostResetTok, NewPassword: "NewPassword123!"}, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Success
@@ -951,21 +950,21 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 		t.Fatalf("ResetPassword failed: %v", err)
 	}
 	// Replay used reset token (single use)
-	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTok, NewPassword: "NewPassword123!"}, "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ResetPassword(ctx, ResetPasswordInput{Token: resetTok, NewPassword: "NewPassword123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on replayed reset token, got %v", err)
 	}
 
 	// 3. ChangePassword
 	// User not found
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: 999999, OldPassword: "NewPassword123!", NewPassword: "BrandNewPwd123!"}, "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: 999999, OldPassword: "NewPassword123!", NewPassword: "BrandNewPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Wrong old password
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "WrongOldPassword1!", NewPassword: "BrandNewPwd123!"}, "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "WrongOldPassword1!", NewPassword: "BrandNewPwd123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 	// Weak new password
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "NewPassword123!", NewPassword: "weak"}, "1.1.1.1"); err != ErrPasswordTooWeak {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: u.ID, OldPassword: "NewPassword123!", NewPassword: "weak"}, "1.1.1.1"); !errors.Is(err, ErrPasswordTooWeak) {
 		t.Fatalf("expected ErrPasswordTooWeak, got %v", err)
 	}
 	// Success
@@ -975,11 +974,11 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 
 	// 4. SetPassword
 	// User not found
-	if err := svc.SetPassword(ctx, 999999, "FirstPass123!", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.SetPassword(ctx, 999999, "FirstPass123!", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Password already set
-	if err := svc.SetPassword(ctx, u.ID, "FirstPass123!", "1.1.1.1"); err != ErrPasswordAlreadySet {
+	if err := svc.SetPassword(ctx, u.ID, "FirstPass123!", "1.1.1.1"); !errors.Is(err, ErrPasswordAlreadySet) {
 		t.Fatalf("expected ErrPasswordAlreadySet, got %v", err)
 	}
 	// User without password (OAuth-only)
@@ -992,12 +991,12 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 	// 5. VerifyEmail
 	verifyTok, _ := jwtMgr.Issue(u.ID, u.Role, u.Email, jwt.TokenTypeEmailVerify, time.Hour)
 	// Wrong token type
-	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: accTok}); err != ErrInvalidToken {
+	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: accTok}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for wrong token type, got %v", err)
 	}
 	// Missing user
 	ghostVerifyTok, _ := jwtMgr.Issue(999999, models.RoleUser, "ghost@ex.com", jwt.TokenTypeEmailVerify, time.Hour)
-	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: ghostVerifyTok}); err != ErrUserNotFound {
+	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: ghostVerifyTok}); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Success
@@ -1005,29 +1004,29 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 		t.Fatalf("VerifyEmail failed: %v", err)
 	}
 	// Replay token
-	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: verifyTok}); err != ErrInvalidToken {
+	if err := svc.VerifyEmail(ctx, EmailVerifyInput{Token: verifyTok}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on replayed verify token, got %v", err)
 	}
 
 	// 6. RequestChangeEmail & ConfirmChangeEmail
 	// User not found
-	if err := svc.RequestChangeEmail(ctx, 999999, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: "new@ex.com"}, "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.RequestChangeEmail(ctx, 999999, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: "new@ex.com"}, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Invalid password
-	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "WrongPwd!", NewEmail: "new@ex.com"}, "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "WrongPwd!", NewEmail: "new@ex.com"}, "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 	// Same email
-	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: u.Email}, "1.1.1.1"); err != ErrInvalidInput {
+	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: u.Email}, "1.1.1.1"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("expected ErrInvalidInput for same email, got %v", err)
 	}
 	// Disposable email
-	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: "bad@mailinator.com"}, "1.1.1.1"); err != ErrDisposableEmail {
+	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: "bad@mailinator.com"}, "1.1.1.1"); !errors.Is(err, ErrDisposableEmail) {
 		t.Fatalf("expected ErrDisposableEmail, got %v", err)
 	}
 	// Email exists
-	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: oauthUser.Email}, "1.1.1.1"); err != ErrEmailExists {
+	if err := svc.RequestChangeEmail(ctx, u.ID, ChangeEmailRequestInput{Password: "BrandNewPwd123!", NewEmail: oauthUser.Email}, "1.1.1.1"); !errors.Is(err, ErrEmailExists) {
 		t.Fatalf("expected ErrEmailExists, got %v", err)
 	}
 	// Valid request
@@ -1035,19 +1034,19 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 		t.Fatalf("RequestChangeEmail failed: %v", err)
 	}
 	// Confirm with invalid token
-	if err := svc.ConfirmChangeEmail(ctx, "bad-token", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "bad-token", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken, got %v", err)
 	}
 
 	// 7. CompleteMFALogin & CheckMFAOrIssueTokens
 	// CompleteMFALogin without totpValidator
 	svcNoTOTPVal := &AuthService{totpValidator: nil}
-	if _, _, err := svcNoTOTPVal.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: u.ID, Code: "123456"}); err != ErrInvalidToken {
+	if _, _, err := svcNoTOTPVal.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: u.ID, Code: "123456"}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken when validator is nil, got %v", err)
 	}
 	// CompleteMFALogin invalid code
 	_, _, err = svc.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: u.ID, Code: "000000", IP: "1.1.1.1"})
-	if err != ErrInvalidCode {
+	if !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode, got %v", err)
 	}
 	// CompleteMFALogin success
@@ -1145,15 +1144,15 @@ func TestAuthService_Deactivate_And_EraseAccount(t *testing.T) {
 
 	// 1. DeactivateAccount tests:
 	// Missing user
-	if err := svc.DeactivateAccount(ctx, 99999, "", "Password123!", "jti-1", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.DeactivateAccount(ctx, 99999, "", "Password123!", "jti-1", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Missing sudo or password
-	if err := svc.DeactivateAccount(ctx, u.ID, "", "", "jti-1", "1.1.1.1"); err != ErrSudoRequired {
+	if err := svc.DeactivateAccount(ctx, u.ID, "", "", "jti-1", "1.1.1.1"); !errors.Is(err, ErrSudoRequired) {
 		t.Fatalf("expected ErrSudoRequired, got %v", err)
 	}
 	// Wrong password
-	if err := svc.DeactivateAccount(ctx, u.ID, "", "WrongPassword", "jti-1", "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.DeactivateAccount(ctx, u.ID, "", "WrongPassword", "jti-1", "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 	// Valid sudo token
@@ -1186,11 +1185,11 @@ func TestAuthService_Deactivate_And_EraseAccount(t *testing.T) {
 
 	// 2. EraseAccount tests:
 	// Missing user
-	if err := svc.EraseAccount(ctx, 99999, "", "Password123!", "jti-2", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.EraseAccount(ctx, 99999, "", "Password123!", "jti-2", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Invalid credentials
-	if err := svc.EraseAccount(ctx, u.ID, "", "WrongPwd!", "jti-2", "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.EraseAccount(ctx, u.ID, "", "WrongPwd!", "jti-2", "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 	// Valid password
@@ -1268,7 +1267,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 	_ = userRepo.Create(ctx, u)
 
 	// 1. Missing token
-	if _, err := svc.Refresh(ctx, "nonexistent-token", "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, "nonexistent-token", "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for missing token, got %v", err)
 	}
 
@@ -1280,7 +1279,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		Revoked:   true,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if _, err := svc.Refresh(ctx, rawTokLegacy, "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokLegacy, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for revoked legacy token, got %v", err)
 	}
 
@@ -1292,7 +1291,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		Revoked:   false,
 		ExpiresAt: time.Now().Add(-time.Hour),
 	})
-	if _, err := svc.Refresh(ctx, rawTokExpired, "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokExpired, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for expired token, got %v", err)
 	}
 
@@ -1311,7 +1310,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		Revoked:   false,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if _, err := svc.Refresh(ctx, rawTokInactive, "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokInactive, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for inactive user, got %v", err)
 	}
 
@@ -1324,7 +1323,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		Revoked:   false,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if _, err := svc.Refresh(ctx, rawTokMissingSess, "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokMissingSess, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken when session missing, got %v", err)
 	}
 
@@ -1344,7 +1343,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		Revoked:   false,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if _, err := svc.Refresh(ctx, rawTokRevokedSess, "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokRevokedSess, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for revoked session token, got %v", err)
 	}
 
@@ -1364,7 +1363,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		Revoked:   false,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if _, err := svc.Refresh(ctx, rawTokExpiredSess, "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokExpiredSess, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for expired session token, got %v", err)
 	}
 
@@ -1384,7 +1383,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		Revoked:   true,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
-	if _, err := svc.Refresh(ctx, rawTokReusedSess, "1.1.1.1", "GoTest"); err != ErrInvalidToken {
+	if _, err := svc.Refresh(ctx, rawTokReusedSess, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for reused session token, got %v", err)
 	}
 	// Verify session was killed by reuse containment
@@ -1452,7 +1451,7 @@ func TestAuthService_SetPassword_Branches(t *testing.T) {
 	)
 
 	// User not found
-	if err := svc.SetPassword(ctx, 99999, "ComplexPass123!", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.SetPassword(ctx, 99999, "ComplexPass123!", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 
@@ -1467,7 +1466,7 @@ func TestAuthService_SetPassword_Branches(t *testing.T) {
 		IsEmailVerified: true,
 	}
 	_ = userRepo.Create(ctx, u)
-	if err := svc.SetPassword(ctx, u.ID, "ComplexPass123!", "1.1.1.1"); err != ErrPasswordAlreadySet {
+	if err := svc.SetPassword(ctx, u.ID, "ComplexPass123!", "1.1.1.1"); !errors.Is(err, ErrPasswordAlreadySet) {
 		t.Fatalf("expected ErrPasswordAlreadySet, got %v", err)
 	}
 
@@ -1538,16 +1537,16 @@ func TestOAuthService_FullLifecycle(t *testing.T) {
 
 	// 2. ConsumeState
 	// Empty state
-	if _, err := svc.ConsumeState(ctx, ""); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, ""); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid on empty state, got %v", err)
 	}
 	// Missing state
-	if _, err := svc.ConsumeState(ctx, "nonexistent-state"); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, "nonexistent-state"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid on nonexistent state, got %v", err)
 	}
 	// Corrupt JSON in store
 	memStore.Set(oauthChallengeKey("corrupt"), "not-valid-json", time.Minute)
-	if _, err := svc.ConsumeState(ctx, "corrupt"); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, "corrupt"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid on corrupt state, got %v", err)
 	}
 	// Valid state
@@ -1556,13 +1555,13 @@ func TestOAuthService_FullLifecycle(t *testing.T) {
 		t.Fatalf("ConsumeState failed: ch=%+v, err=%v", ch, err)
 	}
 	// Replay state
-	if _, err := svc.ConsumeState(ctx, state); err != ErrOAuthStateInvalid {
+	if _, err := svc.ConsumeState(ctx, state); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid on replayed state, got %v", err)
 	}
 
 	// 3. Unlink
 	// User not found in identities
-	if err := svc.Unlink(ctx, 99999, "google", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.Unlink(ctx, 99999, "google", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound on missing identity, got %v", err)
 	}
 
@@ -1583,7 +1582,7 @@ func TestOAuthService_FullLifecycle(t *testing.T) {
 	})
 
 	// Attempt unlink when it's the sole login method
-	if err := svc.Unlink(ctx, testUser.ID, "google", "1.1.1.1"); err != ErrCannotUnlinkOnlyMethod {
+	if err := svc.Unlink(ctx, testUser.ID, "google", "1.1.1.1"); !errors.Is(err, ErrCannotUnlinkOnlyMethod) {
 		t.Fatalf("expected ErrCannotUnlinkOnlyMethod, got %v", err)
 	}
 
@@ -1666,7 +1665,7 @@ func TestPasskeyService_FullLifecycle(t *testing.T) {
 
 	// 2. BeginRegistration
 	// User not found
-	if _, err := svcDirect.BeginRegistration(ctx, 99999, PasskeyBeginInput{DisplayName: "MacBook"}); err != ErrUserNotFound {
+	if _, err := svcDirect.BeginRegistration(ctx, 99999, PasskeyBeginInput{DisplayName: "MacBook"}); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Valid user
@@ -1680,7 +1679,7 @@ func TestPasskeyService_FullLifecycle(t *testing.T) {
 
 	// 3. BeginAuthentication
 	// User not found
-	if _, err := svcDirect.BeginAuthentication(ctx, 99999); err != ErrUserNotFound {
+	if _, err := svcDirect.BeginAuthentication(ctx, 99999); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// User with no registered passkeys
@@ -1691,7 +1690,7 @@ func TestPasskeyService_FullLifecycle(t *testing.T) {
 	// 4. FinishAuthentication error branches
 	// Nil tokens issuer
 	req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/auth", nil)
-	if _, err := svcDirect.FinishAuthentication(ctx, u.ID, req); err != ErrPasskeyNotConfigured {
+	if _, err := svcDirect.FinishAuthentication(ctx, u.ID, req); !errors.Is(err, ErrPasskeyNotConfigured) {
 		t.Fatalf("expected ErrPasskeyNotConfigured, got %v", err)
 	}
 
@@ -1700,7 +1699,7 @@ func TestPasskeyService_FullLifecycle(t *testing.T) {
 	svcWithTokens, _ := NewPasskeyService(passkeyRepo, userRepo, auditRepo, memStore, issuerMock, PasskeyConfig{
 		RPDisplayName: "TestRP", RPID: "localhost", RPOrigins: []string{"http://localhost:8080"},
 	})
-	if _, err := svcWithTokens.FinishAuthentication(ctx, u.ID, req); err != ErrPasskeyChallenge {
+	if _, err := svcWithTokens.FinishAuthentication(ctx, u.ID, req); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Fatalf("expected ErrPasskeyChallenge, got %v", err)
 	}
 
@@ -1710,7 +1709,7 @@ func TestPasskeyService_FullLifecycle(t *testing.T) {
 		t.Fatalf("expected empty list, got len=%d, err=%v", len(list), err)
 	}
 	// Revoke nonexistent
-	if err := svcDirect.Revoke(ctx, 9999, u.ID); err != ErrSessionNotFound {
+	if err := svcDirect.Revoke(ctx, 9999, u.ID); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound on Revoke, got %v", err)
 	}
 }
@@ -1727,15 +1726,15 @@ func TestWebhookService_EnqueueAndDeliver(t *testing.T) {
 	svc := NewWebhookService(repo)
 
 	// 1. URL validation
-	if err := svc.ValidateURL("not-a-url"); err != ErrInvalidWebhookURL {
+	if err := svc.ValidateURL("not-a-url"); !errors.Is(err, ErrInvalidWebhookURL) {
 		t.Fatalf("expected ErrInvalidWebhookURL, got %v", err)
 	}
-	if err := svc.ValidateURL("ftp://example.com"); err != ErrInvalidWebhookURL {
+	if err := svc.ValidateURL("ftp://example.com"); !errors.Is(err, ErrInvalidWebhookURL) {
 		t.Fatalf("expected ErrInvalidWebhookURL for ftp, got %v", err)
 	}
 
 	// Blocked SSRF check (without allowLocalhost)
-	if err := svc.ValidateURL("http://127.0.0.1:8080/hook"); err != ErrWebhookSSRFBlocked {
+	if err := svc.ValidateURL("http://127.0.0.1:8080/hook"); !errors.Is(err, ErrWebhookSSRFBlocked) {
 		t.Fatalf("expected ErrWebhookSSRFBlocked for localhost, got %v", err)
 	}
 
@@ -1748,7 +1747,7 @@ func TestWebhookService_EnqueueAndDeliver(t *testing.T) {
 	// 2. RegisterEndpoint
 	// When invalid URL
 	svc.SetAllowLocalhost(false)
-	if _, err := svc.RegisterEndpoint(ctx, "tenant-1", "http://127.0.0.1:8080/hook", "user.created"); err != ErrWebhookSSRFBlocked {
+	if _, err := svc.RegisterEndpoint(ctx, "tenant-1", "http://127.0.0.1:8080/hook", "user.created"); !errors.Is(err, ErrWebhookSSRFBlocked) {
 		t.Fatalf("expected ErrWebhookSSRFBlocked, got %v", err)
 	}
 	svc.SetAllowLocalhost(true)
@@ -1846,7 +1845,7 @@ func TestTOTPService_Disable_And_GetMethods_Extra(t *testing.T) {
 	}
 
 	// Enable TOTP for user
-	_, codes := enableAndVerify(t, svc, u.ID)
+	enableAndVerify(t, svc, u.ID)
 
 	// 2. Disable with valid Sudo Token
 	sudoClaimsToken, _ := testJWTManager.Issue(u.ID, u.Role, u.Email, jwt.TokenTypeSudo, 5*time.Minute)
@@ -1855,19 +1854,19 @@ func TestTOTPService_Disable_And_GetMethods_Extra(t *testing.T) {
 	}
 
 	// 3. Re-enable to test fallback branches
-	_, codes = enableAndVerify(t, svc, u.ID)
+	_, codes := enableAndVerify(t, svc, u.ID)
 
 	// Missing user in fallback (device enabled in repo, but user missing from users repo)
 	_ = repo.Upsert(ctx, &models.TOTPDevice{UserID: 99999, Enabled: true, SecretEncrypted: "enc"})
-	if err := svc.Disable(ctx, 99999, "", "Password123", codes[0], "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.Disable(ctx, 99999, "", "Password123", codes[0], "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Empty code in fallback
-	if err := svc.Disable(ctx, u.ID, "", "Password123", "", "1.1.1.1"); err != ErrInvalidCode {
+	if err := svc.Disable(ctx, u.ID, "", "Password123", "", "1.1.1.1"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for empty code, got %v", err)
 	}
 	// Empty password in fallback
-	if err := svc.Disable(ctx, u.ID, "", "", codes[0], "1.1.1.1"); err != ErrSudoRequired {
+	if err := svc.Disable(ctx, u.ID, "", "", codes[0], "1.1.1.1"); !errors.Is(err, ErrSudoRequired) {
 		t.Fatalf("expected ErrSudoRequired for empty password, got %v", err)
 	}
 
@@ -1890,16 +1889,16 @@ func TestTOTPService_Disable_And_GetMethods_Extra(t *testing.T) {
 
 	// 5. ViewRecoveryCodes error branches
 	// Non-enabled device
-	if _, err := svc.ViewRecoveryCodes(ctx, 999999, "123456"); err != ErrInvalidCode {
+	if _, err := svc.ViewRecoveryCodes(ctx, 999999, "123456"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for missing device, got %v", err)
 	}
 	// Code length != 6
-	if _, err := svc.ViewRecoveryCodes(ctx, u.ID, "12345"); err != ErrInvalidCode {
+	if _, err := svc.ViewRecoveryCodes(ctx, u.ID, "12345"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for code length != 6, got %v", err)
 	}
 
 	// 6. RegenerateRecoveryCodes for missing device
-	if _, err := svc.RegenerateRecoveryCodes(ctx, 999999); err != ErrInvalidCode {
+	if _, err := svc.RegenerateRecoveryCodes(ctx, 999999); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode for missing device on regenerate, got %v", err)
 	}
 }
@@ -2023,14 +2022,15 @@ func TestAuthService_Logout_And_LogoutAll_Comprehensive(t *testing.T) {
 		nil, nil,
 	)
 	// Invalid ID
-	if err := svcLegacy.RevokeSession(ctx, "bad-id", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svcLegacy.RevokeSession(ctx, "bad-id", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound for bad-id, got %v", err)
 	}
 	// Missing token in legacy mode
-	if err := svcLegacy.RevokeSession(ctx, "99999", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svcLegacy.RevokeSession(ctx, "99999", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound for missing token, got %v", err)
 	}
 	// Active token in legacy mode
+	// #nosec G101 -- test mock token hash, not real credentials
 	legacyTok := &models.RefreshToken{
 		TokenHash: "hash-legacy-sess",
 		UserID:    u.ID,
@@ -2044,7 +2044,7 @@ func TestAuthService_Logout_And_LogoutAll_Comprehensive(t *testing.T) {
 
 	// Modern mode (sessions != nil)
 	// Not found / wrong user
-	if err := svc.RevokeSession(ctx, "nonexistent-sess", u.ID, "1.1.1.1"); err != ErrSessionNotFound {
+	if err := svc.RevokeSession(ctx, "nonexistent-sess", u.ID, "1.1.1.1"); !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("expected ErrSessionNotFound, got %v", err)
 	}
 	sessToRevoke := &models.Session{
@@ -2111,33 +2111,33 @@ func TestAuthService_ConfirmChangeEmail_Comprehensive(t *testing.T) {
 	_ = userRepo.Create(ctx, u2)
 
 	// 1. Invalid token / missing store
-	if err := svc.ConfirmChangeEmail(ctx, "", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on empty token, got %v", err)
 	}
-	if err := svc.ConfirmChangeEmail(ctx, "not-found", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "not-found", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on missing token, got %v", err)
 	}
 
 	// 2. Malformed payload
 	memStore.Set("change_email:bad-parts", "only:two", time.Hour)
-	if err := svc.ConfirmChangeEmail(ctx, "bad-parts", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "bad-parts", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on bad parts, got %v", err)
 	}
 
 	memStore.Set("change_email:bad-uid", "notanumber:old@ex.com:new@ex.com", time.Hour)
-	if err := svc.ConfirmChangeEmail(ctx, "bad-uid", "1.1.1.1"); err != ErrInvalidToken {
+	if err := svc.ConfirmChangeEmail(ctx, "bad-uid", "1.1.1.1"); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken on bad uid, got %v", err)
 	}
 
 	// 3. Collision with another user's email
 	memStore.Set("change_email:colliding", fmt.Sprintf("%d:%s:%s", u1.ID, u1.Email, u2.Email), time.Hour)
-	if err := svc.ConfirmChangeEmail(ctx, "colliding", "1.1.1.1"); err != ErrEmailExists {
+	if err := svc.ConfirmChangeEmail(ctx, "colliding", "1.1.1.1"); !errors.Is(err, ErrEmailExists) {
 		t.Fatalf("expected ErrEmailExists on colliding email, got %v", err)
 	}
 
 	// 4. Missing user
 	memStore.Set("change_email:ghost", "99999:old@ex.com:ghost@ex.com", time.Hour)
-	if err := svc.ConfirmChangeEmail(ctx, "ghost", "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.ConfirmChangeEmail(ctx, "ghost", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound on missing user, got %v", err)
 	}
 
@@ -2305,14 +2305,14 @@ func TestOAuthService_HandleCallback_Branches(t *testing.T) {
 	)
 
 	// 1. State missing -> ErrOAuthStateInvalid
-	if _, _, _, err := svc.HandleCallback(ctx, "code", "missing-state", "1.1.1.1", "GoTest"); err != ErrOAuthStateInvalid {
+	if _, _, _, err := svc.HandleCallback(ctx, "code", "missing-state", "1.1.1.1", "GoTest"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid, got %v", err)
 	}
 
 	// 2. Client is nil -> ErrOAuthNotConfigured
 	svcNoClient := NewOAuthService(userRepo, oauthRepo, memStore, issuer, verifier, nil)
 	memStore.Set(oauthChallengeKey("st-1"), `{"verifier":"v1","nonce":"n1"}`, time.Minute)
-	if _, _, _, err := svcNoClient.HandleCallback(ctx, "code", "st-1", "1.1.1.1", "GoTest"); err != ErrOAuthNotConfigured {
+	if _, _, _, err := svcNoClient.HandleCallback(ctx, "code", "st-1", "1.1.1.1", "GoTest"); !errors.Is(err, ErrOAuthNotConfigured) {
 		t.Fatalf("expected ErrOAuthNotConfigured, got %v", err)
 	}
 
@@ -2332,7 +2332,7 @@ func TestOAuthService_HandleCallback_Branches(t *testing.T) {
 		Nonce:         "wrong-nonce",
 	}
 	memStore.Set(oauthChallengeKey("st-3"), `{"verifier":"v3","nonce":"correct-nonce"}`, time.Minute)
-	if _, _, _, err := svc.HandleCallback(ctx, "code", "st-3", "1.1.1.1", "GoTest"); err != ErrOAuthTokenVerificationFailed {
+	if _, _, _, err := svc.HandleCallback(ctx, "code", "st-3", "1.1.1.1", "GoTest"); !errors.Is(err, ErrOAuthTokenVerificationFailed) {
 		t.Fatalf("expected ErrOAuthTokenVerificationFailed on nonce mismatch, got %v", err)
 	}
 
@@ -2344,7 +2344,7 @@ func TestOAuthService_HandleCallback_Branches(t *testing.T) {
 		Nonce:         "matching-nonce",
 	}
 	memStore.Set(oauthChallengeKey("st-4"), `{"verifier":"v4","nonce":"matching-nonce"}`, time.Minute)
-	if _, _, _, err := svc.HandleCallback(ctx, "code", "st-4", "1.1.1.1", "GoTest"); err != ErrOAuthEmailNotVerified {
+	if _, _, _, err := svc.HandleCallback(ctx, "code", "st-4", "1.1.1.1", "GoTest"); !errors.Is(err, ErrOAuthEmailNotVerified) {
 		t.Fatalf("expected ErrOAuthEmailNotVerified, got %v", err)
 	}
 
@@ -2366,7 +2366,7 @@ func TestOAuthService_HandleCallback_Branches(t *testing.T) {
 		Nonce:         "matching-nonce",
 	}
 	memStore.Set(oauthChallengeKey("st-5"), `{"verifier":"v5","nonce":"matching-nonce"}`, time.Minute)
-	if _, _, _, err := svc.HandleCallback(ctx, "code", "st-5", "1.1.1.1", "GoTest"); err != ErrOAuthEmailTaken {
+	if _, _, _, err := svc.HandleCallback(ctx, "code", "st-5", "1.1.1.1", "GoTest"); !errors.Is(err, ErrOAuthEmailTaken) {
 		t.Fatalf("expected ErrOAuthEmailTaken, got %v", err)
 	}
 
@@ -2504,7 +2504,7 @@ func TestGoogleIDTokenVerifier_EdgeCases(t *testing.T) {
 		t.Fatalf("NewProductionGoogleVerifier failed: %+v", v)
 	}
 	// Invalid token should fail with ErrOAuthTokenVerificationFailed
-	if _, err := v.Verify(context.Background(), "invalid.jwt.token"); err != ErrOAuthTokenVerificationFailed {
+	if _, err := v.Verify(context.Background(), "invalid.jwt.token"); !errors.Is(err, ErrOAuthTokenVerificationFailed) {
 		t.Fatalf("expected ErrOAuthTokenVerificationFailed, got %v", err)
 	}
 }
@@ -2616,7 +2616,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 	_ = userRepo.Create(ctx, unverifiedUser)
 	db.Model(unverifiedUser).Update("is_email_verified", false)
 
-	if _, _, _, err := svc.Login(ctx, LoginInput{Email: unverifiedUser.Email, Password: "Password123!"}, "1.1.1.1", "GoTest"); err != ErrEmailNotVerified {
+	if _, _, _, err := svc.Login(ctx, LoginInput{Email: unverifiedUser.Email, Password: "Password123!"}, "1.1.1.1", "GoTest"); !errors.Is(err, ErrEmailNotVerified) {
 		t.Fatalf("expected ErrEmailNotVerified, got %v", err)
 	}
 
@@ -2630,7 +2630,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 	}
 	_ = userRepo.Create(ctx, inactiveUser)
 	db.Model(inactiveUser).Update("is_active", false)
-	if _, _, _, err := svc.Login(ctx, LoginInput{Email: inactiveUser.Email, Password: "Password123!"}, "1.1.1.1", "GoTest"); err != ErrAccountDisabled {
+	if _, _, _, err := svc.Login(ctx, LoginInput{Email: inactiveUser.Email, Password: "Password123!"}, "1.1.1.1", "GoTest"); !errors.Is(err, ErrAccountDisabled) {
 		t.Fatalf("expected ErrAccountDisabled, got %v", err)
 	}
 
@@ -2645,7 +2645,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 		LockedUntil:     &lockedTime,
 	}
 	_ = userRepo.Create(ctx, lockedUser)
-	if _, _, _, err := svc.Login(ctx, LoginInput{Email: lockedUser.Email, Password: "Password123!"}, "1.1.1.1", "GoTest"); err != ErrAccountLocked {
+	if _, _, _, err := svc.Login(ctx, LoginInput{Email: lockedUser.Email, Password: "Password123!"}, "1.1.1.1", "GoTest"); !errors.Is(err, ErrAccountLocked) {
 		t.Fatalf("expected ErrAccountLocked, got %v", err)
 	}
 
@@ -2658,7 +2658,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 		IsActive:        true,
 	}
 	_ = userRepo.Create(ctx, oauthOnlyUser)
-	if _, _, _, err := svc.Login(ctx, LoginInput{Email: oauthOnlyUser.Email, Password: "AnyPassword123!"}, "1.1.1.1", "GoTest"); err != ErrInvalidCredentials {
+	if _, _, _, err := svc.Login(ctx, LoginInput{Email: oauthOnlyUser.Email, Password: "AnyPassword123!"}, "1.1.1.1", "GoTest"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials for OAuth-only account, got %v", err)
 	}
 
@@ -2681,7 +2681,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 	}
 	// Layer 5: per-email cap (max 2)
 	_ = svc.ResendVerifyEmail(ctx, unverifiedUser.Email, "1.1.1.1")
-	if err := svc.ResendVerifyEmail(ctx, unverifiedUser.Email, "1.1.1.1"); err != ErrRateLimited {
+	if err := svc.ResendVerifyEmail(ctx, unverifiedUser.Email, "1.1.1.1"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited for per-email cap, got %v", err)
 	}
 
@@ -2694,11 +2694,11 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 
 	// 5. ChangePassword edge cases
 	// Missing user
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: 99999, OldPassword: "old", NewPassword: "NewPassword123!"}, "1.1.1.1"); err != ErrUserNotFound {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: 99999, OldPassword: "old", NewPassword: "NewPassword123!"}, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Wrong old password
-	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: unverifiedUser.ID, OldPassword: "WrongPassword!", NewPassword: "NewPassword123!"}, "1.1.1.1"); err != ErrInvalidCredentials {
+	if err := svc.ChangePassword(ctx, ChangePasswordInput{UserID: unverifiedUser.ID, OldPassword: "WrongPassword!", NewPassword: "NewPassword123!"}, "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
 	}
 	// Weak new password
@@ -2712,7 +2712,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 
 	// 6. CompleteMFALogin with inactive user
 	totpVal.err = nil
-	if _, _, err := svc.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: inactiveUser.ID, Code: "123456"}); err != ErrInvalidToken {
+	if _, _, err := svc.CompleteMFALogin(ctx, CompleteMFALoginInput{UserID: inactiveUser.ID, Code: "123456"}); !errors.Is(err, ErrInvalidToken) {
 		t.Fatalf("expected ErrInvalidToken for inactive user, got %v", err)
 	}
 
@@ -2730,18 +2730,18 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 		t.Fatalf("Enable on abandoned device failed: %v", err)
 	}
 	// VerifyEnable with wrong code
-	if _, err := totpSvc.VerifyEnable(ctx, unverifiedUser.ID, "000000"); err != ErrInvalidCode {
+	if _, err := totpSvc.VerifyEnable(ctx, unverifiedUser.ID, "000000"); !errors.Is(err, ErrInvalidCode) {
 		t.Fatalf("expected ErrInvalidCode, got %v", err)
 	}
 
 	// 8. AdminService NDJSON export and User Locking
 	adminSvc := NewAdminService(userRepo, sessionRepo, tokenRepo, auditRepo, memStore)
 	// Lock self -> ErrCannotLockSelf
-	if err := adminSvc.LockUser(ctx, 10, 10, time.Hour, "1.1.1.1"); err != ErrCannotLockSelf {
+	if err := adminSvc.LockUser(ctx, 10, 10, time.Hour, "1.1.1.1"); !errors.Is(err, ErrCannotLockSelf) {
 		t.Fatalf("expected ErrCannotLockSelf, got %v", err)
 	}
 	// Lock missing user -> ErrUserNotFound
-	if err := adminSvc.LockUser(ctx, 10, 99999, time.Hour, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.LockUser(ctx, 10, 99999, time.Hour, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// Lock with lockDuration <= 0
@@ -2749,11 +2749,11 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 		t.Fatalf("LockUser with indefinite lock failed: %v", err)
 	}
 	// Unlock missing user -> ErrUserNotFound
-	if err := adminSvc.UnlockUser(ctx, 10, 99999, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.UnlockUser(ctx, 10, 99999, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// ForceLogout missing user -> ErrUserNotFound
-	if err := adminSvc.ForceLogout(ctx, 10, 99999, "1.1.1.1"); err != ErrUserNotFound {
+	if err := adminSvc.ForceLogout(ctx, 10, 99999, "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound, got %v", err)
 	}
 	// ExportAuditLogs NDJSON format
@@ -2860,6 +2860,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 		authCfg, rlCfg, jwtCfg, notify, NoOpCaptchaVerifier{}, geo.NewNoOpResolver(),
 		nil, nil,
 	)
+	// #nosec G101 -- test mock token hash, not real credentials
 	_ = tokenRepo.Create(ctx, &models.RefreshToken{
 		TokenHash: "tok-sess-list-1",
 		UserID:    u.ID,
@@ -2890,7 +2891,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 		t.Fatalf("RequestChangeEmail failed: %v", err)
 	}
 	// Call 2 trips rate limit (ChangeEmailGlobalMax / PerUserMax = 1)
-	if err := svc.RequestChangeEmail(ctx, u.ID, inReq, "1.1.1.1"); err != ErrRateLimited {
+	if err := svc.RequestChangeEmail(ctx, u.ID, inReq, "1.1.1.1"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("expected ErrRateLimited on repeated email change, got %v", err)
 	}
 
@@ -2926,7 +2927,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 
 	// ConsumeState where stored value is not string (e.g. int)
 	memStore.Set(oauthChallengeKey("int-state"), 12345, time.Minute)
-	if _, err := oauthSvc.ConsumeState(ctx, "int-state"); err != ErrOAuthStateInvalid {
+	if _, err := oauthSvc.ConsumeState(ctx, "int-state"); !errors.Is(err, ErrOAuthStateInvalid) {
 		t.Fatalf("expected ErrOAuthStateInvalid for non-string state, got %v", err)
 	}
 
@@ -2937,7 +2938,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 	}
 	oauthSvcNoID := NewOAuthService(userRepo, oauthRepo, memStore, issuer, verifier, clientNoIDTok)
 	memStore.Set(oauthChallengeKey("st-no-id"), `{"verifier":"v","nonce":"n"}`, time.Minute)
-	if _, _, _, err := oauthSvcNoID.HandleCallback(ctx, "code", "st-no-id", "1.1.1.1", "GoTest"); err != ErrOAuthTokenVerificationFailed {
+	if _, _, _, err := oauthSvcNoID.HandleCallback(ctx, "code", "st-no-id", "1.1.1.1", "GoTest"); !errors.Is(err, ErrOAuthTokenVerificationFailed) {
 		t.Fatalf("expected ErrOAuthTokenVerificationFailed for missing id_token, got %v", err)
 	}
 
@@ -2954,7 +2955,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 		EmailVerified: true,
 		Nonce:         "n",
 	}
-	if _, _, _, err := oauthSvc.HandleCallback(ctx, "code", "st-dangling", "1.1.1.1", "GoTest"); err != ErrUserNotFound {
+	if _, _, _, err := oauthSvc.HandleCallback(ctx, "code", "st-dangling", "1.1.1.1", "GoTest"); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("expected ErrUserNotFound for dangling identity, got %v", err)
 	}
 
@@ -2985,7 +2986,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 	}
 	// FinishRegistration missing challenge
 	req := httptest.NewRequest(http.MethodPost, "http://localhost:8080/passkey/register", nil)
-	if _, err := pkSvc.FinishRegistration(ctx, u.ID, req); err != ErrPasskeyChallenge {
+	if _, err := pkSvc.FinishRegistration(ctx, u.ID, req); !errors.Is(err, ErrPasskeyChallenge) {
 		t.Fatalf("expected ErrPasskeyChallenge for FinishRegistration, got %v", err)
 	}
 

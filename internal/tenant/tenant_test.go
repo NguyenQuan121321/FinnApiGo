@@ -6,7 +6,9 @@ import (
 )
 
 func TestFromContext(t *testing.T) {
-	if got := FromContext(nil); got != DefaultTenantID {
+	var nilCtx context.Context
+	//nolint:staticcheck // SA1012: deliberate nil context test to verify defensive fallback
+	if got := FromContext(nilCtx); got != DefaultTenantID {
 		t.Fatalf("FromContext(nil) = %q, want %q", got, DefaultTenantID)
 	}
 	if got := FromContext(context.Background()); got != DefaultTenantID {
