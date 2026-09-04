@@ -10,42 +10,80 @@ FinnApiGo enforces strict boundaries between operational domain logic, infrastru
 
 ```
 FinnApiGo/
-├── cmd/                          # Production entry points
-│   ├── server/                   # HTTP daemon composition root & graceful shutdown
-│   └── migrate/                  # Database migration CLI runner
+├── cmd/                               # Production entry points
+│   ├── migrate/main.go                # Database migration CLI runner (up, down, force, version)
+│   └── server/main.go                 # HTTP daemon composition root, dependency wiring, graceful shutdown
 │
-├── internal/                     # Core domain business logic (private, encapsulated)
-│   ├── routes/                   # Route tree registration and middleware pipelines
-│   ├── handlers/                 # HTTP request decoding, DTO validation, and response envelopes
-│   ├── services/                 # Business logic, cryptography, security policies (zero Gin deps)
-│   ├── repositories/             # Persistence layer with context & tenant scoping (GORM)
-│   ├── middleware/               # Auth, RBAC, Sudo, Tenant, Rate Limiting, Concurrency Limiting
-│   ├── tenant/                   # Multi-tenancy context injection & extraction helpers
-│   ├── store/                    # Key-value state abstraction (In-Memory and Redis v9)
-│   ├── models/                   # GORM domain models
-│   └── config/                   # Twelve-Factor typed configuration
+├── internal/                          # Core domain business logic (private, encapsulated)
+│   ├── apidrift/                      # Route-to-OpenAPI bidirectional contract drift check
+│   ├── config/                        # Twelve-Factor typed configuration & fail-fast validation
+│   ├── crypto/                        # Reversible AES-256-GCM authenticated cipher
+│   ├── database/                      # GORM connection pool (MySQL/SQLite) and embedded migrator
+│   ├── device/                        # Zero-dependency User-Agent string parser
+│   ├── geo/                           # Pluggable IP-to-location resolver interface
+│   ├── handlers/                      # HTTP request decoding, DTO validation, and response envelopes
+│   ├── hash/                          # Cost-parameterized bcrypt password hashing and SHA-256 token hashing
+│   ├── jobs/                          # Distributed background jobs and leader election coordination
+│   ├── jwt/                           # Keyset-aware JWT manager with kid stamping & key rotation
+│   ├── logging/                       # Slog JSON handler decorator with automated secret redaction
+│   ├── metrics/                       # Prometheus metric registry, counters, and bearer auth guard
+│   ├── middleware/                    # Tenant, Auth, RBAC, Sudo, MFA Pending, Rate Limit, Semaphore, Security Headers
+│   ├── models/                        # GORM database schemas & domain models
+│   ├── netutil/                       # IP resolution, trusted proxy validation, and anti-SSRF CIDR checking
+│   ├── repositories/                  # Persistence layer with context & tenant scoping (GORM)
+│   ├── response/                      # Standardized JSON response envelope ({code, message, data})
+│   ├── routes/                        # Route tree registration, request logger, tracing, trusted proxies
+│   ├── services/                      # Business logic, cryptography, security policies (zero Gin deps)
+│   ├── store/                         # Key-value state abstraction (InMemoryStore and RedisStore v9)
+│   ├── swagger/                       # Documentation-only response envelope types for Swag
+│   ├── tenant/                        # Multi-tenancy context injection & extraction helpers
+│   └── tracing/                       # OpenTelemetry tracer provider initialization & span propagation
 │
-├── tests/                        # Dedicated high-level test suites (isolated from domain code)
-│   ├── integration/              # High-level integration tests
-│   │   ├── all_49_endpoints_test.go # Exhaustive audit of all 49 endpoints (<1s execution)
-│   │   ├── live_api_demo_test.go # Multi-tenant workflow & session verification
-│   │   ├── phase1_e2e_test.go    # Account lifecycle, GDPR erasure, MFA aggregation
-│   │   └── phase2_e2e_test.go    # Tenant isolation, RBAC, and trusted devices
-│   ├── load/                     # Concurrency, benchmark, and k6 load testing scripts
-│   ├── passkey_test.html         # Browser testbed for WebAuthn passkey ceremonies
-│   └── README.md                 # Test suite quickstart and runner guide
+├── tests/                             # Dedicated high-level test suites (isolated from domain code)
+│   ├── integration/                   # High-level integration tests
+│   │   ├── all_49_endpoints_test.go   # Exhaustive audit of all 49 endpoints (<1s runtime on in-memory SQLite)
+│   │   ├── live_api_demo_test.go      # Multi-tenant workflow & session verification
+│   │   ├── phase1_e2e_test.go         # Account lifecycle, GDPR erasure, MFA aggregation
+│   │   └── phase2_e2e_test.go         # Tenant isolation, RBAC, and trusted devices
+│   ├── load/                          # Concurrency, benchmark, and k6 load testing scripts
+│   │   ├── login_test.js              # Login endpoint concurrency benchmark
+│   │   ├── passkey_test.js            # Passkey assertion load test
+│   │   ├── README.md                  # Load test execution guide
+│   │   ├── refresh_test.js            # Refresh token rotation concurrency test
+│   │   ├── register_test.js           # Registration throughput test
+│   │   └── totp_load_test.js          # TOTP concurrency and semaphore saturation test
+│   ├── passkey_test.html              # Browser testbed for WebAuthn passkey ceremonies
+│   └── README.md                      # Test suite quickstart and runner guide
 │
-├── Bruno/                        # Operational API collection for manual testing (GUI)
-│   ├── Auth/                     # 22 requests covering registration, login, profile, sessions
-│   ├── MFA/                      # 8 requests covering TOTP enrollment, validation, sudo codes
-│   ├── Passkey/                  # 6 requests covering WebAuthn registration & step-up auth
-│   ├── Admin/                    # 6 requests covering tenant users, lock, unlock, export
-│   ├── TrustedDevices/           # 2 requests covering remember-me device management
-│   ├── Webhooks/                 # 1 request covering signed webhook registration
-│   └── environments/             # Environment definitions (Local, Staging, Production)
+├── Bruno/                             # Operational API collection for manual testing (GUI)
+│   ├── Admin/                         # Tenant user management, lockout, force-logout, audit export (6 requests)
+│   ├── Auth/                          # Core authentication, profile, credentials, sessions, OAuth (22 requests)
+│   ├── environments/                  # Environment definitions (Local, Production)
+│   ├── MFA/                           # TOTP enrollment, validation, sudo codes, disable (8 requests)
+│   ├── Passkey/                       # WebAuthn registration & step-up authentication (6 requests)
+│   ├── system/                        # Operational health & metrics probes (3 requests)
+│   ├── test/                          # Negative test cases, rate limit abuse, security probes (6 requests)
+│   ├── TrustedDevices/                # Remember-me MFA bypass device management (2 requests)
+│   └── Webhooks/                      # Signed webhook registration (1 request)
 │
-├── migrations/                   # Embedded SQL migration pairs (up / down)
-└── docs/                         # OpenAPI 3.0 specification, architecture guides, runbooks
+├── migrations/                        # Versioned SQL migration files (up/down pairs)
+│   ├── 0001_init.up.sql / down.sql
+│   ├── 0002_passkey_credentials.up/down
+│   ├── 0003_sessions.up.sql / down.sql
+│   ├── 0004_enterprise.up.sql / down.sql
+│   └── embed.go                       # Embedded migration assets
+│
+└── docs/                              # OpenAPI 3.0 specification, architecture guides, runbooks
+    ├── openapi.yaml                   # OpenAPI 3.0 contract of record
+    ├── swagger.json                   # Swagger 2.0 specification
+    ├── swagger.yaml                   # Swagger 2.0 YAML specification
+    ├── docs.go                        # Embedded Swagger 2.0 Go declarations
+    ├── OPERATIONS.md                  # Enterprise operational runbook
+    ├── enterprise-review-reconciliation.md
+    ├── audit-durable-queue-design.md
+    ├── deep-review-remediation-2026-08.md
+    ├── supply-chain-hardening-2026-08.md
+    └── swagger-integration-handoff-2026-09.md
 ```
 
 ### Architectural Benefits of Separation
@@ -130,6 +168,19 @@ The project includes an operational Bruno collection in the `Bruno/` directory.
 
 #### Directory `Bruno/Webhooks/` (Signed Event Webhooks):
 - `create-webhook.yml`: Register outbound webhook URL with SSRF protection and HMAC signature secret.
+
+#### Directory `Bruno/system/` (Operational Probes):
+- `healthz.yml`: Liveness health check probe (`GET /healthz`).
+- `readyz.yml`: Database readiness probe (`GET /readyz`).
+- `metrics.yml`: Prometheus metrics scrape probe (`GET /metrics`).
+
+#### Directory `Bruno/test/` (Negative & Security Scenarios):
+- `login-wrongpass-repeat.yml`: Repeated failed login attempts triggering account lockout (expects 401 then 423).
+- `register-bigbody.yml`: Request payload exceeding `MaxRequestBodyBytes` (expects 413 Payload Too Large).
+- `register-disposable-email.yml`: Disposable email domain rejection (expects 400 Bad Request).
+- `register-duplicate.yml`: Duplicate email registration attempt (expects 409 Conflict).
+- `register-honeypot.yml`: Registration with honeypot field populated (expects silent 201 without DB persist).
+- `register-velocity-repeat.yml`: Rapid registration burst exceeding IP velocity rate limit (expects 429 Too Many Requests).
 
 ---
 

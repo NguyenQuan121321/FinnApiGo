@@ -102,57 +102,160 @@ HTTP Client / Reverse Proxy
     [Databases & Caches] (MySQL 8 / SQLite, Redis / In-Memory Store)
 ```
 
-### Directory Structure
+### Complete Directory Structure
 
 ```
 FinnApiGo/
-├── cmd/
-│   ├── server/main.go                 # Application composition root, dependency injection, HTTP daemon
-│   └── migrate/main.go                # Database migration CLI runner (up | down | force | version)
-├── internal/
-│   ├── config/                        # Typed Twelve-Factor environment configuration and validation
-│   ├── database/                      # GORM/MySQL connection pool and embedded SQL migration runner
-│   ├── models/                        # GORM domain models (User, Tenant, Session, AuditLog, etc.)
-│   ├── repositories/                  # Clean GORM repositories with context awareness
-│   ├── services/                      # Pure business logic (Auth, TOTP, Passkey, Admin, Webhook, etc.)
-│   ├── handlers/                      # HTTP handlers (Sonic JSON parsing, DTO validation, envelope responses)
-│   ├── middleware/                    # Tenant, Auth, RBAC, Sudo, Rate Limiter, Concurrency Limiter
-│   ├── routes/                        # Route registration, logger, trusted proxies, Swagger UI
-│   ├── tenant/                        # Multi-tenancy context propagation and extraction helpers
-│   ├── store/                         # Distributed state abstraction (In-Memory and Redis v9)
-│   ├── hash/                          # Cost-parameterized bcrypt password hashing and SHA-256 primitives
-│   ├── jwt/                           # Keyset-aware JWT issuance, verification, and purpose checking
-│   ├── crypto/                        # AES-256-GCM authenticated sealing for secrets at rest
-│   ├── logging/                       # Slog JSON handler with automated secret redaction
-│   ├── metrics/                       # Prometheus metric definitions and exposition
-│   ├── apidrift/                      # Route-to-OpenAPI bidirectional contract drift verification
-│   ├── device/                        # Zero-dependency User-Agent string parser
-│   ├── geo/                           # IP-to-location resolver interface (NoOp default, GeoIP pluggable)
-│   └── response/                      # Standardized `{code, message, data}` JSON response envelope
-├── migrations/                        # Versioned SQL migration files (up/down pairs)
-├── tests/
-│   ├── integration/
-│   │   ├── all_49_endpoints_test.go   # Self-contained, in-memory end-to-end audit of all 49 API endpoints
-│   │   ├── live_api_demo_test.go      # Multi-tenant and session workflow integration test
-│   │   ├── phase1_e2e_test.go         # Core authentication, GDPR erasure, and MFA aggregation tests
-│   │   └── phase2_e2e_test.go         # Multi-tenant isolation, RBAC, and trusted device tests
-│   ├── load/                          # High-concurrency k6 load testing scripts
-│   ├── passkey_test.html              # Browser-based test interface for WebAuthn passkey ceremonies
-│   └── README.md                      # Comprehensive test runner and agent instructions
-├── Bruno/                             # Operational API collections for manual testing with Bruno GUI
-│   ├── Auth/                          # Core authentication, profile, deactivation, GDPR erasure
-│   ├── MFA/                           # TOTP enrollment, validation, disable, recovery codes
-│   ├── Admin/                         # Tenant user management, lockout, force-logout, audit export
-│   ├── TrustedDevices/                # Remember-me MFA bypass device management
-│   ├── Webhooks/                      # Webhook subscription registration
-│   └── environments/                  # Environment definitions (Local, Staging, Production)
-├── docs/
-│   ├── openapi.yaml                   # OpenAPI 3.0 contract of record
-│   ├── swagger.json                   # Swagger 2.0 definition for Swagger UI
-│   └── OPERATIONS.md                  # Enterprise operational runbook and test guidelines
-├── docker-compose.yml                 # Local MySQL and Redis containers
-├── Dockerfile                         # Hardened multi-stage build running as non-root user
-└── .env.example                       # Documented environment variable template
+├── .agent/                                # AI agent context, specifications, and execution tracking
+│   ├── enterprise-auth-execution-prompt.md# Core enterprise auth prompt & architectural guidelines
+│   ├── IMPLEMENTATION_PROGRESS.md         # Milestone and deliverable progress tracking
+│   ├── prompt_cicd_hardening.md           # CI/CD pipeline and test hardening instructions
+│   └── skill.md                           # AI assistant skill profile and capabilities
+├── .github/                               # GitHub Actions CI/CD and dependency automation
+│   ├── workflows/
+│   │   ├── ci.yml                         # Automated lint, vet, test, integration (MySQL+Redis), fuzz, scans
+│   │   ├── release.yml                    # Automated Goreleaser build and container image publishing
+│   │   └── security.yml                   # CodeQL, Trivy vulnerability, and Govulncheck security scanning
+│   └── dependabot.yml                     # Automated Go module dependency maintenance
+├── Bruno/                                 # Complete Bruno API collection for manual testing (GUI)
+│   ├── Admin/                             # Tenant user management, lockout, force-logout, audit export
+│   │   ├── audit-export.yml
+│   │   ├── force-logout.yml
+│   │   ├── list-users.yml
+│   │   ├── lock-user.yml
+│   │   ├── tenant-sessions.yml
+│   │   └── unlock-user.yml
+│   ├── Auth/                              # Core authentication, profile, credentials, sessions, OAuth
+│   │   ├── audit-log.yml
+│   │   ├── change-email-confirm.yml
+│   │   ├── change-email-request.yml
+│   │   ├── change-password.yml
+│   │   ├── deactivate.yml
+│   │   ├── forgot-password.yml
+│   │   ├── google-callback.yml
+│   │   ├── google-login.yml
+│   │   ├── login.yml
+│   │   ├── logout-all.yml
+│   │   ├── logout.yml
+│   │   ├── me-erase.yml
+│   │   ├── me.yml
+│   │   ├── oauth-unlink.yml
+│   │   ├── refresh-token.yml
+│   │   ├── register.yml
+│   │   ├── resend-verification.yml
+│   │   ├── reset-password.yml
+│   │   ├── session-revoke.yml
+│   │   ├── sessions.yml
+│   │   ├── set-password.yml
+│   │   └── verify-email.yml
+│   ├── environments/                      # Environment definitions
+│   │   ├── Local.yml                      # Local environment (http://localhost:8080)
+│   │   ├── Production.yml                 # Production deployment environment
+│   │   └── bruno-collection-environments.json
+│   ├── MFA/                               # TOTP enrollment, validation, sudo codes, disable
+│   │   ├── login-verify.yml
+│   │   ├── methods.yml
+│   │   ├── recovery-codes-regenerate.yml
+│   │   ├── recovery-codes-view.yml
+│   │   ├── totp-disable.yml
+│   │   ├── totp-enable.yml
+│   │   ├── totp-validate.yml
+│   │   └── totp-verify.yml
+│   ├── Passkey/                           # FIDO2 / WebAuthn registration & step-up authentication
+│   │   ├── passkey-auth-challenge.yml
+│   │   ├── passkey-auth-verify.yml
+│   │   ├── passkey-list.yml
+│   │   ├── passkey-register-challenge.yml
+│   │   ├── passkey-register-verify.yml
+│   │   └── passkey-revoke.yml
+│   ├── system/                            # Operational health & metrics probes
+│   │   ├── healthz.yml
+│   │   ├── metrics.yml
+│   │   └── readyz.yml
+│   ├── test/                              # Negative test cases, rate limit abuse, and security probes
+│   │   ├── login-wrongpass-repeat.yml
+│   │   ├── register-bigbody.yml
+│   │   ├── register-disposable-email.yml
+│   │   ├── register-duplicate.yml
+│   │   ├── register-honeypot.yml
+│   │   └── register-velocity-repeat.yml
+│   ├── TrustedDevices/                    # Remember-me MFA bypass device management
+│   │   ├── list-devices.yml
+│   │   └── revoke-device.yml
+│   └── Webhooks/                          # Outbound signed webhook subscription management
+│       └── create-webhook.yml
+├── cmd/                                   # Application entry points
+│   ├── migrate/main.go                    # Database migration CLI runner (up, down, force, version)
+│   └── server/main.go                     # Composition root, dependency injection, HTTP daemon, graceful shutdown
+├── docs/                                  # API contracts, architectural designs, and operational runbooks
+│   ├── audit-durable-queue-design.md      # Future durable audit queue design document
+│   ├── deep-review-remediation-2026-08.md # Security audit and remediation record
+│   ├── docs.go                            # Embedded Swagger 2.0 Go declarations
+│   ├── enterprise-review-reconciliation.md# Enterprise hardening reconciliation matrix
+│   ├── openapi.yaml                       # OpenAPI 3.0 contract of record (drift-verified in CI)
+│   ├── OPERATIONS.md                      # Operational runbook, Bruno catalog, and testing procedures
+│   ├── supply-chain-hardening-2026-08.md  # Supply chain & dependency security audit
+│   ├── swagger-integration-handoff-2026-09.md # Swagger UI integration documentation
+│   ├── swagger.json                       # Compiled Swagger 2.0 JSON specification
+│   └── swagger.yaml                       # Compiled Swagger 2.0 YAML specification
+├── internal/                              # Internal domain packages (private to FinnApiGo)
+│   ├── apidrift/                          # Bidirectional Gin router vs docs/openapi.yaml contract drift check
+│   ├── config/                            # Twelve-Factor environment variable parser with fail-fast validation
+│   ├── crypto/                            # Reversible AES-256-GCM cipher for at-rest secrets (TOTP secrets, recovery codes)
+│   ├── database/                          # GORM connection pool (MySQL/SQLite) and embedded golang-migrate runner
+│   ├── device/                            # Zero-dependency User-Agent string parser for session metadata
+│   ├── geo/                               # Pluggable IP-to-location resolver interface (NoOp default, GeoIP pluggable)
+│   ├── handlers/                          # HTTP adapters (Sonic JSON parsing, DTO validation, envelope responses)
+│   ├── hash/                              # Cost-parameterized bcrypt password hashing and SHA-256 token hashing
+│   ├── jobs/                              # Distributed background jobs and leader election coordination
+│   ├── jwt/                               # Keyset-aware JWT issuance & verification (kid stamping, secret rotation)
+│   ├── logging/                           # Slog JSON handler decorator with automated secret/credential redaction
+│   ├── metrics/                           # Prometheus metrics registry, counters, and internal-only bearer guard
+│   ├── middleware/                        # Tenant, Auth, RBAC, Sudo, MFA Pending, Rate Limit, Semaphore, Security Headers
+│   ├── models/                            # GORM database schemas & domain models (User, Tenant, Session, AuditLog, etc.)
+│   ├── netutil/                           # IP resolution, trusted proxy validation, and anti-SSRF CIDR checking
+│   ├── repositories/                      # Context-aware GORM persistence layer with tenant scoping and batch purge
+│   ├── response/                          # Standardized JSON response envelope ({code, message, data})
+│   ├── routes/                            # Route tree wiring, access logging, OpenTelemetry tracing, and Swagger mount
+│   ├── services/                          # Pure business logic (Auth, TOTP, Passkey, Admin, TrustedDevice, Webhook, etc.)
+│   ├── store/                             # Distributed state abstraction (InMemoryStore and RedisStore v9)
+│   ├── swagger/                           # Documentation-only response envelope types for Swag annotations
+│   ├── tenant/                            # Multi-tenancy context injection and extraction helpers
+│   └── tracing/                           # OpenTelemetry tracer provider initialization and propagation
+├── migrations/                            # Embedded SQL migration files (golang-migrate)
+│   ├── 0001_init.up.sql / down.sql        # Core auth tables (users, refresh_tokens, used_tokens, totp_devices, etc.)
+│   ├── 0002_passkey_credentials.up/down   # WebAuthn passkey credentials table
+│   ├── 0003_sessions.up.sql / down.sql    # Active device sessions table
+│   ├── 0004_enterprise.up.sql / down.sql  # Multi-tenant, RBAC, trusted devices, webhooks, and audit log tables
+│   └── embed.go                           # Embeds SQL migrations into the Go binary
+├── tests/                                 # Automated integration, load, and browser test suites
+│   ├── integration/                       # High-level integration test suite
+│   │   ├── all_49_endpoints_test.go       # Exhaustive audit of all 49 endpoints (<1s runtime on in-memory SQLite)
+│   │   ├── live_api_demo_test.go          # Multi-tenant session and workflow integration test
+│   │   ├── phase1_e2e_test.go             # Core auth, GDPR erasure, and MFA aggregation integration test
+│   │   └── phase2_e2e_test.go             # Tenant isolation, RBAC, and trusted devices integration test
+│   ├── load/                              # High-concurrency k6 load test scripts
+│   │   ├── login_test.js                  # Login endpoint concurrency benchmark
+│   │   ├── passkey_test.js                # Passkey assertion load test
+│   │   ├── README.md                      # Load test execution guide
+│   │   ├── refresh_test.js                # Refresh token rotation concurrency test
+│   │   ├── register_test.js               # Registration throughput test
+│   │   └── totp_load_test.js              # TOTP concurrency and semaphore saturation test
+│   ├── passkey_test.html                  # Browser-based test interface for WebAuthn passkey ceremonies
+│   └── README.md                          # Test suite overview and agent runner instructions
+├── .env.example                           # Documented template of all configuration environment variables
+├── .gitattributes                         # Git line-ending and binary file attributes
+├── .gitignore                             # Files and directories ignored by Git
+├── .golangci.yml                          # Linter rules (govet, staticcheck, errcheck, gosec, depguard, etc.)
+├── .goreleaser.yml                        # GoReleaser configuration for automated binary release packaging
+├── ARCHITECTURE.md                        # Architectural patterns, runtime flow, and package boundaries
+├── CHANGELOG.md                           # Version history and security hardening log (Keep a Changelog format)
+├── docker-compose.yml                     # Local development MySQL 8 and Redis v9 service containers
+├── Dockerfile                             # Multi-stage container build running as non-root user
+├── go.mod                                 # Go module definition and dependencies (pinned Go 1.26)
+├── go.sum                                 # Checksums for Go module dependencies
+├── README.md                              # Main project documentation and comprehensive API reference
+└── SECURITY.md                            # Security vulnerability reporting policy
 ```
 
 ---

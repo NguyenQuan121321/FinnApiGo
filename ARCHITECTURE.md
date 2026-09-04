@@ -49,30 +49,52 @@ flowchart TD
 
 ## 2. Package Boundaries & Responsibilities
 
+The codebase is partitioned into decoupled packages with clear, single-responsibility contracts:
+
+### Application Core & Execution
 - **`cmd/server`**: Composition root. Reads configuration, initializes database and keysets, wires dependencies, launches background workers (audit flush, session/token cleanup), and handles graceful OS signal shutdown.
 - **`cmd/migrate`**: Standalone database migration CLI using embedded SQL files (`up`, `down`, `force`, `version`).
-- **`internal/config`**: Strongly-typed Twelve-Factor configuration with fail-fast startup validation.
-- **`internal/tenant`**: Multi-tenancy context helpers (`WithTenantID`, `TenantFromContext`) ensuring multi-tenant isolation throughout the service and persistence layers.
-- **`internal/handlers`**: HTTP presentation layer. Encapsulates request binding with `bytedance/sonic`, DTO field validation, and uniform response generation via `internal/response`. Handlers never import GORM directly.
-- **`internal/services`**: Pure domain logic (authentication, TOTP, Passkey, Admin, Trusted Devices, Webhooks, Notifier, CAPTCHA). Contains zero Gin dependencies (enforced by `depguard` linter).
-- **`internal/repositories`**: Context-aware GORM adapters handling database queries with explicit tenant scoping and LIMIT-batched deletion routines for retention purges.
-- **`internal/middleware`**:
-  - `TenantMiddleware`: Extracts tenant ID or slug from headers or subdomains.
-  - `AuthMiddleware`: Validates Bearer access tokens, enforces password-version freshness (`pwd_version`), and verifies session revocation against the denylist.
-  - `RequirePermission`: Enforces RBAC permissions dynamically.
-  - `SudoMiddleware`: Requires a valid elevated `X-Sudo-Token`.
-  - `MFAPendingMiddleware`: Restricts access exclusively to single-use `mfa_pending` JWTs.
-  - `RateLimiter`: Sliding-window and token-bucket rate limiter with store fail-open semantics.
-  - `ConcurrencyLimiter`: Semaphore capping parallel CPU-bound cryptographic operations.
-  - `SecurityHeaders`: Emits `X-Content-Type-Options`, `Referrer-Policy`, `Cache-Control: no-store`, and HSTS.
-- **`internal/store`**: High-performance key-value abstraction (`Get`, `Set`, `SetNX`, `IncrBy`, `Delete`). Default `InMemoryStore` for single instances; `RedisStore` for clustered deployments.
-- **`internal/hash` & `internal/crypto`**:
-  - `hash`: Bcrypt password hashing with configurable cost (`hash.HashPasswordWithCost`) and SHA-256 token hashing.
-  - `crypto`: AES-256-GCM authenticated sealing and unsealing for secrets at rest (TOTP seeds and recovery codes).
-- **`internal/jwt`**: Keyset-aware JWT issuance and verification (`kid` stamping, `JWT_SECRET_PREVIOUS` fallback, HS256-only enforcement).
+- **`internal/config`**: Strongly-typed Twelve-Factor configuration with fail-fast startup validation for all environment variables.
+- **`internal/database`**: GORM connection pool management (MySQL 8 / SQLite) and embedded `golang-migrate` driver runner.
+- **`internal/jobs`**: Distributed background jobs and leader election coordination backed by the shared store (`leader.go`).
+- **`internal/tracing`**: OpenTelemetry tracer provider initialization and span propagation for distributed request tracing.
+- **`internal/metrics`**: Prometheus metrics registry, counter definitions, and internal-only bearer authentication guard (`bearer.go`).
 - **`internal/logging`**: Redacting `slog.Handler` decorator replacing sensitive parameters (passwords, tokens, codes, keys) with `[REDACTED]`.
-- **`internal/metrics`**: Prometheus metrics registry and exposition handler.
-- **`internal/apidrift`**: Bidirectional route-to-OpenAPI contract drift verification.
+
+### Presentation & Transport Layer
+- **`internal/routes`**: Gin router tree registration, request access logger with span correlation, trusted-proxy configuration, and Swagger UI endpoint mounting.
+- **`internal/handlers`**: HTTP adapters parsing requests via `bytedance/sonic`, validating DTO constraints, and dispatching to services. Handlers never import GORM directly.
+- **`internal/middleware`**:
+  - `TenantMiddleware`: Extracts tenant ID or slug from headers (`X-Tenant-ID`, `X-Tenant-Slug`) or subdomains.
+  - `AuthMiddleware`: Validates Bearer access tokens, enforces password-version freshness (`pwd_version`), and checks the session denylist.
+  - `RequirePermission`: Enforces granular RBAC permissions dynamically.
+  - `SudoMiddleware`: Requires an elevated, short-lived `X-Sudo-Token`.
+  - `MFAPendingMiddleware`: Restricts access exclusively to single-use `mfa_pending` JWTs.
+  - `RateLimiter`: Token-bucket and sliding-window rate limiting with store fail-open semantics.
+  - `ConcurrencyLimiter`: Semaphore capping parallel CPU-bound cryptographic operations (TOTP verifications).
+  - `SecurityHeaders`: Emits `X-Content-Type-Options`, `Referrer-Policy`, `Cache-Control: no-store`, and HSTS.
+  - `CORS`: Strict browser origin allowlist handling.
+- **`internal/response`**: Standardized JSON response envelope (`{code, message, data}`) ensuring uniform client API contracts.
+- **`internal/swagger`**: Documentation-only response envelope types referenced by swag annotations.
+- **`internal/apidrift`**: Bidirectional route-to-OpenAPI contract drift verification test suite.
+
+### Domain & Business Logic
+- **`internal/services`**: Pure domain logic (authentication, TOTP, Passkey, Admin, Trusted Devices, Webhooks, Notifier, CAPTCHA). Contains zero Gin dependencies (enforced by `depguard` linter).
+- **`internal/tenant`**: Multi-tenancy context helpers (`WithTenantID`, `TenantFromContext`) ensuring tenant isolation throughout the domain and persistence layers.
+- **`internal/device`**: Zero-dependency User-Agent string parser producing human-readable device labels (e.g. "Chrome on Windows").
+- **`internal/geo`**: IP-to-location resolver interface (`NoOpResolver` default, MaxMind GeoIP pluggable).
+- **`internal/netutil`**: Real IP resolution, trusted proxy validation, and anti-SSRF CIDR checking for webhooks.
+
+### Cryptography & State
+- **`internal/hash`**: Cost-parameterized bcrypt password hashing (`hash.HashPasswordWithCost`, `hash.MinCost` for tests) and SHA-256 token hashing.
+- **`internal/crypto`**: AES-256-GCM authenticated sealing and unsealing for secrets at rest (TOTP seeds and recovery codes).
+- **`internal/jwt`**: Keyset-aware JWT issuance and verification (`kid` stamping, `JWT_SECRET_PREVIOUS` fallback, HS256-only enforcement).
+- **`internal/store`**: High-performance key-value abstraction (`Get`, `Set`, `SetNX`, `IncrBy`, `Delete`). Default `InMemoryStore` for single instances; `RedisStore` for clustered deployments.
+
+### Data Persistence & Migrations
+- **`internal/models`**: GORM database entities and schemas (`User`, `Tenant`, `Session`, `AuditLog`, `TOTPDevice`, `RecoveryCode`, `PasskeyCredential`, `TrustedDevice`, `WebhookEndpoint`, `WebhookDelivery`, `Role`, `Permission`, `UserRole`, `RolePermission`, `OAuthIdentity`, `UsedToken`).
+- **`internal/repositories`**: Context-aware GORM adapters handling database queries with explicit tenant scoping and LIMIT-batched deletion routines for retention purges.
+- **`migrations/`**: Embedded versioned SQL migration files (`0001_init`, `0002_passkey_credentials`, `0003_sessions`, `0004_enterprise`, `embed.go`).
 
 ---
 
