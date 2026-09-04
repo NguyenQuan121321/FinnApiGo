@@ -74,7 +74,7 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 		Password: "hashedpassword",
 		IsActive: true,
 	}
-	hp, _ := hash.HashPassword("CorrectPassword123!")
+	hp, _ := hash.HashPassword("CorrectPassword123!", hash.MinCost)
 	u.Password = hp
 	_ = userRepo.Create(ctx, u)
 
@@ -405,7 +405,7 @@ func TestAuthService_EdgeAndFallbackBranches(t *testing.T) {
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 	notify := &mockNotifier{}
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 3}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 3, BcryptCost: hash.MinCost}
 	rlCfg := config.RateLimitConfig{}
 	jwtCfg := config.JWTConfig{AccessTTL: time.Hour, RefreshTTL: 24 * time.Hour, ResetTTL: time.Hour}
 
@@ -943,7 +943,7 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 	notify := &mockNotifier{}
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 3}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 3, BcryptCost: hash.MinCost}
 	rlCfg := config.RateLimitConfig{}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:     time.Hour,
@@ -979,7 +979,7 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 		Password: "hashed",
 		IsActive: true,
 	}
-	h, _ := hash.HashPassword("OldValidPwd123!")
+	h, _ := hash.HashPassword("OldValidPwd123!", hash.MinCost)
 	u.Password = h
 	_ = users.Create(ctx, u)
 
@@ -1463,6 +1463,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 		MaxLoginAttempts:     2,
 		LoginLockoutDuration: time.Minute,
 		MaxLockoutMultiplier: 2,
+		BcryptCost:           hash.MinCost,
 	}
 	rlCfg := config.RateLimitConfig{
 		RegisterPerIPMax:         10,
@@ -1527,7 +1528,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 		Password: "hashed",
 		IsActive: true,
 	}
-	hp, _ := hash.HashPassword("Password123!")
+	hp, _ := hash.HashPassword("Password123!", hash.MinCost)
 	uEmailUser.Password = hp
 	_ = users.Create(ctx, uEmailUser)
 
@@ -1814,7 +1815,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 	notify := &mockNotifier{}
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 3}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 3, BcryptCost: hash.MinCost}
 	rlCfg := config.RateLimitConfig{}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:  time.Hour,
@@ -1838,7 +1839,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 		Password: "hashed",
 		IsActive: true,
 	}
-	h, _ := hash.HashPassword("ValidPassword123!")
+	h, _ := hash.HashPassword("ValidPassword123!", hash.MinCost)
 	u.Password = h
 	_ = users.Create(ctx, u)
 

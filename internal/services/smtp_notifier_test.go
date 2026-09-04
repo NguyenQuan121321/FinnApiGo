@@ -41,8 +41,9 @@ func fakeSMTPServer(t *testing.T, advertiseStartTLS bool) string {
 			}
 			_, _ = conn.Write([]byte(ext))
 		}
-		// Hold the conn open until the client gives up / test ends.
-		time.Sleep(2 * time.Second)
+		// Wait until client closes connection or sends next command.
+		buf := make([]byte, 1)
+		_, _ = conn.Read(buf)
 	}()
 	return ln.Addr().String()
 }

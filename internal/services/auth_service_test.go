@@ -37,6 +37,7 @@ func newTestAuthServiceWithTokens(tokens RefreshTokenRepo, opts ...AuthServiceOp
 	cfg := config.AuthConfig{
 		MaxLoginAttempts:     5,
 		LoginLockoutDuration: 15 * time.Minute,
+		BcryptCost:           hash.MinCost,
 	}
 	rateLimitCfg := config.RateLimitConfig{
 		RPS:                      100,
@@ -1076,7 +1077,7 @@ func newMFATestAuthService() (*AuthService, *mockUserRepo, *mockTokenRepo, *mock
 	totpRepo := newMockTOTPRepo()
 	totpVal := &mockTOTPValidator{}
 
-	cfg := config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute}
+	cfg := config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute, BcryptCost: hash.MinCost}
 	rlCfg := config.RateLimitConfig{
 		LoginPerAccountMax: 10000, LoginWindow: time.Minute,
 		LoginCaptchaAfterFails: 10000,
@@ -1317,7 +1318,7 @@ func TestVerifyEmail_SingleUse_SurvivesStoreFlush_C8(t *testing.T) {
 // linger toward the cap (pre-fix the counter counted EVERY attempt and never
 // reset — fail/fail/success left the account one typo away from 429).
 func TestLogin_SuccessClearsPerAccountCounter_C9(t *testing.T) {
-	cfg := config.AuthConfig{MaxLoginAttempts: 50, LoginLockoutDuration: time.Minute}
+	cfg := config.AuthConfig{MaxLoginAttempts: 50, LoginLockoutDuration: time.Minute, BcryptCost: hash.MinCost}
 	rlCfg := config.RateLimitConfig{LoginPerAccountMax: 3, LoginWindow: time.Hour}
 	svc, _, _, _, _, _ := buildAuthService(t, cfg, rlCfg, nil)
 	if _, err := svc.Register(context.Background(), RegisterInput{
@@ -1481,7 +1482,7 @@ func TestResetPassword_StoreOutage_SingleUseStillFailClosed_A1(t *testing.T) {
 	audit := &mockAuditRepo{}
 	jwtMgr := jwt.NewJWTManager("test-secret", "test-issuer")
 	notify := &mockNotifier{}
-	cfg := config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute}
+	cfg := config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute, BcryptCost: hash.MinCost}
 	rlCfg := config.RateLimitConfig{LoginPerAccountMax: 10000, LoginWindow: time.Minute}
 	jwtCfg := config.JWTConfig{AccessTTL: time.Minute, RefreshTTL: time.Hour, ResetTTL: time.Minute, VerifyTTL: time.Hour}
 	svc := NewAuthService(users, tokens, usedTokens, audit, failingStore{}, jwtMgr, cfg, rlCfg, jwtCfg, notify, nil, nil, nil, nil)
@@ -1539,7 +1540,7 @@ func TestConsoleNotifier_RefusesInReleaseMode_A8(t *testing.T) {
 // rejected by AuthMiddleware, covered in the middleware tests).
 func TestCredentialChange_RevokesAccessTokensViaPwdVer_A7(t *testing.T) {
 	svc, users, _, _, notify, _ := buildAuthService(t,
-		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute},
+		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: time.Minute, BcryptCost: hash.MinCost},
 		config.RateLimitConfig{}, nil)
 	if _, err := svc.Register(context.Background(), RegisterInput{
 		Username: "heidi", Email: "heidi@example.com", Password: "Password1", FullName: "H",
@@ -1674,7 +1675,7 @@ func TestGetUserAuditLog_P14(t *testing.T) {
 
 func TestChangeEmail_Ceremony_P12(t *testing.T) {
 	svc, users, _, audit, notify := newTestAuthService()
-	hashed, _ := hash.HashPassword("Password123")
+	hashed, _ := hash.HashPassword("Password123", hash.MinCost)
 	u := &models.User{
 		ID:              10,
 		Email:           "old@example.com",
@@ -1737,7 +1738,7 @@ func TestChangeEmail_Ceremony_P12(t *testing.T) {
 
 func TestDeactivateAndErase_P13(t *testing.T) {
 	svc, users, _, _, _ := newTestAuthService()
-	hashed, _ := hash.HashPassword("Password123")
+	hashed, _ := hash.HashPassword("Password123", hash.MinCost)
 	u := &models.User{
 		Email:           "victim@example.com",
 		Username:        "victimuser",

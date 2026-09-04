@@ -135,6 +135,8 @@ type AuthConfig struct {
 	// RequireEmailVerified gates sensitive actions behind is_email_verified
 	// (§2). When true, login is still allowed (UX) but document it as a policy.
 	RequireEmailVerified bool
+	// BcryptCost is the work factor for password hashing (defaults to bcrypt.DefaultCost if 0).
+	BcryptCost int
 	// ---- TOTP brute-force protection ----
 	// TOTPMaxAttempts is the maximum failed validate/verify attempts allowed
 	// per user within TOTPAttemptWindow before the account is locked out of
@@ -334,6 +336,7 @@ func Load() (*Config, error) {
 			RecoveryCodeBytes:    l.envInt("RECOVERY_CODE_BYTES", 16),
 			RecoveryCodeKey:      l.env("RECOVERY_CODE_KEY", ""),
 			NotifyNewIPLogin:     l.envBool("LOGIN_NOTIFY_NEW_IP", true),
+			BcryptCost:           l.envInt("BCRYPT_COST", 0),
 		},
 		RateLimit: RateLimitConfig{
 			RPS:                      l.envFloat("RATE_LIMIT_RPS", 5),

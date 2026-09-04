@@ -10,7 +10,7 @@ func TestHashPasswordAndCheckPassword(t *testing.T) {
 	passwords := []string{"", "Password1!", strings.Repeat("a", 72), "mật-khẩu🔐"}
 	for _, password := range passwords {
 		t.Run("password", func(t *testing.T) {
-			hash, err := HashPassword(password)
+			hash, err := HashPassword(password, MinCost)
 			if err != nil {
 				t.Fatalf("HashPassword: %v", err)
 			}
@@ -25,16 +25,36 @@ func TestHashPasswordAndCheckPassword(t *testing.T) {
 }
 
 func TestHashPasswordUsesUniqueSalts(t *testing.T) {
-	first, err := HashPassword("Password1!")
+	first, err := HashPassword("Password1!", MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := HashPassword("Password1!")
+	second, err := HashPassword("Password1!", MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first == second {
 		t.Fatal("bcrypt hashes must use unique salts")
+	}
+}
+
+func TestHashPasswordWithCost(t *testing.T) {
+	// Explicit MinCost
+	hMin, err := HashPasswordWithCost("Password123!", MinCost)
+	if err != nil {
+		t.Fatalf("HashPasswordWithCost failed: %v", err)
+	}
+	if !CheckPassword(hMin, "Password123!") {
+		t.Fatal("MinCost hash failed to check password")
+	}
+
+	// Out-of-bounds cost fallback
+	hFallback, err := HashPasswordWithCost("Password123!", 0)
+	if err != nil {
+		t.Fatalf("HashPasswordWithCost fallback failed: %v", err)
+	}
+	if !CheckPassword(hFallback, "Password123!") {
+		t.Fatal("fallback hash failed to check password")
 	}
 }
 
@@ -51,10 +71,10 @@ func TestHashTokenDeterministic(t *testing.T) {
 
 func TestPasswordOverBcryptLimitIsRejected(t *testing.T) {
 	tooLong := strings.Repeat("a", MaxPasswordBytes+1)
-	if _, err := HashPassword(tooLong); err == nil {
+	if _, err := HashPassword(tooLong, MinCost); err == nil {
 		t.Fatal("expected overlong password to be rejected")
 	}
-	hash, err := HashPassword(strings.Repeat("a", MaxPasswordBytes))
+	hash, err := HashPassword(strings.Repeat("a", MaxPasswordBytes), MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -70,11 +70,32 @@ type AuthService struct {
 	minPasswordScore int
 	passkeys         PasskeyRepo
 	oauthIdents      OAuthIdentityRepo
+	bcryptCost       int
+	dummyHash        string
 }
 
 // AuthServiceOption customizes optional service capabilities without growing
 // the positional constructor further.
 type AuthServiceOption func(*AuthService)
+
+// WithBcryptCost configures a custom bcrypt cost work factor (e.g. hash.MinCost for fast tests).
+func WithBcryptCost(cost int) AuthServiceOption {
+	return func(s *AuthService) {
+		if cost >= hash.MinCost && cost <= hash.MaxCost {
+			s.bcryptCost = cost
+			dh, err := hash.HashPasswordWithCost("dummy-timing-equalization", cost)
+			if err == nil {
+				s.dummyHash = dh
+			}
+		}
+	}
+}
+
+// UserService is an alias for AuthService, matching standard enterprise service naming.
+type UserService = AuthService
+
+// NewUserService is a constructor alias for NewAuthService.
+var NewUserService = NewAuthService
 
 // WithSessionRepo wires server-side session persistence (P0.3). Without it
 // the service keeps the legacy behavior: refresh-token rows act as their own
@@ -131,16 +152,50 @@ func NewAuthService(
 	if geoResolver == nil {
 		geoResolver = geo.NewNoOpResolver()
 	}
+	cost := authCfg.BcryptCost
+	if cost < hash.MinCost || cost > hash.MaxCost {
+		cost = hash.DefaultCost
+	}
 	s := &AuthService{
 		users: users, tokens: tokens, usedTokens: usedTokens, audits: audits,
 		store: store, jwt: jwt, cfg: authCfg, rlCfg: rlCfg, jwtCfg: jwtCfg,
 		notify: notify, captcha: captcha, geo: geoResolver,
 		totpRepo: totpRepo, totpValidator: totpValidator,
+		bcryptCost: cost,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.bcryptCost == hash.DefaultCost {
+		s.dummyHash = dummyHash
+	} else {
+		dh, err := hash.HashPasswordWithCost("dummy-timing-equalization", s.bcryptCost)
+		if err != nil {
+			s.dummyHash = dummyHash
+		} else {
+			s.dummyHash = dh
+		}
+	}
 	return s
+}
+
+func (s *AuthService) hashPassword(plain string) (string, error) {
+	return hash.HashPasswordWithCost(plain, s.BcryptCost())
+}
+
+func (s *AuthService) getDummyHash() string {
+	if s.dummyHash != "" {
+		return s.dummyHash
+	}
+	return dummyHash
+}
+
+// BcryptCost returns the configured bcrypt work factor.
+func (s *AuthService) BcryptCost() int {
+	if s.bcryptCost <= 0 {
+		return hash.DefaultCost
+	}
+	return s.bcryptCost
 }
 
 // TransactionalCredentialChanger is an OPTIONAL UserRepo capability: the
@@ -276,7 +331,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 		return s.handleDuplicateRegistration(ctx, existing.Email, in.IP, in.Username)
 	}
 
-	hashed, err := hash.HashPassword(in.Password)
+	hashed, err := s.hashPassword(in.Password)
 	if err != nil {
 		return UserProfile{}, err
 	}
@@ -429,7 +484,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	// bcrypt comparison against a dummy hash so both code paths take ~equal
 	// time (~100-300ms). The error message is identical either way.
 	if user == nil {
-		hash.CheckPassword(dummyHash, in.Password)
+		hash.CheckPassword(s.getDummyHash(), in.Password)
 		s.recordLoginFailIP(ctx, ip)
 		s.recordLoginFailAccount(email)
 		LoginFailures.Add(1)
@@ -464,7 +519,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	if user.Password != "" {
 		passwordMatches = hash.CheckPassword(user.Password, in.Password)
 	} else {
-		hash.CheckPassword(dummyHash, in.Password)
+		hash.CheckPassword(s.getDummyHash(), in.Password)
 	}
 	if !passwordMatches {
 		LoginFailures.Add(1)
@@ -805,7 +860,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 		// SMTP round-trip; the dummy compare closes the cheap "return
 		// immediately" oracle. SMTP latency dominates the remainder — the
 		// identical-status response does the rest.
-		hash.CheckPassword(dummyHash, "forgot-password-timing-equalization")
+		hash.CheckPassword(s.getDummyHash(), "forgot-password-timing-equalization")
 		return nil
 	}
 	resetToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
@@ -954,7 +1009,7 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 		return err
 	}
 
-	hashed, err := hash.HashPassword(in.NewPassword)
+	hashed, err := s.hashPassword(in.NewPassword)
 	if err != nil {
 		return err
 	}
@@ -999,7 +1054,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 	if s.passwordBreached(ctx, in.NewPassword) {
 		return ErrPasswordBreached
 	}
-	hashed, err := hash.HashPassword(in.NewPassword)
+	hashed, err := s.hashPassword(in.NewPassword)
 	if err != nil {
 		return err
 	}
@@ -1062,7 +1117,7 @@ func (s *AuthService) SetPassword(ctx context.Context, userID uint, newPassword,
 	if s.passwordBreached(ctx, newPassword) {
 		return ErrPasswordBreached
 	}
-	hashed, err := hash.HashPassword(newPassword)
+	hashed, err := s.hashPassword(newPassword)
 	if err != nil {
 		return err
 	}

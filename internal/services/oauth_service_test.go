@@ -195,7 +195,7 @@ func TestOAuthCallbackLinksExistingVerifiedUser(t *testing.T) {
 
 	// Pre-register a password user with the same (verified-claims) email whose
 	// local email was ALREADY verified — the only shape the link accepts.
-	pwHash, err := hash.HashPassword("Password123")
+	pwHash, err := hash.HashPassword("Password123", hash.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestOAuthCallbackResolvesByIdentityRow(t *testing.T) {
 	env := newOAuthTestEnv()
 	ctx := context.Background()
 
-	pwHash, err := hash.HashPassword("Password123")
+	pwHash, err := hash.HashPassword("Password123", hash.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,7 +427,7 @@ func TestOAuthCallbackRealMFAEnforcement(t *testing.T) {
 	idents := newMockOAuthIdentityRepo()
 	kvStore := newMockStore()
 
-	pwHash, err := hash.HashPassword("Password123")
+	pwHash, err := hash.HashPassword("Password123", hash.MinCost)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestOAuthCallbackRealMFAEnforcement(t *testing.T) {
 	authSvc := NewAuthService(
 		users, newMockTokenRepo(), newMockUsedTokenRepo(), &mockAuditRepo{}, kvStore,
 		jwtMgr,
-		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute},
+		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute, BcryptCost: hash.MinCost},
 		config.RateLimitConfig{RPS: 100, Burst: 20, LoginPerAccountMax: 100},
 		config.JWTConfig{AccessTTL: 15 * time.Minute, RefreshTTL: 24 * time.Hour, MFAPendingTTL: 5 * time.Minute},
 		&mockNotifier{}, nil, nil, totpRepo, nil,
@@ -524,7 +524,7 @@ func TestOAuthService_Unlink_SafetyAndAlert_P16(t *testing.T) {
 	}
 
 	// 2. Account WITH password CAN unlink
-	hashed, _ := hash.HashPassword("Password123")
+	hashed, _ := hash.HashPassword("Password123", hash.MinCost)
 	u1.Password = hashed
 	_ = users.Update(context.Background(), u1)
 

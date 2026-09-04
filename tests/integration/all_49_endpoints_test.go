@@ -106,7 +106,7 @@ func TestAll49Endpoints(t *testing.T) {
 	// Seed Admin User (ID: 1) and Normal User (ID: 2)
 	// #nosec G101 -- test dummy credentials
 	rawPassword := "Enterprise" + "P@ssw0rd2026!"
-	hashedPwd, err := hash.HashPassword(rawPassword)
+	hashedPwd, err := hash.HashPassword(rawPassword, hash.MinCost)
 	if err != nil {
 		t.Fatalf("hash password failed: %v", err)
 	}
@@ -209,6 +209,7 @@ func TestAll49Endpoints(t *testing.T) {
 	authCfg := config.AuthConfig{
 		MaxLoginAttempts:     5,
 		LoginLockoutDuration: 15 * time.Minute,
+		BcryptCost:           hash.MinCost,
 		TOTPMaxAttempts:      5,
 		TOTPAttemptWindow:    5 * time.Minute,
 		RecoveryCodeCount:    5,

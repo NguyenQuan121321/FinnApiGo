@@ -21,6 +21,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/config"
+	"github.com/finnapigo/finnapigo/internal/hash"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/models"
 )
@@ -50,7 +51,7 @@ func newReviewEnv(opts ...AuthServiceOption) *reviewEnv {
 	e.jwtMgr = jwt.NewJWTManager("review-secret", "review-issuer")
 	e.authSvc = NewAuthService(
 		e.users, e.tokens, e.used, e.audits, e.store, e.jwtMgr,
-		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute, NotifyNewIPLogin: true},
+		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute, NotifyNewIPLogin: true, BcryptCost: hash.MinCost},
 		config.RateLimitConfig{RPS: 100, Burst: 20, LoginPerAccountMax: 10000, LoginCaptchaAfterFails: 5},
 		config.JWTConfig{AccessTTL: 15 * time.Minute, RefreshTTL: 24 * time.Hour},
 		e.notify, nil, nil, nil, nil,
@@ -372,7 +373,7 @@ func TestNewIPNotificationDisabledByConfig(t *testing.T) {
 	if _, _, _, err := e.authSvc.Login(ctx, LoginInput{Email: "quiet@example.com", Password: "Password1"}, "5.5.5.5", "UA"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond) // allow any (wrongly) spawned alert goroutine to land
+	time.Sleep(15 * time.Millisecond) // allow any (wrongly) spawned alert goroutine to land
 	if e.notify.alertCount() != 0 {
 		t.Fatalf("alertsSent=%d, want 0 when LOGIN_NOTIFY_NEW_IP=false", e.notify.alertCount())
 	}

@@ -33,7 +33,7 @@ func TestPhase1_Scenarios_FullCoverage(t *testing.T) {
 	)
 
 	// Create user
-	hashed, _ := hash.HashPassword("ComplexP@ssw0rd!2026")
+	hashed, _ := hash.HashPassword("ComplexP@ssw0rd!2026", hash.MinCost)
 	user := &models.User{
 		Email:           "charlie@example.com",
 		Username:        "charlie",
@@ -131,7 +131,7 @@ func TestPhase1_Scenarios_ChangeEmail_ReplayAndCollisionGuards(t *testing.T) {
 	ctx := context.Background()
 	svc, users, _, _, notify := newTestAuthService()
 
-	hashed, _ := hash.HashPassword("StrongP@ssw0rd!1")
+	hashed, _ := hash.HashPassword("StrongP@ssw0rd!1", hash.MinCost)
 	u1 := &models.User{
 		Email:           "bob@example.com",
 		Username:        "bob",
@@ -141,7 +141,7 @@ func TestPhase1_Scenarios_ChangeEmail_ReplayAndCollisionGuards(t *testing.T) {
 	}
 	_ = users.Create(ctx, u1)
 
-	hashed2, _ := hash.HashPassword("StrongP@ssw0rd!2")
+	hashed2, _ := hash.HashPassword("StrongP@ssw0rd!2", hash.MinCost)
 	u2 := &models.User{
 		Email:           "existing@example.com",
 		Username:        "existing",

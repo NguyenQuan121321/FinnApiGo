@@ -17,7 +17,13 @@ func newMiniredisStore(t *testing.T) (*RedisStore, *miniredis.Miniredis, func())
 	if err != nil {
 		t.Fatalf("start miniredis: %v", err)
 	}
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	client := redis.NewClient(&redis.Options{
+		Addr:         mr.Addr(),
+		MaxRetries:   -1,
+		DialTimeout:  25 * time.Millisecond,
+		ReadTimeout:  25 * time.Millisecond,
+		WriteTimeout: 25 * time.Millisecond,
+	})
 	store := NewRedisStore(client)
 	return store, mr, func() {
 		_ = client.Close()

@@ -59,7 +59,7 @@ func TestConcurrencyLimiter_AllowsUpToCapacity(t *testing.T) {
 		if n > 5 {
 			t.Errorf("concurrency exceeded: %d > 5", n)
 		}
-		time.Sleep(20 * time.Millisecond) // hold the slot so concurrent reqs collide
+		time.Sleep(2 * time.Millisecond) // hold the slot so concurrent reqs collide
 		running.Add(-1)
 		served.Add(1)
 		c.Status(http.StatusOK)
@@ -93,35 +93,34 @@ func TestConcurrencyLimiter_AllowsUpToCapacity(t *testing.T) {
 func TestConcurrencyLimiter_RejectsExcessWith429(t *testing.T) {
 	cl := NewConcurrencyLimiter(2)
 
-	var running atomic.Int64
-
 	handler := cl.Handler()
 	r := gin.New()
+
+	started := make(chan struct{}, 2)
+	unblock := make(chan struct{})
+
 	r.GET("/", handler, func(c *gin.Context) {
-		running.Add(1)
-		time.Sleep(200 * time.Millisecond) // hold slots for a while
-		defer running.Add(-1)
+		started <- struct{}{}
+		<-unblock
 		c.Status(http.StatusOK)
 	})
 
 	rejected := atomic.Int64{}
 	var wg sync.WaitGroup
 
-	// Start 2 slow requests to fill the semaphore.
+	// Start 2 requests to fill the semaphore.
 	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
-	}()
-	go func() {
-		defer wg.Done()
-		w := httptest.NewRecorder()
-		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
-	}()
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		}()
+	}
 
-	// Give them time to acquire tokens.
-	time.Sleep(50 * time.Millisecond)
+	// Wait until both requests have acquired tokens.
+	<-started
+	<-started
 
 	// Now fire a request that should be rejected immediately.
 	wg.Add(1)
@@ -133,6 +132,10 @@ func TestConcurrencyLimiter_RejectsExcessWith429(t *testing.T) {
 			rejected.Add(1)
 		}
 	}()
+
+	// Brief pause to allow third request to be rejected, then unblock workers.
+	time.Sleep(5 * time.Millisecond)
+	close(unblock)
 
 	wg.Wait()
 

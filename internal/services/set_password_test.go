@@ -44,7 +44,7 @@ func newSQLiteAuthService(t *testing.T) (*AuthService, *gorm.DB) {
 		repositories.NewAuditRepository(db),
 		nil, // store — see comment above
 		jwt.NewJWTManager("test-secret", "test-issuer"),
-		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute},
+		config.AuthConfig{MaxLoginAttempts: 5, LoginLockoutDuration: 15 * time.Minute, BcryptCost: hash.MinCost},
 		config.RateLimitConfig{},
 		config.JWTConfig{AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour},
 		nil, nil, nil, nil, nil,
@@ -57,7 +57,7 @@ func newSQLiteAuthService(t *testing.T) (*AuthService, *gorm.DB) {
 func seedUser(t *testing.T, db *gorm.DB, username, email, password string) *models.User {
 	t.Helper()
 	if password != "" {
-		h, err := hash.HashPassword(password)
+		h, err := hash.HashPassword(password, hash.MinCost)
 		if err != nil {
 			t.Fatal(err)
 		}

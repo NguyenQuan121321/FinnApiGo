@@ -479,7 +479,7 @@ func TestAuthService_Me_CurrentPwdVersion_ListSessions_RevokeSession(t *testing.
 	memStore := store.NewInMemoryStore(0)
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 5}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 5, BcryptCost: hash.MinCost}
 	rlCfg := config.RateLimitConfig{}
 	jwtCfg := config.JWTConfig{AccessTTL: time.Hour, RefreshTTL: 24 * time.Hour}
 	notify := NewConsoleNotifier("noreply@example.com")
@@ -891,7 +891,7 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 	memStore := store.NewInMemoryStore(0)
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 5}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 5, BcryptCost: hash.MinCost}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:     time.Hour,
 		RefreshTTL:    24 * time.Hour,
@@ -909,7 +909,7 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 		WithSessionRepo(sessionRepo),
 	)
 
-	hashedOld, _ := hash.HashPassword("OldPassword123!")
+	hashedOld, _ := hash.HashPassword("OldPassword123!", hash.MinCost)
 	u := &models.User{
 		Username:        "charlie",
 		Email:           "charlie@example.com",
@@ -1107,7 +1107,7 @@ func TestAuthService_Deactivate_And_EraseAccount(t *testing.T) {
 	memStore := store.NewInMemoryStore(0)
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 5}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 5, BcryptCost: hash.MinCost}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:     time.Hour,
 		RefreshTTL:    24 * time.Hour,
@@ -1127,7 +1127,7 @@ func TestAuthService_Deactivate_And_EraseAccount(t *testing.T) {
 		WithAuthOAuthIdents(oauthRepo),
 	)
 
-	hashedPwd, _ := hash.HashPassword("Password123!")
+	hashedPwd, _ := hash.HashPassword("Password123!", hash.MinCost)
 	u := &models.User{
 		Username:        "deactivatetest",
 		Email:           "deactivate@example.com",
@@ -1236,7 +1236,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 	memStore := store.NewInMemoryStore(0)
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 5}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 5, BcryptCost: hash.MinCost}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:     time.Hour,
 		RefreshTTL:    24 * time.Hour,
@@ -1254,7 +1254,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 		WithSessionRepo(sessionRepo),
 	)
 
-	hashedPwd, _ := hash.HashPassword("Password123!")
+	hashedPwd, _ := hash.HashPassword("Password123!", hash.MinCost)
 	u := &models.User{
 		Username:        "refresher",
 		Email:           "refresher@example.com",
@@ -1436,7 +1436,7 @@ func TestAuthService_SetPassword_Branches(t *testing.T) {
 	memStore := store.NewInMemoryStore(0)
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 5}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 5, BcryptCost: hash.MinCost}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:  time.Hour,
 		RefreshTTL: 24 * time.Hour,
@@ -1456,7 +1456,7 @@ func TestAuthService_SetPassword_Branches(t *testing.T) {
 	}
 
 	// User with password already set
-	hashedPwd, _ := hash.HashPassword("InitialPwd123!")
+	hashedPwd, _ := hash.HashPassword("InitialPwd123!", hash.MinCost)
 	u := &models.User{
 		Username:        "setpwduser",
 		Email:           "setpwd@example.com",
@@ -1606,7 +1606,7 @@ func TestOAuthService_FullLifecycle(t *testing.T) {
 	}
 
 	// Test Unlink with password present
-	hashed, _ := hash.HashPassword("Password123!")
+	hashed, _ := hash.HashPassword("Password123!", hash.MinCost)
 	testUser.Password = hashed
 	_ = userRepo.Update(ctx, testUser)
 	_ = oauthRepo.Create(ctx, &models.OAuthIdentity{
@@ -1829,7 +1829,7 @@ func TestTOTPService_Disable_And_GetMethods_Extra(t *testing.T) {
 		Email:    "extra_totp@example.com",
 		Password: "hashed-password",
 	}
-	h, _ := hash.HashPassword("Password123")
+	h, _ := hash.HashPassword("Password123", hash.MinCost)
 	u.Password = h
 	_ = users.Create(context.Background(), u)
 
@@ -1924,7 +1924,7 @@ func TestAuthService_Logout_And_LogoutAll_Comprehensive(t *testing.T) {
 	memStore := store.NewInMemoryStore(0)
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 5}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 5, BcryptCost: hash.MinCost}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:  time.Hour,
 		RefreshTTL: 24 * time.Hour,
@@ -2080,7 +2080,7 @@ func TestAuthService_ConfirmChangeEmail_Comprehensive(t *testing.T) {
 	memStore := store.NewInMemoryStore(0)
 	jwtMgr := jwt.NewJWTManager("test-secret-long-enough-32-chars-!!", "test")
 
-	authCfg := config.AuthConfig{MaxLoginAttempts: 5}
+	authCfg := config.AuthConfig{MaxLoginAttempts: 5, BcryptCost: hash.MinCost}
 	jwtCfg := config.JWTConfig{
 		AccessTTL:  time.Hour,
 		RefreshTTL: 24 * time.Hour,
@@ -2540,6 +2540,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 	authCfg := config.AuthConfig{
 		MaxLoginAttempts:     5,
 		RequireEmailVerified: true,
+		BcryptCost:           hash.MinCost,
 	}
 	rlCfg := config.RateLimitConfig{
 		RegisterPerIPMax:         10,
@@ -2611,7 +2612,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 		IsEmailVerified: false,
 		IsActive:        true,
 	}
-	h, _ := hash.HashPassword("Password123!")
+	h, _ := hash.HashPassword("Password123!", hash.MinCost)
 	unverifiedUser.Password = h
 	_ = userRepo.Create(ctx, unverifiedUser)
 	db.Model(unverifiedUser).Update("is_email_verified", false)
@@ -2804,6 +2805,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 	authCfg := config.AuthConfig{
 		MaxLoginAttempts:     2,
 		RequireEmailVerified: false,
+		BcryptCost:           hash.MinCost,
 	}
 	rlCfg := config.RateLimitConfig{
 		RegisterPerIPMax:         10,
@@ -2840,7 +2842,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 		IsEmailVerified: true,
 		IsActive:        true,
 	}
-	h, _ := hash.HashPassword("Password123!")
+	h, _ := hash.HashPassword("Password123!", hash.MinCost)
 	u.Password = h
 	_ = userRepo.Create(ctx, u)
 

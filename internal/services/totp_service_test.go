@@ -1027,7 +1027,7 @@ func TestTOTPService_Disable_P11(t *testing.T) {
 		Email:    "alice@example.com",
 		Password: "hashed-password",
 	}
-	h, _ := hash.HashPassword("Password123")
+	h, _ := hash.HashPassword("Password123", hash.MinCost)
 	u.Password = h
 	_ = users.Create(context.Background(), u)
 

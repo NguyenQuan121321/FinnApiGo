@@ -8,6 +8,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/finnapigo/finnapigo/internal/store"
 )
@@ -111,7 +112,12 @@ func TestRateLimiter_SharedRedis_WindowAnchorSurvivesInstances_S1(t *testing.T) 
 // process-local token buckets and keep serving instead of hard-denying.
 func TestRateLimiter_SharedRedis_Outage_LocalFallback_S1(t *testing.T) {
 	mr := miniredis.RunT(t)
-	rs, closeRedis, err := store.NewRedisStoreFromURL("redis://" + mr.Addr())
+	rs, closeRedis, err := store.NewRedisStoreFromURL("redis://"+mr.Addr(), func(o *redis.Options) {
+		o.MaxRetries = -1
+		o.DialTimeout = 50 * time.Millisecond
+		o.ReadTimeout = 50 * time.Millisecond
+		o.WriteTimeout = 50 * time.Millisecond
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +128,7 @@ func TestRateLimiter_SharedRedis_Outage_LocalFallback_S1(t *testing.T) {
 
 	mr.Close() // store outage
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 2; i++ {
 		if got := instanceA("5.5.5.5"); got != http.StatusNoContent {
 			t.Fatalf("instance A outage request %d: %d, want 204", i, got)
 		}

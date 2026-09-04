@@ -84,7 +84,7 @@ func TestE2E_Phase1_UserLifecycle(t *testing.T) {
 	)
 
 	// 3. Register user
-	pwdHash, _ := hash.HashPassword("StrongP@ssw0rd!2026")
+	pwdHash, _ := hash.HashPassword("StrongP@ssw0rd!2026", hash.MinCost)
 	user := &models.User{
 		Email:           "enterprise@example.com",
 		Username:        "enterprise_user",

@@ -16,13 +16,34 @@ import (
 // authenticate as the same credential.
 const MaxPasswordBytes = 72
 
-// HashPassword returns a bcrypt hash of the plaintext password.
+// Bcrypt work factor constants mirrored from golang.org/x/crypto/bcrypt.
+const (
+	MinCost     = bcrypt.MinCost
+	DefaultCost = bcrypt.DefaultCost
+	MaxCost     = bcrypt.MaxCost
+)
+
+// HashPassword returns a bcrypt hash of the plaintext password using bcrypt.DefaultCost,
+// or the optional cost if supplied and positive.
 // Use this at registration / password change / reset.
-func HashPassword(plain string) (string, error) {
+func HashPassword(plain string, optCost ...int) (string, error) {
+	cost := DefaultCost
+	if len(optCost) > 0 && optCost[0] > 0 {
+		cost = optCost[0]
+	}
+	return HashPasswordWithCost(plain, cost)
+}
+
+// HashPasswordWithCost returns a bcrypt hash using the specified cost work factor.
+// If cost is outside [MinCost, MaxCost], it falls back to DefaultCost.
+func HashPasswordWithCost(plain string, cost int) (string, error) {
 	if len(plain) > MaxPasswordBytes {
 		return "", fmt.Errorf("hash password: exceeds bcrypt limit of %d bytes", MaxPasswordBytes)
 	}
-	hashed, err := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.DefaultCost)
+	if cost < MinCost || cost > MaxCost {
+		cost = DefaultCost
+	}
+	hashed, err := bcrypt.GenerateFromPassword([]byte(plain), cost)
 	if err != nil {
 		return "", fmt.Errorf("hash password: %w", err)
 	}

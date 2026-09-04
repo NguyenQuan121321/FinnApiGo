@@ -97,11 +97,14 @@ func NewRedisStore(client redis.UniversalClient) *RedisStore {
 
 // NewRedisStoreFromURL is a convenience constructor that builds a client from a
 // redis:// (or rediss:// / unix://) URL. Returns the store and a Close function
-// the caller should defer.
-func NewRedisStoreFromURL(url string) (*RedisStore, func() error, error) {
+// the caller should defer. Optional mutator functions allow customizing redis.Options.
+func NewRedisStoreFromURL(url string, optFns ...func(*redis.Options)) (*RedisStore, func() error, error) {
 	opts, err := redis.ParseURL(url)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store: parse redis url: %w", err)
+	}
+	for _, fn := range optFns {
+		fn(opts)
 	}
 	client := redis.NewClient(opts)
 	return NewRedisStore(client), client.Close, nil

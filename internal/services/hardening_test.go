@@ -34,6 +34,9 @@ func buildAuthService(t *testing.T, cfg config.AuthConfig, rlCfg config.RateLimi
 		AccessTTL: 15 * time.Minute, RefreshTTL: time.Hour,
 		ResetTTL: 15 * time.Minute, VerifyTTL: time.Hour,
 	}
+	if cfg.BcryptCost <= 0 {
+		cfg.BcryptCost = hash.MinCost
+	}
 	svc := NewAuthService(users, tokens, usedTokens, audit, store, jwtMgr, cfg, rlCfg, jwtCfg, notify, captcha, nil, nil, nil)
 	return svc, users, tokens, audit, notify, store
 }
@@ -289,7 +292,7 @@ func TestIsMySQLDup_UsesErrorsAs(t *testing.T) {
 // =====================================================================
 
 func mustHash(pw string) string {
-	h, err := hash.HashPassword(pw)
+	h, err := hash.HashPassword(pw, hash.MinCost)
 	if err != nil {
 		panic(err)
 	}
