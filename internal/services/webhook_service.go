@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -60,6 +61,11 @@ func NewWebhookService(repo WebhookRepo) *WebhookService {
 	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	s.httpClient = &http.Client{
 		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// RFC 7231 / Enterprise Webhook standard: webhooks do not follow HTTP 3xx redirects
+			// to avoid SSRF escalation, method mutations (POST->GET), or signature leakage.
+			return http.ErrUseLastResponse
+		},
 		Transport: &http.Transport{
 			// DialContext resolves the hostname HERE, screens every candidate
 			// IP, then dials the screened address directly — the resolver
@@ -229,7 +235,10 @@ func (s *WebhookService) DeliverOne(ctx context.Context, d *models.WebhookDelive
 		_ = s.repo.UpdateDeliveryStatus(ctx, d.ID, status, d.Attempts, nextRetry, nil, err.Error())
 		return err
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		_ = s.repo.UpdateDeliveryStatus(ctx, d.ID, "delivered", d.Attempts, nil, &resp.StatusCode, "")
