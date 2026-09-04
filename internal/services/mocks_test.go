@@ -510,7 +510,6 @@ func (m *mockSessionRepo) RevokeAllForUserTx(tx *gorm.DB, userID uint) error {
 var _ SessionRepo = (*mockSessionRepo)(nil)
 var _ = newMockSessionRepo
 
-
 // alertCount is the thread-safe reader for assertions — the alert is delivered
 // from a fire-and-forget goroutine, so tests must not read the fields directly.
 func (n *mockNotifier) alertCount() int {

@@ -146,3 +146,96 @@ func TestSafeMailDisplayValue(t *testing.T) {
 		t.Fatalf("safeMailIP() = %q, want Unknown", got)
 	}
 }
+
+func TestSMTPNotifier_ValidationAndDisabled(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Port 465 constructor
+	n465 := NewSMTPNotifier("smtp.example.com", "465", "user", "pass", "from@example.com")
+	if !n465.implicitTLS {
+		t.Fatal("expected implicitTLS to be true for port 465")
+	}
+
+	// 2. Enabled checks
+	if !n465.Enabled() {
+		t.Fatal("expected Enabled to be true")
+	}
+	nEmptyHost := NewSMTPNotifier("", "587", "user", "pass", "from@example.com")
+	if nEmptyHost.Enabled() {
+		t.Fatal("expected Enabled to be false for empty host")
+	}
+	nEmptyFrom := NewSMTPNotifier("smtp.example.com", "587", "user", "pass", "")
+	if nEmptyFrom.Enabled() {
+		t.Fatal("expected Enabled to be false for empty from")
+	}
+
+	// 3. Disabled notifier returns error across all methods
+	disabled := &SMTPNotifier{}
+	if err := disabled.SendPasswordReset(ctx, "to@example.com", "token"); err == nil {
+		t.Fatal("expected error on disabled SendPasswordReset")
+	}
+	if err := disabled.SendEmailVerification(ctx, "to@example.com", "token"); err == nil {
+		t.Fatal("expected error on disabled SendEmailVerification")
+	}
+	if err := disabled.SendNewLoginAlert(ctx, "to@example.com", "1.2.3.4", "Firefox"); err == nil {
+		t.Fatal("expected error on disabled SendNewLoginAlert")
+	}
+	if err := disabled.SendDuplicateRegisterAlert(ctx, "to@example.com"); err == nil {
+		t.Fatal("expected error on disabled SendDuplicateRegisterAlert")
+	}
+	if err := disabled.SendSecurityAlert(ctx, "to@example.com", "Suspicious Activity", "Details here"); err == nil {
+		t.Fatal("expected error on disabled SendSecurityAlert")
+	}
+
+	// 4. validEnvelopeAddr checks
+	if err := validEnvelopeAddr(""); err == nil {
+		t.Fatal("expected error on empty addr")
+	}
+	if err := validEnvelopeAddr(strings.Repeat("a", 255)); err == nil {
+		t.Fatal("expected error on too long addr")
+	}
+	if err := validEnvelopeAddr("no-at-sign"); err == nil {
+		t.Fatal("expected error on no @")
+	}
+	if err := validEnvelopeAddr("two@at@sign"); err == nil {
+		t.Fatal("expected error on multiple @")
+	}
+	if err := validEnvelopeAddr("with space@example.com"); err == nil {
+		t.Fatal("expected error on whitespace in addr")
+	}
+	if err := validEnvelopeAddr("control\x00@example.com"); err == nil {
+		t.Fatal("expected error on control char in addr")
+	}
+	if err := validEnvelopeAddr("del\x7f@example.com"); err == nil {
+		t.Fatal("expected error on DEL char in addr")
+	}
+	if err := validEnvelopeAddr("valid@example.com"); err != nil {
+		t.Fatalf("unexpected error on valid addr: %v", err)
+	}
+
+	// 5. validHeaderValue checks
+	if err := validHeaderValue("Valid Subject"); err != nil {
+		t.Fatalf("unexpected error on valid header: %v", err)
+	}
+	if err := validHeaderValue("Subject\nInjection"); err == nil {
+		t.Fatal("expected error on header with newline")
+	}
+
+	// 6. safeMailIP with valid IPs
+	if got := safeMailIP("127.0.0.1"); got != "127.0.0.1" {
+		t.Fatalf("unexpected ip %q", got)
+	}
+	if got := safeMailIP("::1"); got != "::1" {
+		t.Fatalf("unexpected ipv6 %q", got)
+	}
+
+	// 7. Invalid recipient or sender rejected in send
+	activeBadSender := NewSMTPNotifier("127.0.0.1", "25", "", "", "bad-sender")
+	if err := activeBadSender.SendPasswordReset(ctx, "good@example.com", "token"); err == nil || !strings.Contains(err.Error(), "smtp sender") {
+		t.Fatalf("expected smtp sender error, got %v", err)
+	}
+	activeGoodSender := NewSMTPNotifier("127.0.0.1", "25", "", "", "good@example.com")
+	if err := activeGoodSender.SendPasswordReset(ctx, "bad-recipient", "token"); err == nil || !strings.Contains(err.Error(), "smtp: ") {
+		t.Fatalf("expected smtp recipient error, got %v", err)
+	}
+}

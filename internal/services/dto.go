@@ -130,4 +130,3 @@ type UserAuditLogItem struct {
 	Success   bool      `json:"success"`
 	CreatedAt time.Time `json:"createdAt"`
 }
-

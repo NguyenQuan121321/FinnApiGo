@@ -170,3 +170,150 @@ func TestRedisStore_IncrBy_FixedWindowNotExtended_C4(t *testing.T) {
 		t.Errorf("counter must reset one window after the first increment, got %d", n)
 	}
 }
+
+func TestRedisStore_Take(t *testing.T) {
+	s, _, cleanup := newMiniredisStore(t)
+	defer cleanup()
+
+	if _, ok := s.Take("missing"); ok {
+		t.Error("Take on missing key should return false")
+	}
+
+	s.Set("key1", "val1", time.Minute)
+	got, ok := s.Take("key1")
+	if !ok || got != "val1" {
+		t.Fatalf("Take = %v, %v; want val1, true", got, ok)
+	}
+	if _, ok := s.Get("key1"); ok {
+		t.Error("key should be deleted after Take")
+	}
+}
+
+func TestRedisStore_Renew(t *testing.T) {
+	s, mr, cleanup := newMiniredisStore(t)
+	defer cleanup()
+
+	if s.Renew("missing", time.Minute) {
+		t.Error("Renew on missing key should return false")
+	}
+
+	s.Set("k", "v", time.Second)
+	if !s.Renew("k", 10*time.Minute) {
+		t.Fatal("Renew on existing key should return true")
+	}
+	mr.FastForward(2 * time.Second)
+	if _, ok := s.Get("k"); !ok {
+		t.Error("key should persist after Renew")
+	}
+}
+
+func TestRedisStore_RenewIfOwner(t *testing.T) {
+	s, _, cleanup := newMiniredisStore(t)
+	defer cleanup()
+
+	if s.RenewIfOwner("missing", "owner1", time.Minute) {
+		t.Error("RenewIfOwner on missing key should return false")
+	}
+
+	s.Set("lock", "owner1", time.Minute)
+	if s.RenewIfOwner("lock", "owner2", time.Minute) {
+		t.Error("RenewIfOwner with wrong owner should return false")
+	}
+	if !s.RenewIfOwner("lock", "owner1", time.Minute) {
+		t.Fatal("RenewIfOwner with matching owner should return true")
+	}
+}
+
+func TestRedisStore_DeleteIfOwner(t *testing.T) {
+	s, _, cleanup := newMiniredisStore(t)
+	defer cleanup()
+
+	if s.DeleteIfOwner("missing", "owner1") {
+		t.Error("DeleteIfOwner on missing key should return false")
+	}
+
+	s.Set("lock", "owner1", time.Minute)
+	if s.DeleteIfOwner("lock", "owner2") {
+		t.Error("DeleteIfOwner with wrong owner should return false")
+	}
+	if !s.DeleteIfOwner("lock", "owner1") {
+		t.Fatal("DeleteIfOwner with matching owner should return true")
+	}
+	if _, ok := s.Get("lock"); ok {
+		t.Error("key should be deleted after DeleteIfOwner")
+	}
+}
+
+func TestRedisStore_NewFromURL(t *testing.T) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mr.Close()
+
+	store, closeFn, err := NewRedisStoreFromURL("redis://" + mr.Addr())
+	if err != nil {
+		t.Fatalf("NewRedisStoreFromURL valid: %v", err)
+	}
+	defer func() { _ = closeFn() }()
+
+	store.Set("url_test", "ok", time.Minute)
+	if got, ok := store.Get("url_test"); !ok || got != "ok" {
+		t.Fatalf("Get url_test = %v,%v; want ok,true", got, ok)
+	}
+
+	// Invalid URL
+	if _, _, err := NewRedisStoreFromURL(":::invalid-url:::"); err == nil {
+		t.Error("NewRedisStoreFromURL with invalid URL must error")
+	}
+}
+
+func TestRedisStore_ToRedisValueTypes(t *testing.T) {
+	s, _, cleanup := newMiniredisStore(t)
+	defer cleanup()
+
+	s.Set("str", "hello", time.Minute)
+	s.Set("int", int(42), time.Minute)
+	s.Set("int64", int64(999), time.Minute)
+	s.Set("bytes", []byte("byte-val"), time.Minute)
+	s.Set("other", 3.14, time.Minute)
+
+	if got, _ := s.Get("int"); got != "42" {
+		t.Errorf("Get(int) = %v, want 42", got)
+	}
+	if got, _ := s.Get("int64"); got != "999" {
+		t.Errorf("Get(int64) = %v, want 999", got)
+	}
+	if got, _ := s.Get("bytes"); got != "byte-val" {
+		t.Errorf("Get(bytes) = %v, want byte-val", got)
+	}
+}
+
+func TestRedisStore_DeadRedisErrorBranches(t *testing.T) {
+	s, mr, cleanup := newMiniredisStore(t)
+	mr.Close()
+	defer cleanup()
+
+	// Take on dead redis -> returns false
+	if _, ok := s.Take("key"); ok {
+		t.Error("Take on dead redis must return false")
+	}
+
+	// Set on dead redis -> logs error and records StoreError
+	s.Set("key", "val", time.Minute)
+
+	// Renew on dead redis -> returns false
+	if s.Renew("key", time.Minute) {
+		t.Error("Renew on dead redis must return false")
+	}
+
+	// RenewIfOwner on dead redis -> returns false
+	if s.RenewIfOwner("key", "owner", time.Minute) {
+		t.Error("RenewIfOwner on dead redis must return false")
+	}
+
+	// DeleteIfOwner on dead redis -> returns false
+	if s.DeleteIfOwner("key", "owner") {
+		t.Error("DeleteIfOwner on dead redis must return false")
+	}
+}

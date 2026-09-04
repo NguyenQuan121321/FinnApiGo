@@ -164,4 +164,3 @@ func TestValidateMetricsPolicy_ReleaseMode_P06(t *testing.T) {
 		t.Fatalf("P0.6: dev mode without metrics addr or token must succeed, got %v", err)
 	}
 }
-

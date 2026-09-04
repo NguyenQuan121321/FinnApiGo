@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -71,5 +72,23 @@ func TestDecrypt_MalformedPayload(t *testing.T) {
 	}
 	if _, err := Decrypt(testKey(), "AAAA"); err == nil {
 		t.Fatal("too-short payload should be rejected")
+	}
+}
+
+func TestNewEncryptor(t *testing.T) {
+	if _, err := NewEncryptor([]byte("too-short")); !errors.Is(err, ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey, got %v", err)
+	}
+	enc, err := NewEncryptor(testKey())
+	if err != nil {
+		t.Fatalf("NewEncryptor: %v", err)
+	}
+	ciphertext, err := enc.Encrypt("test-data")
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	plaintext, err := enc.Decrypt(ciphertext)
+	if err != nil || plaintext != "test-data" {
+		t.Fatalf("Decrypt mismatch: got %q, err %v", plaintext, err)
 	}
 }

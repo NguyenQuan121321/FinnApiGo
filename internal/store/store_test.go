@@ -119,3 +119,96 @@ func TestInMemoryStore_IncrBy_FixedWindowNotExtended_C4(t *testing.T) {
 		t.Errorf("counter must reset one window after the first increment, got %d", n)
 	}
 }
+
+func TestInMemoryStore_Take(t *testing.T) {
+	s := NewInMemoryStore(0)
+	defer s.Close()
+
+	if _, ok := s.Take("missing"); ok {
+		t.Error("Take on missing key must return false")
+	}
+
+	s.Set("key1", "val1", time.Minute)
+	got, ok := s.Take("key1")
+	if !ok || got != "val1" {
+		t.Fatalf("Take = %v, %v; want val1, true", got, ok)
+	}
+	if _, ok := s.Get("key1"); ok {
+		t.Error("key should be deleted after Take")
+	}
+
+	// Test Take on expired key
+	clock := time.Now()
+	s.now = func() time.Time { return clock }
+	s.Set("exp", "val", 10*time.Millisecond)
+	clock = clock.Add(20 * time.Millisecond)
+	if _, ok := s.Take("exp"); ok {
+		t.Error("Take on expired key must return false")
+	}
+}
+
+func TestInMemoryStore_Renew(t *testing.T) {
+	clock := time.Now()
+	s := NewInMemoryStore(0, WithClock(func() time.Time { return clock }))
+	defer s.Close()
+
+	if s.Renew("missing", time.Minute) {
+		t.Error("Renew on missing key must return false")
+	}
+
+	s.Set("k", "v", 10*time.Millisecond)
+	if !s.Renew("k", time.Minute) {
+		t.Fatal("Renew on present key must return true")
+	}
+	clock = clock.Add(20 * time.Millisecond)
+	if _, ok := s.Get("k"); !ok {
+		t.Error("key should still exist after Renew")
+	}
+}
+
+func TestInMemoryStore_RenewIfOwner(t *testing.T) {
+	clock := time.Now()
+	s := NewInMemoryStore(0, WithClock(func() time.Time { return clock }))
+	defer s.Close()
+
+	if s.RenewIfOwner("missing", "owner1", time.Minute) {
+		t.Error("RenewIfOwner on missing key must return false")
+	}
+
+	s.Set("lock", "owner1", 10*time.Millisecond)
+	if s.RenewIfOwner("lock", "owner2", time.Minute) {
+		t.Error("RenewIfOwner with wrong owner must return false")
+	}
+	if !s.RenewIfOwner("lock", "owner1", time.Minute) {
+		t.Fatal("RenewIfOwner with correct owner must return true")
+	}
+}
+
+func TestInMemoryStore_DeleteIfOwner(t *testing.T) {
+	s := NewInMemoryStore(0)
+	defer s.Close()
+
+	if s.DeleteIfOwner("missing", "owner1") {
+		t.Error("DeleteIfOwner on missing key must return false")
+	}
+
+	s.Set("lock", "owner1", time.Minute)
+	if s.DeleteIfOwner("lock", "owner2") {
+		t.Error("DeleteIfOwner with wrong owner must return false")
+	}
+	if _, ok := s.Get("lock"); !ok {
+		t.Error("lock should not be deleted by wrong owner")
+	}
+	if !s.DeleteIfOwner("lock", "owner1") {
+		t.Fatal("DeleteIfOwner with correct owner must return true")
+	}
+	if _, ok := s.Get("lock"); ok {
+		t.Error("lock should be deleted by correct owner")
+	}
+}
+
+func TestInMemoryStore_CloseTwice(t *testing.T) {
+	s := NewInMemoryStore(10 * time.Millisecond)
+	s.Close()
+	s.Close() // idempotent
+}

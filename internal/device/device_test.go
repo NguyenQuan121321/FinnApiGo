@@ -19,6 +19,13 @@ func TestParse(t *testing.T) {
 		{"chrome ios", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0) CriOS/120.0 Mobile Safari/605.1", "Chrome on iPhone"},
 		{"bare mozilla only", "Mozilla/5.0", "Unknown device"},
 		{"ipad", "Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X) AppleWebKit/605.1.15 Safari/605.1.15", "Safari on iPad"},
+		{"browser only", "Firefox/120.0", "Firefox"},
+		{"os only", "Mozilla/5.0 (applewebkit/linux)", "Linux"},
+		{"opera legacy", "Opera/9.80", "Opera"},
+		{"custom tool lowercase", "curl/7.88", "Curl"},
+		{"custom tool uppercase", "PostmanRuntime/7.32", "PostmanRuntime"},
+		{"preamble then custom", "Mozilla/5.0 AppleWebKit/537.36 CustomClient/1.0", "CustomClient"},
+		{"only ignored symbols", "Mozilla/5.0 ( ) ; .", "Unknown device"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

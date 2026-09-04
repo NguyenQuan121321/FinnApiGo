@@ -28,7 +28,7 @@ func RequirePermission(permission string, checker RBACPermissionChecker) gin.Han
 		}
 
 		// 1. If user is superadmin / role=admin, allow
-		if r, exists := c.Get("role"); exists {
+		if r, exists := c.Get(CtxRole); exists {
 			if roleStr, ok := r.(string); ok && roleStr == "admin" {
 				c.Next()
 				return
@@ -36,7 +36,7 @@ func RequirePermission(permission string, checker RBACPermissionChecker) gin.Han
 		}
 
 		// 2. Check JWT permissions claim if populated
-		if permsVal, exists := c.Get("permissions"); exists {
+		if permsVal, exists := c.Get(CtxPermissions); exists {
 			if permsList, ok := permsVal.([]string); ok {
 				for _, p := range permsList {
 					if strings.EqualFold(p, permission) || p == "*" {

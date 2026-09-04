@@ -542,4 +542,3 @@ func TestOAuthService_Unlink_SafetyAndAlert_P16(t *testing.T) {
 		t.Fatalf("expected security alert sent on unlink, got %d", notify.alertCount())
 	}
 }
-

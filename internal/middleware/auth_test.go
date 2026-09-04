@@ -285,4 +285,3 @@ func TestAuthMiddleware_DenylistRejected_P02(t *testing.T) {
 		t.Fatalf("denylisted SID must return 401, got %d", code)
 	}
 }
-

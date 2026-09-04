@@ -28,11 +28,11 @@ func (r *TOTPRepository) Disable(ctx context.Context, userID uint) error {
 	return r.db.WithContext(ctx).Model(&models.TOTPDevice{}).
 		Where("user_id = ?", userID).
 		Updates(map[string]interface{}{
-			"enabled":                   false,
-			"secret":                    "",
-			"secret_encrypted":          "",
-			"pending_secret_encrypted":  "",
-			"updated_at":                time.Now(),
+			"enabled":                  false,
+			"secret":                   "",
+			"secret_encrypted":         "",
+			"pending_secret_encrypted": "",
+			"updated_at":               time.Now(),
 		}).Error
 }
 

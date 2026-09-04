@@ -1147,6 +1147,39 @@ func (s *AuthService) RequestChangeEmail(ctx context.Context, userID uint, in Ch
 	if newEmail == "" || newEmail == user.Email {
 		return ErrInvalidInput
 	}
+	// Layered throttle BEFORE any notification leaves the process (distinct
+	// key namespace, same VerifyResend* knobs): change-email sends to BOTH
+	// the old and the new address, so a compromised session must not become
+	// an email-bombing oracle against arbitrary inboxes.
+	if s.store != nil {
+		if s.rlCfg.VerifyResendGlobalMax > 0 {
+			if n := s.store.IncrBy("chgemail:global", 1, s.rlCfg.VerifyResendGlobalWindow); n > int64(s.rlCfg.VerifyResendGlobalMax) {
+				s.audits.Record(ctx, &models.AuditLog{
+					UserID: &user.ID, Email: user.Email, Event: models.AuditEventEmailChangeRequested,
+					IPAddress: ip, Success: false, Detail: "blocked: global cap",
+				})
+				return ErrRateLimited
+			}
+		}
+		if ip != "" && s.rlCfg.VerifyResendPerIPMax > 0 {
+			if n := s.store.IncrBy(ipCounterKey("chgemail:ip:", ip), 1, s.rlCfg.VerifyResendPerIPWindow); n > int64(s.rlCfg.VerifyResendPerIPMax) {
+				s.audits.Record(ctx, &models.AuditLog{
+					UserID: &user.ID, Email: user.Email, Event: models.AuditEventEmailChangeRequested,
+					IPAddress: ip, Success: false, Detail: "blocked: per-ip cap",
+				})
+				return ErrRateLimited
+			}
+		}
+		if s.rlCfg.VerifyResendPerEmailMax > 0 {
+			if n := s.store.IncrBy("chgemail:email:"+user.Email, 1, s.rlCfg.VerifyResendWindow); n > int64(s.rlCfg.VerifyResendPerEmailMax) {
+				s.audits.Record(ctx, &models.AuditLog{
+					UserID: &user.ID, Email: user.Email, Event: models.AuditEventEmailChangeRequested,
+					IPAddress: ip, Success: false, Detail: "blocked: per-email cap",
+				})
+				return ErrRateLimited
+			}
+		}
+	}
 	if isDisposableEmail(newEmail) {
 		return ErrDisposableEmail
 	}
@@ -1490,8 +1523,12 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip,
 		// Rotation within the family: keep the session row's view current.
 		_ = s.sessions.Touch(ctx, sid, ip, ua, device.Parse(ua), s.resolveLocation(ctx, ip), time.Now())
 	}
-	access, err := s.jwt.IssueAccess(user.ID, user.Role, user.Email,
-		s.jwtCfg.AccessTTL, user.PwdVersion, sid)
+	// P2.1 — the access token carries the user's signed tenant id ("tid").
+	// AuthMiddleware promotes it over any client-supplied tenant header, so
+	// the effective tenant for authenticated requests is always the one bound
+	// at issuance — an X-Tenant-ID spoof cannot cross tenant boundaries.
+	access, err := s.jwt.IssueAccessEnterprise(user.ID, user.Role, user.Email,
+		s.jwtCfg.AccessTTL, user.PwdVersion, sid, user.TenantID, nil)
 	if err != nil {
 		return TokenPair{}, err
 	}

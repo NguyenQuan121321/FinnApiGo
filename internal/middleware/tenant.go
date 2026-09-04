@@ -38,8 +38,12 @@ func TenantFromGin(c *gin.Context) string {
 // 1. X-Tenant-ID header
 // 2. X-Tenant-Slug header
 // 3. Subdomain (e.g. acme.auth.example.com -> acme)
-// 4. JWT `tid` claim (if already authenticated)
-// 5. Default "default"
+// 4. Default "default"
+//
+// The resolution here is UNAUTHENTICATED context only (it drives which
+// partition register/login land in). For authenticated requests AuthMiddleware
+// overrides it with the signed `tid` JWT claim, so a client cannot switch to
+// another tenant's partition by setting headers after login.
 func TenantMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID := resolveTenant(c)
