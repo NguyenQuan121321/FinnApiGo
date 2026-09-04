@@ -1,329 +1,454 @@
 # FinnApiGo
 
-Authentication & MFA backend written in **Go**, built as a reusable module (`handler → service → repository`) meant to plug into larger applications. Implements core auth (register, login, refresh-token rotation, password reset, email verification) plus TOTP-based two-factor verification, with the security hardening a production system needs: rate limiting, lockout, single-use tokens, audit logging, session & device management, and an optional Redis backend for multi-instance deployments.
+Enterprise-grade Authentication, MFA, and Multi-Tenant Identity engine written in **Go 1.26**, built with strict architectural boundaries (`handler → service → repository → database`). 
 
-> **Naming note:** "MFA" here means TOTP-based two-step verification. It is unrelated to OAuth 2.0 — nothing in this codebase is an OAuth/third-party login flow (Google sign-in is a separate, optional feature).
-
----
-
-## Features
-
-- **Core auth** — register, login, logout, logout-all, refresh-token (with rotation + reuse detection), forgot/reset password, change password, set-password (OAuth-only accounts), email verification, resend verification, profile (`/me`)
-- **MFA — TOTP** — RFC 6238 time-based one-time passwords with QR provisioning, single-use recovery codes, brute-force protection, and concurrency-gated CPU-bound verification
-- **MFA — Passkeys (WebAuthn)** — register platform/roaming authenticators, step-up authenticate with a passkey, sign-count clone detection (a cloned credential is revoked and audited automatically), sudo-gated device revocation
-- **Session & device management** — list all active devices (IP, user-agent, device name, location estimate, last active), revoke individual sessions, IDOR-protected revocation, metadata populated on every login and refresh
-- **Security hardening**
-  - Passwords hashed with bcrypt (72-byte cap enforced), never stored or logged in plaintext
-  - Access tokens are short-lived JWTs; refresh tokens are opaque, stored as SHA-256 hashes, and **rotated** on every use — presenting an already-used refresh token revokes every session for that user (theft response)
-  - **JWT key rotation** — issued tokens carry a `kid` header; set `JWT_SECRET_PREVIOUS` during a rotation so existing sessions survive until expiry
-  - **Release-mode key policy** — `GIN_MODE=release` refuses to boot without an explicit `RECOVERY_CODE_KEY` (no silent derivation from `JWT_SECRET`)
-  - **At-rest sealing** — TOTP secrets and re-viewable recovery codes are sealed with AES-256-GCM
-  - Reset/verify-email tokens are single-use (tracked by JWT ID, durable DB backstop)
-  - Timing-safe comparisons for TOTP verification; login response time is equalized for unknown vs. wrong-password accounts to resist enumeration
-  - Account lockout after repeated failed logins, with optional exponential backoff for repeat offenders
-  - Per-IP **and** per-account rate limiting on login; per-IP registration velocity limiting; rate limits on all public token-consumption endpoints
-  - Verification-email resend protection with per-email, shared per-IP, and shared global circuit-breaker limits; blocked abuse is audited
-  - Optional CAPTCHA (Cloudflare Turnstile) on registration and adaptively after repeated login failures
-  - Disposable-email domain blocking and a honeypot field on registration
-  - Global request body-size cap and baseline security headers (nosniff, no-referrer, `no-store`, optional HSTS)
-  - **Log redaction** — a structural `slog` handler guarantees secret-shaped attributes (passwords, tokens, codes) never reach the log output
-  - Structured audit log (login, failed login, logout, password change/reset, token reuse, session revocation) with IP + request-ID correlation, async buffered writes, and a dropped-entry metric
-  - Reverse-proxy-aware IP resolution via configurable trusted proxies (`TRUSTED_PROXIES`); defaults to trust-no-one
-  - Concurrency limiter middleware (semaphore) caps parallel CPU-bound TOTP verifications to prevent resource exhaustion
-- **Performance**
-  - Sonic JSON parser (`bytedance/sonic`) with `sync.Pool` buffer recycling for zero-alloc request body parsing on hot paths
-  - Indexed, LIMIT-batched purge jobs; every hot-path query verified index-served by EXPLAIN assertions against real MySQL
-- **Pluggable storage backend** — in-memory by default (single instance); set `REDIS_URL` to share rate-limit counters and single-use-token state across multiple instances, no code changes required
-- **Pluggable email delivery** — logs to console by default; set `SMTP_*` to send real email
-- **Pluggable geo-resolver** — `NoOpResolver` returns `"Unknown"` by default; inject a GeoIP resolver for IP-to-location mapping on sessions
-- **Graceful shutdown**, `/healthz` (liveness) and `/readyz` (DB connectivity) endpoints for orchestration
-- Every response follows one JSON envelope: `{ "code": ..., "message": ..., "data": ... }`
+Designed for high-throughput, mission-critical systems, FinnApiGo delivers complete credential lifecycle management, TOTP and Passkey (WebAuthn) multi-factor authentication, multi-tenant organization isolation, dynamic RBAC permission gating, trusted device remember-me bypass, outbound signed webhooks with SSRF protection, personal and tenant audit logging, and single-use cryptographic token rotation.
 
 ---
 
-## Tech stack
+## Key Features
 
-| Layer | Choice |
-|---|---|
-| Language | Go 1.26 (pinned in go.mod `go`/`toolchain`; CI and Docker build the same patch) |
-| HTTP framework | [Gin](https://github.com/gin-gonic/gin) |
-| ORM / DB | [GORM](https://gorm.io) + MySQL 8 (golang-migrate SQL migrations) |
-| Auth tokens | [golang-jwt/jwt](https://github.com/golang-jwt/jwt) v5 (HS256, `kid`-keyed rotation) |
-| Password hashing | `golang.org/x/crypto/bcrypt` |
-| TOTP | RFC 6238 via `github.com/pquerna/otp` |
-| JSON parsing | [sonic](https://github.com/bytedance/sonic) (AST-based, `sync.Pool` recycled buffers) |
-| Rate limiting | `golang.org/x/time/rate` (per-instance) + a `store.Store` abstraction for shared counters |
-| Observability | Prometheus client (`/metrics`), structured `slog` JSON with redaction |
-| Optional shared store | Redis via `github.com/redis/go-redis/v9` |
-| Config | Environment variables / `.env` via `godotenv` |
-| Load testing | [k6](https://k6.io) scripts in `tests/load/` |
-| API contract | OpenAPI 3.0 at `docs/openapi.yaml`, drift-checked in CI |
+- **Core Authentication & Identity Lifecycle**
+  - Registration with honeypot field, disposable email domain blocking, and velocity rate limits.
+  - Login with per-IP and per-account rate limits, account lockout with exponential backoff, and timing-safe enumeration resistance.
+  - Opaque refresh tokens stored as SHA-256 hashes with **automatic rotation and theft reuse detection** (reusing a consumed token revokes all user sessions).
+  - Password reset and email verification using single-use purpose-bound JWTs backed by a distributed replay guard.
+  - Three-tier rate-limited email verification resending (per-email, per-IP, and global circuit-breakers).
+  - Secure email change flow with two-step password confirmation and verification token validation.
+  - Self-deactivation and GDPR Right to Erasure (`DELETE /api/v1/auth/me`).
+  - Google OAuth 2.0 / OpenID Connect integration and identity provider unlinking.
+  - Post-OAuth initial password establishment (`POST /api/v1/auth/set-password`) for passwordless-created accounts.
+
+- **Multi-Factor Authentication (MFA)**
+  - **TOTP (RFC 6238)**: Time-based one-time passwords, QR provisioning URI, AES-256-GCM sealed secrets at rest, single-use recovery codes, and CPU-bound concurrency semaphore protection.
+  - **Passkeys (FIDO2 / WebAuthn)**: Platform and roaming authenticators, challenge-response attestation and assertion, monotonic sign-counter **clone detection** (cloned credentials are automatically revoked and audited), and sudo-gated credential removal.
+  - **Aggregated MFA Methods Summary**: `GET /api/v1/auth/mfa/methods` provides clients with an unified status of enrolled factors.
+  - **Isolated MFA Pending Gate**: `POST /api/v1/auth/mfa/login-verify` strictly accepts short-lived `mfa_pending` JWTs, preventing token escalation from fully authenticated sessions.
+
+- **Enterprise Multi-Tenancy & RBAC**
+  - Transparent tenant resolution via `X-Tenant-ID`, `X-Tenant-Slug`, or request subdomain.
+  - Tenant context injection through `internal/tenant` into GORM persistence queries.
+  - Role-Based Access Control (RBAC) with granular permissions (`users:read`, `users:write`, `sessions:read`, `audit:export`, `webhooks:write`).
+  - Strict tenant boundary isolation preventing cross-tenant privilege escalation.
+
+- **Session & Trusted Device Management**
+  - Active session inventory reporting IP address, operating system / browser user-agent, geolocation estimate, and activity timestamps.
+  - Individual session revocation and global logout (`/logout-all`) with password version (`pwd_version`) invalidation.
+  - 30-day "Remember this device" trusted device registration allowing step-up MFA bypass for recognized hardware fingerprints.
+
+- **GitHub-Style Sudo Mode Elevation**
+  - Sensitive operations (viewing/regenerating recovery codes, revoking passkeys, deactivating accounts) require elevated authorization via `X-Sudo-Token`.
+  - Sudo tokens are short-lived (configurable, default 5–15 minutes) and require primary factor or TOTP step-up verification to issue.
+
+- **Governance, Admin & Webhook Engine**
+  - Enterprise Admin APIs to search/paginate tenant users, lock accounts, unlock accounts, and immediately force-logout compromised users.
+  - Real-time tenant-wide active session monitoring.
+  - Paginated personal security audit log for end-users (`/me/audit-log`) and streaming export in CSV or NDJSON format for compliance auditors (`/admin/audit-log/export`).
+  - Outbound Webhooks with HMAC-SHA256 signatures, event subscriptions, and strict SSRF loopback/private CIDR defense.
+
+- **Security Hardening & Defense in Depth**
+  - Passwords hashed with bcrypt (strict 72-byte cap enforced to eliminate bcrypt truncation vulnerabilities).
+  - Zero-downtime JWT key rotation using `kid` headers and `JWT_SECRET_PREVIOUS`.
+  - Release-mode safety: `GIN_MODE=release` refuses to boot without an explicit 256-bit `RECOVERY_CODE_KEY`.
+  - Structural `slog` logging decorator with automatic secret redaction: passwords, tokens, recovery codes, and authorization headers never reach stdout or log sinks.
+  - Optional HaveIBeenPwned k-anonymity breached password check on registration and password updates.
+  - Optional Cloudflare Turnstile CAPTCHA verification on registration and adaptively upon repeated login failures.
+  - Baseline security headers on all responses: `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, and HSTS.
+
+- **High Performance & Test Execution Speed**
+  - High-speed JSON serialization using `bytedance/sonic` with `sync.Pool` buffer recycling for zero-alloc request decoding on hot paths.
+  - Configurable `BCRYPT_COST` parameterization allowing test suites across all 28 packages to execute in ~20 seconds without compromising production cryptographic difficulty.
+  - Index-served queries verified with EXPLAIN assertions against real MySQL.
+  - Pluggable `store.Store` abstraction: thread-safe in-memory store for single-node deployments or Redis for horizontally scaled clusters with split failure semantics (rate limits fail-open; single-use guards fail-closed).
+
+---
+
+## Tech Stack
+
+| Layer | Technology | Details |
+|---|---|---|
+| **Language** | Go 1.26 | Pinned in `go.mod`; consistent across local dev, CI, and multi-stage Docker builds |
+| **HTTP Framework** | [Gin](https://github.com/gin-gonic/gin) | High performance HTTP routing with custom middleware pipeline |
+| **ORM / Storage** | [GORM](https://gorm.io) + MySQL 8 / SQLite | Context-aware queries, embedded `golang-migrate` SQL migrations |
+| **Token System** | [golang-jwt/jwt](https://github.com/golang-jwt/jwt) v5 | HS256, purpose-bound claims, `kid`-keyed versioned keyset |
+| **Password Hashing** | `golang.org/x/crypto/bcrypt` | Configurable cost (DefaultCost in prod, MinCost in testing) |
+| **TOTP MFA** | RFC 6238 via `github.com/pquerna/otp` | Time-based one-time passwords with QR code generation |
+| **Passkeys / WebAuthn** | [go-webauthn/webauthn](https://github.com/go-webauthn/webauthn) | W3C WebAuthn Level 3 FIDO2 authentication and clone detection |
+| **JSON Engine** | [sonic](https://github.com/bytedance/sonic) | Zero-alloc AST parser with recycled buffer pools |
+| **State & Rate Limiting** | In-Memory / Redis v9 | Token bucket and sliding window rate limits via `store.Store` |
+| **Observability** | Prometheus client (`/metrics`) | Structured `slog` JSON logs with automated secret redaction |
+| **API Contract** | OpenAPI 3.0 / Swagger UI | Contract of record at `docs/openapi.yaml`, interactive UI at `/swagger/index.html` |
+| **Test Suites** | Go `testing` + Bruno | Exhaustive 49-endpoint audit (`all_49_endpoints_test.go`), E2E, and Bruno collections |
 
 ---
 
 ## Architecture
 
+FinnApiGo strictly adheres to clean layered architecture principles:
+
 ```
-Handler  ->  Service  ->  Repository  ->  DB
- (HTTP)      (logic)      (queries)
+HTTP Client / Reverse Proxy
+         │
+    [Middleware] (Tenant Resolution, CORS, Security Headers, Body Cap, Request Logging)
+         │
+    [Routes] (Rate Limiting, RBAC Permissions, Concurrency Limiter, Sudo Gate, Auth Guard)
+         │
+    [Handlers] (HTTP binding, validation, DTO transformation, response envelope)
+         │
+    [Services] (Business logic, password/token hashing, MFA verification, audit dispatch)
+         │
+    [Repositories] (GORM persistence, multi-tenant scoping, transactional updates)
+         │
+    [Databases & Caches] (MySQL 8 / SQLite, Redis / In-Memory Store)
 ```
 
-- **Handlers** (`internal/handlers`) parse the request and format the response. They never touch GORM directly.
-- **Services** (`internal/services`) hold all business logic. They never import Gin (depguard enforces), so every rule (lockout, rotation, single-use tokens, rate windows, TOTP) is unit-tested with in-memory fakes — no database or HTTP server needed.
-- **Repositories** (`internal/repositories`) are thin, context-aware GORM wrappers with no business logic.
-- **`store.Store`** (`internal/store`) is a small key-value interface (`Get`/`Set`/`SetNX`/`IncrBy`/`Delete`, all TTL-aware) used for rate-limit counters and single-use-token tracking. `InMemoryStore` is the default; `RedisStore` implements the same interface for multi-instance deployments. Failure semantics are split: counters fail open, single-use guards fail closed.
-- **`jwt`** (`internal/jwt`) — purpose-bound tokens over a versioned keyset: `kid`-stamped issuance, `JWT_SECRET` + `JWT_SECRET_PREVIOUS` verification, HS256-only.
-- **`logging`** (`internal/logging`) — redacting slog handler decorator (secret-shaped attributes become `[REDACTED]` before any sink).
-- **`crypto` / `hash`** — AES-256-GCM sealing for at-rest secrets that must be re-read; bcrypt + SHA-256 + constant-time compare for everything one-way.
-- **`metrics`** (`internal/metrics`) — Prometheus registry: process/Go collectors plus `finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`, `finnapigo_rate_limited_requests_total`, `finnapigo_audit_buffer_depth`.
-- **`apidrift`** (`internal/apidrift`) — CI test that diffs the registered router against `docs/openapi.yaml` in both directions.
-- **`device`** (`internal/device`) — zero-dependency User-Agent parser producing human-readable labels (e.g. "Chrome on Windows").
-- **`geo`** (`internal/geo`) — mockable IP-to-location resolver interface; `NoOpResolver` returns `"Unknown"`, production can inject a GeoIP implementation.
-
-### Project structure
+### Directory Structure
 
 ```
 FinnApiGo/
-├── cmd/server/main.go          # config -> DB -> keys -> wire dependencies -> serve
-├── cmd/migrate/main.go         # deploy-step migration runner (up | down | force | version)
+├── cmd/
+│   ├── server/main.go                 # Application composition root, dependency injection, HTTP daemon
+│   └── migrate/main.go                # Database migration CLI runner (up | down | force | version)
 ├── internal/
-│   ├── config/                 # env loading, typed config structs, fail-fast validation
-│   ├── database/               # GORM/MySQL connection + embedded golang-migrate runner
-│   ├── models/                 # User, RefreshToken, TOTPDevice, RecoveryCode, AuditLog, UsedToken, OAuthIdentity
-│   ├── repositories/           # GORM-backed repos (context-aware queries only)
-│   ├── services/               # business logic — auth, TOTP, notifier, CAPTCHA, async audit
-│   ├── handlers/               # HTTP layer: parse -> call service -> respond (sonic JSON, sync.Pool)
-│   ├── middleware/             # auth, rate limiter, concurrency limiter, security headers, sudo
-│   ├── routes/                 # route registration + request logging + trusted proxies
-│   ├── store/                  # Store interface, in-memory + Redis implementations
-│   ├── hash/                   # bcrypt password and SHA-256 token primitives
-│   ├── jwt/                    # JWT issuance/verification over a versioned keyset (kid)
-│   ├── crypto/                 # AES-256-GCM sealing for at-rest secrets
-│   ├── logging/                # redacting slog handler decorator
-│   ├── metrics/                # Prometheus registry
-│   ├── apidrift/               # OpenAPI <-> router drift check (A1)
-│   ├── device/                 # User-Agent -> human-readable device label parser
-│   ├── geo/                    # IP-to-location resolver interface (NoOp default)
-│   └── response/               # HTTP response envelope
-├── migrations/                 # embedded golang-migrate SQL pairs
+│   ├── config/                        # Typed Twelve-Factor environment configuration and validation
+│   ├── database/                      # GORM/MySQL connection pool and embedded SQL migration runner
+│   ├── models/                        # GORM domain models (User, Tenant, Session, AuditLog, etc.)
+│   ├── repositories/                  # Clean GORM repositories with context awareness
+│   ├── services/                      # Pure business logic (Auth, TOTP, Passkey, Admin, Webhook, etc.)
+│   ├── handlers/                      # HTTP handlers (Sonic JSON parsing, DTO validation, envelope responses)
+│   ├── middleware/                    # Tenant, Auth, RBAC, Sudo, Rate Limiter, Concurrency Limiter
+│   ├── routes/                        # Route registration, logger, trusted proxies, Swagger UI
+│   ├── tenant/                        # Multi-tenancy context propagation and extraction helpers
+│   ├── store/                         # Distributed state abstraction (In-Memory and Redis v9)
+│   ├── hash/                          # Cost-parameterized bcrypt password hashing and SHA-256 primitives
+│   ├── jwt/                           # Keyset-aware JWT issuance, verification, and purpose checking
+│   ├── crypto/                        # AES-256-GCM authenticated sealing for secrets at rest
+│   ├── logging/                       # Slog JSON handler with automated secret redaction
+│   ├── metrics/                       # Prometheus metric definitions and exposition
+│   ├── apidrift/                      # Route-to-OpenAPI bidirectional contract drift verification
+│   ├── device/                        # Zero-dependency User-Agent string parser
+│   ├── geo/                           # IP-to-location resolver interface (NoOp default, GeoIP pluggable)
+│   └── response/                      # Standardized `{code, message, data}` JSON response envelope
+├── migrations/                        # Versioned SQL migration files (up/down pairs)
+├── tests/
+│   ├── integration/
+│   │   ├── all_49_endpoints_test.go   # Self-contained, in-memory end-to-end audit of all 49 API endpoints
+│   │   ├── live_api_demo_test.go      # Multi-tenant and session workflow integration test
+│   │   ├── phase1_e2e_test.go         # Core authentication, GDPR erasure, and MFA aggregation tests
+│   │   └── phase2_e2e_test.go         # Multi-tenant isolation, RBAC, and trusted device tests
+│   ├── load/                          # High-concurrency k6 load testing scripts
+│   ├── passkey_test.html              # Browser-based test interface for WebAuthn passkey ceremonies
+│   └── README.md                      # Comprehensive test runner and agent instructions
+├── Bruno/                             # Operational API collections for manual testing with Bruno GUI
+│   ├── Auth/                          # Core authentication, profile, deactivation, GDPR erasure
+│   ├── MFA/                           # TOTP enrollment, validation, disable, recovery codes
+│   ├── Admin/                         # Tenant user management, lockout, force-logout, audit export
+│   ├── TrustedDevices/                # Remember-me MFA bypass device management
+│   ├── Webhooks/                      # Webhook subscription registration
+│   └── environments/                  # Environment definitions (Local, Staging, Production)
 ├── docs/
-│   ├── openapi.yaml            # API contract of record (A1)
-│   ├── enterprise-review-reconciliation.md
-│   └── audit-durable-queue-design.md
-├── tests/load/                 # k6 load test scripts (login, refresh rotation)
-├── .github/workflows/ci.yml   # CI: vet, lint, test, integration (MySQL+Redis), fuzz, coverage floors, gosec, trivy
-├── .golangci.yml               # linter config (govet, staticcheck, errcheck, gosec, depguard)
-├── ARCHITECTURE.md             # extension patterns & module guide
-├── CHANGELOG.md                # all hardening changes (Keep a Changelog format)
-├── docker-compose.yml          # MySQL for local dev
-├── Dockerfile                  # multi-stage build, non-root runtime user
-└── .env.example
+│   ├── openapi.yaml                   # OpenAPI 3.0 contract of record
+│   ├── swagger.json                   # Swagger 2.0 definition for Swagger UI
+│   └── OPERATIONS.md                  # Enterprise operational runbook and test guidelines
+├── docker-compose.yml                 # Local MySQL and Redis containers
+├── Dockerfile                         # Hardened multi-stage build running as non-root user
+└── .env.example                       # Documented environment variable template
 ```
 
 ---
 
-## Getting started
+## Getting Started
 
-### 1. Start MySQL
+### 1. Prerequisites
+
+- **Go 1.26+**
+- **Docker & Docker Compose** (for local MySQL and Redis)
+- Git
+
+### 2. Start MySQL and Redis
 
 ```bash
-docker compose up -d db
+docker compose up -d db redis
 ```
 
-### 2. Configure
+### 3. Configure Environment
+
+Copy the template file:
 
 ```bash
 cp .env.example .env
 ```
 
-At minimum:
+At minimum, generate required 256-bit secrets:
 
-- `JWT_SECRET` — any long random string (`openssl rand -hex 32`); the app refuses to start without one.
-- `RECOVERY_CODE_KEY` — required whenever `GIN_MODE=release` (64 hex chars, `openssl rand -hex 32`). In dev it may be left unset and is derived from `JWT_SECRET` with a loud warning.
+```bash
+# Generate 32-byte hex keys
+openssl rand -hex 32   # Use for JWT_SECRET
+openssl rand -hex 32   # Use for RECOVERY_CODE_KEY
+```
 
-### 3. Apply the schema and run
+Configure `.env`:
+
+```env
+SERVER_PORT=8080
+GIN_MODE=debug
+JWT_SECRET=your_generated_jwt_secret_hex_string_32_chars_min
+RECOVERY_CODE_KEY=your_generated_recovery_code_key_hex_string
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=finnapigo
+DB_PASSWORD=secret
+DB_NAME=finnapigo
+REDIS_URL=redis://127.0.0.1:6379/0
+SWAGGER_ENABLED=true
+```
+
+### 4. Apply Database Migrations and Run
 
 ```bash
 go mod tidy
-go run ./cmd/migrate up     # apply embedded migrations (deploy step)
+
+# Apply embedded SQL migrations (deploy step)
+go run ./cmd/migrate up
+
+# Start the server daemon
 go run ./cmd/server
 ```
 
-Servers do not auto-migrate at boot. `MIGRATE_AUTO=true` re-enables GORM AutoMigrate as a dev-only escape hatch.
+> **Note:** The server does not auto-migrate on boot in production. `MIGRATE_AUTO=true` is provided solely as a development convenience.
 
-### 4. Run the tests
+---
+
+## Testing Guide
+
+The test suite is structured for high verification depth and rapid execution:
+
+### 1. Run the Complete 49-Endpoint Audit (< 1 second)
+
+Exhaustively verifies every route registered in `internal/routes/routes.go` against an in-memory SQLite database, mock OAuth provider, and console notifier:
 
 ```bash
-go test ./...                                    # unit suite
-go test -tags=integration ./... -count=1         # + integration (skipped without DB/Redis env)
-TEST_MYSQL_DSN='test:testpw@tcp(127.0.0.1:3306)/finnapigo_test?multiStatements=true' \
-TEST_REDIS_URL='redis://127.0.0.1:6379/0' \
-    go test -tags=integration ./internal/database/ ./internal/store/ -v   # against real backends
+go test -v -count=1 ./tests/integration/ -run TestAll49Endpoints
 ```
 
-The CI pipeline runs `go test -race -cover`, `go vet`, `golangci-lint`, `govulncheck`, a blocking gosec scan, a Trivy scan, the integration-tagged suite against MySQL + Redis service containers, three 30-second fuzz smokes, and coverage floors (73% `internal/services`, 91% `internal/jwt`). Note: `go test -race` requires cgo and cannot run on Windows hosts without a C compiler — race coverage comes from CI.
+### 2. Run All Unit & Integration Tests
+
+Thanks to the `BCRYPT_COST` optimization, the entire codebase (28 packages) executes in **~20 seconds**:
+
+```bash
+# Run all unit tests across all packages
+go test ./...
+
+# Run without cache
+go test -count=1 ./...
+
+# Run integration tests against real MySQL & Redis services
+TEST_MYSQL_DSN='test:testpw@tcp(127.0.0.1:3306)/finnapigo_test?multiStatements=true' \
+TEST_REDIS_URL='redis://127.0.0.1:6379/0' \
+go test -tags=integration ./...
+```
+
+### 3. Run OpenAPI Drift Verification
+
+Ensures `docs/openapi.yaml` and Gin routes stay in 100% bidirectional sync:
+
+```bash
+go test -v ./internal/apidrift
+```
 
 ---
 
-## Configuration reference
+## Complete API Reference (All 49 Endpoints)
 
-Everything is read from environment variables (`.env` supported). See `.env.example` for the full, up-to-date list. Key groups:
-
-| Group | Variables | Notes |
-|---|---|---|
-| Server | `SERVER_PORT`, `GIN_MODE`, `TRUSTED_PROXIES`, `PPROF_ADDR`, `HSTS_SECONDS`, `SWAGGER_ENABLED` | `TRUSTED_PROXIES` is a comma-separated CIDR list; empty = trust no one. `PPROF_ADDR` starts an internal-only pprof listener. `SWAGGER_ENABLED` mounts `/swagger/index.html` (default false) |
-| Database | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_MAX_IDLE_CONNS`, `DB_MAX_OPEN_CONNS`, `DB_TLS`, `MIGRATE_AUTO` | `DB_TLS` appends `&tls=...` to the DSN; `MIGRATE_AUTO` is the dev-only AutoMigrate escape hatch |
-| JWT | `JWT_SECRET` (required, no default), `JWT_SECRET_PREVIOUS`, `JWT_ISSUER`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `RESET_TOKEN_TTL`, `EMAIL_VERIFY_TOKEN_TTL`, `MFA_PENDING_TOKEN_TTL`, `SUDO_TOKEN_TTL` | `JWT_SECRET_PREVIOUS` enables zero-downtime rotation |
-| Keys & secrets | `RECOVERY_CODE_KEY` (**required in release mode**), `KEY_PROVIDER` (`env`\|`file`), `KEY_DIR` | AES-256 key sealing recovery codes and TOTP secrets |
-| Account security | `MAX_LOGIN_ATTEMPTS`, `LOGIN_LOCKOUT_DURATION`, `MAX_LOCKOUT_MULTIPLIER`, `REQUIRE_EMAIL_VERIFIED`, `LOGIN_NOTIFY_NEW_IP` | `MAX_LOCKOUT_MULTIPLIER` scales lockout duration for repeat offenders; `LOGIN_NOTIFY_NEW_IP` sends a transparency email on first login from a new IP (deliberately NOT risk-based auth — no step-up) |
-| MFA / TOTP | `TOTP_MAX_ATTEMPTS`, `TOTP_ATTEMPT_WINDOW`, `TOTP_MAX_CONCURRENT`, `RECOVERY_CODE_COUNT`, `RECOVERY_CODE_BYTES` | Brute-force lockout + concurrency gate on CPU-bound verification |
-| Rate limiting | `RATE_LIMIT_RPS`, `RATE_LIMIT_BURST`, `LOGIN_PER_ACCOUNT_MAX`, `LOGIN_WINDOW`, `REGISTER_PER_IP_MAX`, `REGISTER_WINDOW`, `VERIFY_RESEND_PER_EMAIL_MAX`, `VERIFY_RESEND_PER_IP_MAX`, `VERIFY_RESEND_GLOBAL_MAX`, `LOGIN_CAPTCHA_AFTER_FAILS` | Resend limits are shared when `REDIS_URL` is configured |
-| Email | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Empty `SMTP_HOST` -> console notifier (no live tokens in release mode) |
-| CAPTCHA | `CAPTCHA_PROVIDER` (`turnstile` \| empty), `CAPTCHA_SECRET`, `CAPTCHA_SITE_KEY` | Off unless a provider + secret are set |
-| Shared store | `REDIS_URL` | Empty -> in-memory store (single instance only) |
-| Audit | `AUDIT_BUFFER_SIZE`, `AUDIT_FLUSH_BATCH`, `AUDIT_RETENTION_DAYS` | Release mode warns when `AUDIT_RETENTION_DAYS` is unset — see the PII/retention policy below |
-| Hardening | `MAX_REQUEST_BODY_BYTES`, `MAX_PASSWORD_LENGTH`, `RATE_LIMITER_ENTRY_TTL`, `TOTP_MAX_CONCURRENT`, `BREACHED_PASSWORD_CHECK`, `BREACHED_PASSWORD_TIMEOUT` | `BREACHED_PASSWORD_CHECK` screens new passwords against the Pwned Passwords corpus (k-anonymity, fails OPEN on outage) |
-
-### JWT secret rotation procedure
-
-1. Set `JWT_SECRET` to the NEW value and `JWT_SECRET_PREVIOUS` to the old one; restart. Tokens signed by the previous secret keep verifying (via `kid`), new tokens are signed with the new key.
-2. Leave the previous secret in place for at least the access-token + reset-token TTLs (until every legacy token has expired).
-3. Remove `JWT_SECRET_PREVIOUS` and restart. No sessions are invalidated at any step.
-
----
-
-## API reference
-
-The contract of record is **`docs/openapi.yaml`** (OpenAPI 3.0) — every public endpoint, envelope, and schema; CI fails on drift between it and the router (`internal/apidrift`). The Bruno collection stays the executable companion. Summary:
-
-Base path: `/api/v1/auth`. MFA endpoints are nested under `/api/v1/auth/mfa`.
-
-### Core auth
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| POST | `/register` | – | Create an account |
-| POST | `/login` | – | Authenticate, receive access + refresh token (or `mfaRequired` + `mfaToken`) |
-| POST | `/refresh-token` | – | Rotate refresh token, issue a new pair |
-| POST | `/forgot-password` | – | Request a password reset (same response whether or not the email exists) |
-| POST | `/reset-password` | – | Set a new password using a reset token |
-| POST | `/verify-email` | – | Confirm email ownership using a verification token |
-| POST | `/resend-verification` | – | Request a fresh verification link without account enumeration |
-| POST | `/logout` | Yes | Revoke one refresh token |
-| POST | `/logout-all` | Yes | Revoke every refresh token for the current user |
-| POST | `/change-password` | Yes | Change password (revokes all sessions afterward) |
-| POST | `/set-password` | Yes | Establish a first password for Google-OAuth-only accounts (409 if a password already exists) |
-| GET | `/me` | Yes | Current user's profile |
-| GET | `/google/login`, `/google/callback` | – | Google OAuth sign-in (registered only when configured) |
-
-### Sessions
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| GET | `/sessions` | Yes | List active devices (IP, device, location, last active) |
-| DELETE | `/sessions/{id}` | Yes | Revoke one session (IDOR-protected) |
-
-### MFA (TOTP)
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| POST | `/mfa/login-verify` | mfa_pending token | Complete a login pending TOTP |
-| POST | `/mfa/totp/enable` | Yes | Begin enrollment (secret + provisioning URI) |
-| POST | `/mfa/totp/verify` | Yes | Activate TOTP; recovery codes shown once |
-| POST | `/mfa/totp/validate` | Yes | Re-validate a current code on an active session |
-| POST | `/mfa/totp/recovery-codes` | Yes | Re-view codes (requires current TOTP); mints sudo token |
-| POST | `/mfa/totp/recovery-codes/regenerate` | X-Sudo-Token | Regenerate codes |
-
-### MFA (Passkeys / WebAuthn) — registered only when `WEBAUTHN_RP_ID` is set
-
-| Method | Endpoint | Auth | Description |
-|---|---|---|---|
-| POST | `/mfa/passkey/register/challenge` | Yes | PKC creation options (challenge staged, 60s TTL, single use) |
-| POST | `/mfa/passkey/register/verify` | Yes | Verify attestation + persist credential |
-| POST | `/mfa/passkey/authenticate/challenge` | Yes | PKC assertion options (step-up login) |
-| POST | `/mfa/passkey/authenticate/verify` | Yes | Verify assertion → fresh token pair; clone detection enforced |
-| GET | `/mfa/passkeys` | Yes | List registered passkeys (device management) |
-| DELETE | `/mfa/passkeys/{id}` | X-Sudo-Token | Revoke a passkey |
-
-The full request/response shapes live in `docs/openapi.yaml` — the verify
-bodies are verbatim WebAuthn `PublicKeyCredential` JSON from the browser API.
-
-### Operational
-
-| Method | Endpoint | Description |
-|---|---|---|
-| GET | `/healthz` | Liveness — process is running |
-| GET | `/readyz` | Readiness — also checks DB connectivity |
-| GET | `/metrics` | Prometheus scrape — **must stay internal** (see below) |
-
-### Response envelope
-
-Every response, success or error, has the same shape:
+The API is served under the `/api/v1` base path. Every response conforms to the standard envelope:
 
 ```json
 {
   "code": 200,
-  "message": "login successful",
-  "data": { }
+  "message": "success",
+  "data": {}
 }
 ```
 
-### Swagger / API documentation
+### Group A: Operational & System Probes (4 Endpoints)
 
-An interactive Swagger UI is generated from swag annotations in the handlers and served at **`/swagger/index.html`**, gated by `SWAGGER_ENABLED` (default **false** — production posture is off; enable explicitly where the docs are wanted, e.g. local dev).
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/healthz` | Public | Liveness probe; returns 200 OK while process is alive. |
+| `GET` | `/readyz` | Public | Readiness probe; pings database connectivity (503 if unreachable). |
+| `GET` | `/metrics` | Internal | Prometheus exposition scrape endpoint (counters, latency, store errors). |
+| `GET` | `/swagger/*any` | Public | Interactive Swagger UI (mounted when `SWAGGER_ENABLED=true`). |
 
-- UI URL: `http://localhost:<SERVER_PORT>/swagger/index.html` (default port 8080). Always link `/swagger/index.html` — bare `/swagger` is not a UI route.
-- The UI targets whatever origin serves it (annotations carry full absolute paths), so it works unchanged on localhost and on Render.
-- `docs/openapi.yaml` remains the **contract of record** enforced by `internal/apidrift`; the generated OpenAPI 2.0 spec (`docs/docs.go`, `docs/swagger.json`, `docs/swagger.yaml`) is a committed developer-experience companion.
-- Regenerate after changing any annotation, with the pinned CLI (never `@latest`):
+### Group B: Public Core Auth & Credential Lifecycle (8 Endpoints)
 
-  ```bash
-  go run github.com/swaggo/swag/cmd/swag@v1.16.6 init -g cmd/server/main.go --parseDependency --parseInternal -o docs/
-  ```
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/register` | Rate Limit | Create user account with honeypot & disposable domain checks. |
+| `POST` | `/api/v1/auth/login` | Rate Limit | Authenticate with email/password; returns tokens or `mfaRequired`. |
+| `POST` | `/api/v1/auth/refresh-token` | Rate Limit | Rotate refresh token; revokes prior token; detects token theft reuse. |
+| `POST` | `/api/v1/auth/forgot-password` | Rate Limit | Request password reset email (timing-equalized to prevent enumeration). |
+| `POST` | `/api/v1/auth/reset-password` | Rate Limit | Update password using single-use reset JWT. |
+| `POST` | `/api/v1/auth/verify-email` | Rate Limit | Confirm email address ownership using single-use verification JWT. |
+| `POST` | `/api/v1/auth/resend-verification` | Multi-Tier Limit | Request fresh verification link with per-email/IP/global velocity limits. |
+| `POST` | `/api/v1/auth/change-email/confirm` | Rate Limit | Confirm new email address using single-use confirmation token. |
 
-  CI regenerates with the same pinned version and fails on a stale spec.
+### Group C: Third-Party OAuth 2.0 / OpenID Connect (2 Endpoints)
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/auth/google/login` | Rate Limit | Initiate Google OAuth 2.0 flow with store-backed PKCE state. |
+| `GET` | `/api/v1/auth/google/callback` | Rate Limit | Process OAuth callback, exchange code, link or authenticate user. |
+
+### Group D: Authenticated Profile & Credential Management (10 Endpoints)
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/logout` | Bearer JWT | Revoke caller's current refresh token. |
+| `POST` | `/api/v1/auth/logout-all` | Bearer JWT | Revoke all active sessions and refresh tokens for user. |
+| `POST` | `/api/v1/auth/change-password` | Bearer JWT | Change password with current password verification; revokes all sessions. |
+| `POST` | `/api/v1/auth/set-password` | Bearer JWT | Establish initial password for OAuth accounts (409 if password exists). |
+| `GET` | `/api/v1/auth/me` | Bearer JWT | Retrieve current user's profile information. |
+| `DELETE` | `/api/v1/auth/me` | Bearer JWT | GDPR Right to Erasure; permanently delete account (password verified). |
+| `GET` | `/api/v1/auth/me/audit-log` | Bearer JWT | Paginated personal security audit log history. |
+| `POST` | `/api/v1/auth/change-email/request` | Bearer JWT | Request email address change (password verified; issues confirmation token). |
+| `POST` | `/api/v1/auth/deactivate` | Bearer JWT | Self-deactivate account (password or sudo-gated; revokes all sessions). |
+| `DELETE` | `/api/v1/auth/oauth/:provider` | Bearer JWT | Unlink third-party OAuth identity provider (e.g., `google`). |
+
+### Group E: Session & Device Management (2 Endpoints)
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/auth/sessions` | Bearer JWT | List caller's active device sessions (IP, User-Agent, Geo, Last Active). |
+| `DELETE` | `/api/v1/auth/sessions/:id` | Bearer JWT | Revoke a specific active session (IDOR-protected). |
+
+### Group F: Trusted Devices (Remember-Me) (2 Endpoints)
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/auth/trusted-devices` | Bearer JWT | List recognized trusted devices eligible for 30-day MFA bypass. |
+| `DELETE` | `/api/v1/auth/trusted-devices/:id` | Bearer JWT | Revoke trusted device status. |
+
+### Group G: MFA Pending Isolation Gate (1 Endpoint)
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/mfa/login-verify` | `mfa_pending` JWT | Complete step-up login using TOTP code (rejects standard access tokens). |
+
+### Group H: TOTP Multi-Factor Authentication (7 Endpoints)
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/mfa/totp/enable` | Bearer JWT | Initialize TOTP enrollment (returns sealed secret and QR otpauth URI). |
+| `POST` | `/api/v1/auth/mfa/totp/verify` | Bearer JWT | Confirm initial 6-digit TOTP code and obtain recovery codes (shown once). |
+| `POST` | `/api/v1/auth/mfa/totp/validate` | Bearer JWT | Re-validate TOTP code on an active session. |
+| `POST` | `/api/v1/auth/mfa/totp/recovery-codes` | Bearer JWT | View unconsumed recovery codes (requires current TOTP; mints sudo token). |
+| `POST` | `/api/v1/auth/mfa/totp/disable` | Bearer JWT | Disable TOTP authentication (requires current TOTP or password). |
+| `GET` | `/api/v1/auth/mfa/methods` | Bearer JWT | Retrieve summary of configured authentication factors and recovery codes. |
+| `POST` | `/api/v1/auth/mfa/totp/recovery-codes/regenerate` | `X-Sudo-Token` | Invalidate all existing recovery codes and mint fresh set. |
+
+### Group I: Passkey / WebAuthn FIDO2 Ceremonies (6 Endpoints)
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/mfa/passkey/register/challenge` | Bearer JWT | Generate WebAuthn creation options challenge (60s TTL in store). |
+| `POST` | `/api/v1/auth/mfa/passkey/register/verify` | Bearer JWT | Verify attestation response and persist credential public key. |
+| `POST` | `/api/v1/auth/mfa/passkey/authenticate/challenge` | Bearer JWT | Generate WebAuthn assertion options challenge for step-up login. |
+| `POST` | `/api/v1/auth/mfa/passkey/authenticate/verify` | Bearer JWT | Verify assertion signature; enforces monotonic sign-count clone detection. |
+| `GET` | `/api/v1/auth/mfa/passkeys` | Bearer JWT | List user's registered passkey authenticators. |
+| `DELETE` | `/api/v1/auth/mfa/passkeys/:id` | `X-Sudo-Token` | Revoke a registered passkey authenticator. |
+
+### Group J: Enterprise Admin, Multi-Tenancy & Webhooks (7 Endpoints)
+
+| Method | Endpoint | Auth / Permission | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/admin/users` | `users:read` | Paginated search and listing of users within the caller's tenant. |
+| `POST` | `/api/v1/admin/users/:id/lock` | `users:write` | Lock user account (temporary duration or indefinite; self-lockout prevented). |
+| `POST` | `/api/v1/admin/users/:id/unlock` | `users:write` | Unlock user account and reset failed login counters. |
+| `POST` | `/api/v1/admin/users/:id/force-logout` | `users:write` | Invalidate all sessions, refresh tokens, and increment password version. |
+| `GET` | `/api/v1/admin/sessions` | `sessions:read` | Monitor all active user sessions across the tenant. |
+| `GET` | `/api/v1/admin/audit-log/export` | `audit:export` | Stream tenant audit logs in CSV or NDJSON format. |
+| `POST` | `/api/v1/admin/webhooks` | `webhooks:write` | Register outbound webhook endpoint with SSRF loopback block and HMAC signing. |
 
 ---
 
-## Design notes
+## Configuration Reference
 
-A few decisions worth knowing if you're extending this:
+Configuration is managed via environment variables (with `.env` file support):
 
-- **Password reset / email verification use JWTs with a `type` claim** (`reset`, `verify-email`) rather than a separate token table — reuses the existing JWT infrastructure and gets expiry for free. Single-use is enforced separately via the JWT ID, tracked in `store.Store` with a durable DB backstop.
-- **Passwords are capped at bcrypt's 72-byte limit.** This prevents bcrypt truncation from treating two distinct long passwords as the same credential.
-- **`locked_until` is a nullable timestamp**, distinct from `is_active` — a boolean can't express a *temporary* lock, only a permanent enable/disable state.
-- **Refresh tokens are hashed with SHA-256**, not bcrypt — they're already high-entropy random values, so bcrypt's deliberately slow KDF isn't needed (unlike user-chosen passwords, which are lower-entropy and benefit from that slowness). The same logic applies to recovery codes; both consumption paths are compare-and-set so parallel double-use is impossible.
-- **The `store.Store` interface is the seam for horizontal scaling.** Nothing above it knows whether counters live in a Go map or Redis — swapping is a config change (`REDIS_URL`), not a code change. Failure semantics are deliberate: counters fail open, single-use guards fail closed.
-- **TOTP shared secrets are sealed at rest with AES-256-GCM** (`totp_devices.secret_encrypted`). Rows written before this column existed keep their plaintext `secret` and keep validating (lazy migration on read); the next enrollment or sudo-gated rotation re-writes them sealed and blanks the plaintext column. Rotating `RECOVERY_CODE_KEY` (or the dev derivation from `JWT_SECRET`) orphans existing sealed secrets — affected users must re-enroll TOTP, exactly like recovery codes.
-- **Passkey recovery policy (W8).** Passkeys are a second factor here, not a passwordless replacement: passwordless accounts MUST keep email verification, TOTP, and recovery codes as fallback paths, and losing every passkey never locks an account (password + recovery codes always recover it). A passkey whose sign counter regresses is treated as cloned: it is revoked and `passkey.clone_detected` is audited.
-- **Passkey HTTPS enforcement (W7).** Browsers only expose WebAuthn on secure contexts — `https://` origins (or `localhost` for development). `WEBAUTHN_RP_ID` must be the registrable domain suffix of every entry in `WEBAUTHN_RP_ORIGINS`; the server rejects ceremonies bound to any other origin. There is no HTTP passkey deployment mode.
-- **Data layer (D1/D2).** All hot-path queries are index-served — verified by EXPLAIN assertions that run against real MySQL in CI and fail on a full-scan plan. The rotation repository stays on GORM: the measured ~14 ms/rotation is dominated by three network round-trips, not ORM overhead (a raw-SQL rewrite was rejected with this evidence).
-
-## Operational notes
-
-- **`GET /metrics` (Prometheus).** Set `METRICS_ADDR` to serve it on a dedicated internal listener (optionally bearer-gated via `METRICS_TOKEN`); without it, `/metrics` rides the public listener (loudly warned about in release mode). **Never expose it publicly.** Metrics (all label-free — no user-identifying data): `finnapigo_store_errors_total`, `finnapigo_audit_entries_dropped_total`, `finnapigo_rate_limited_requests_total`, `finnapigo_audit_buffer_depth`, and the auth outcomes `finnapigo_login_success_total`, `finnapigo_login_failure_total`, `finnapigo_refresh_rotations_total`, `finnapigo_token_reuse_detections_total`, `finnapigo_totp_failure_total`. Suggested alert starting points: token-reuse detections > 0 over 5m (possible theft), login failure rate > 1/s for 10m per replica (credential stuffing or outage), store errors > 0 (Redis health), audit drops > 0 (audit pipeline sizing).
-- **Schema migrations (R1).** Schema changes ship as golang-migrate SQL files under `migrations/` and are applied as a DEPLOY STEP: `go run ./cmd/migrate up` (also `down N`, `force V`, `version`). The up/down/re-up cycle is proven continuously by the CI integration job against a real MySQL service container.
-- **Log redaction guarantee (G2).** The default logger is wrapped in a redacting handler: attributes keyed like `password`, `token`, `code`, `secret`, `recovery_code`, `authorization`, cookies, and their case variants are replaced with `[REDACTED]` before output, at any nesting depth. Metrics never carry user-identifying labels.
-- **Audit & PII retention policy (G1).** `audit_logs` rows contain PII (email addresses, client IPs, usernames). Release mode without `AUDIT_RETENTION_DAYS` emits a boot warning (a deliberate warning, not a failure — retention is a governance choice; some deployments must keep evidence long). Set `AUDIT_RETENTION_DAYS` (e.g. `90`) to have the cleanup job batch-delete older rows every 15 minutes. Pick a posture deliberately — "keep evidence long" or "minimize PII" — and document it internally. The future durable audit queue is designed (not implemented) in `docs/audit-durable-queue-design.md`.
-- **`PPROF_ADDR`** (optional) starts a `net/http/pprof` listener on a separate internal port (e.g. `localhost:6060`). Empty (default) = disabled. Never expose this port publicly.
-
-## Known limitations / roadmap
-
-The enterprise-readiness reconciliation (`docs/enterprise-review-reconciliation.md`) tracks the full OPEN/DONE table. Remaining open items:
-
-- Passkey authentication is implemented as a second factor (step-up on an active session); fully passwordless login (discoverable credentials without a session) is a possible next step.
-- `RUN_JOBS=true` single-replica pinning and store-based leader election both exist; a distributed lock with fencing tokens is the next hardening step.
-- `go test -race` requires cgo — CI runs it on Linux; Windows hosts without a C compiler cannot.
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `SERVER_PORT` | int | `8080` | Port for the primary HTTP service. |
+| `GIN_MODE` | string | `debug` | Gin runtime mode (`debug`, `release`, `test`). |
+| `TRUSTED_PROXIES` | string | `""` | Comma-separated CIDR list for reverse proxy IP extraction. Empty = trust no one. |
+| `HSTS_SECONDS` | int | `0` | Strict-Transport-Security header duration on HTTPS. |
+| `SWAGGER_ENABLED` | bool | `false` | Mounts Swagger UI at `/swagger/index.html`. |
+| `BCRYPT_COST` | int | `0` | Bcrypt hashing cost (0 defaults to `bcrypt.DefaultCost` = 10; use 4 in tests). |
+| `JWT_SECRET` | string | *Required* | 256-bit secret string used to sign and verify JWTs. |
+| `JWT_SECRET_PREVIOUS`| string | `""` | Previous secret to enable zero-downtime key rotation. |
+| `ACCESS_TOKEN_TTL` | duration | `15m` | Lifetime of access tokens. |
+| `REFRESH_TOKEN_TTL` | duration | `168h` | Lifetime of refresh tokens (7 days). |
+| `RESET_TOKEN_TTL` | duration | `15m` | Lifetime of password reset tokens. |
+| `EMAIL_VERIFY_TOKEN_TTL` | duration | `24h` | Lifetime of email verification tokens. |
+| `MFA_PENDING_TOKEN_TTL` | duration | `5m` | Lifetime of short-lived `mfa_pending` JWTs. |
+| `SUDO_TOKEN_TTL` | duration | `15m` | Lifetime of elevated `X-Sudo-Token` JWTs. |
+| `RECOVERY_CODE_KEY`| string | *Required in Release* | 64-character hex key (AES-256-GCM) sealing recovery codes and TOTP secrets. |
+| `MAX_LOGIN_ATTEMPTS` | int | `5` | Failed attempts before account lockout. |
+| `LOGIN_LOCKOUT_DURATION` | duration | `15m` | Lockout duration upon reaching attempt threshold. |
+| `MAX_LOCKOUT_MULTIPLIER` | int | `4` | Maximum multiplier for repeated lockout offenders. |
+| `TOTP_MAX_ATTEMPTS`| int | `5` | Failed TOTP attempts before temporary lockout. |
+| `TOTP_MAX_CONCURRENT` | int | `50` | Maximum parallel CPU-bound TOTP verifications before 429 backoff. |
+| `WEBAUTHN_RP_ID` | string | `""` | Relying Party ID for Passkeys (e.g., `localhost` or `example.com`). |
+| `WEBAUTHN_RP_ORIGINS`| string | `""` | Comma-separated list of allowed HTTPS origins. |
+| `WEBAUTHN_RP_DISPLAY_NAME` | string | `"FinnApiGo"`| Display name shown during passkey registration prompts. |
+| `REDIS_URL` | string | `""` | Redis connection URL (`redis://host:6379/0`). Empty uses in-memory store. |
+| `AUDIT_RETENTION_DAYS` | int | `0` | Automatic audit log purge retention period in days (0 disables purge). |
+| `BREACHED_PASSWORD_CHECK`| bool | `false` | Screens passwords against Pwned Passwords API via k-anonymity. |
+| `CORS_ALLOWED_ORIGINS` | string | `""` | Comma-separated allowlist of browser origins. |
 
 ---
 
-## Testing with Bruno / Postman
+## Security Policies & Operational Runbooks
 
-Import the Bruno collection (`Bruno/`) or any REST client and point it at the configured base URL (the collection's `{{baseUrl}}` — `http://localhost:8081` in `Bruno/environments/Local.yml`, matching `SERVER_PORT` in your `.env`). A typical flow:
+### 1. Zero-Downtime JWT Key Rotation
 
-1. `POST /register`
-2. `POST /login` → save `accessToken` and `refreshToken` from the response
-3. `GET /me` with `Authorization: Bearer <accessToken>`
-4. `POST /refresh-token` with the saved `refreshToken` → confirms rotation (the old token stops working)
+1. Update config: set `JWT_SECRET` to the new secret and `JWT_SECRET_PREVIOUS` to the current secret.
+2. Deploy/restart instances. New tokens will be signed with the new secret (stamped with a fresh `kid`), while active tokens signed with the previous secret continue to verify cleanly.
+3. Wait for `ACCESS_TOKEN_TTL` and `REFRESH_TOKEN_TTL` to elapse.
+4. Remove `JWT_SECRET_PREVIOUS` and restart instances.
 
-Verification and password-reset tokens are logged to the server console (or emailed, if SMTP is configured) rather than returned in the API response — check the terminal running `go run ./cmd/server`. In release mode live tokens are never logged; the console notifier emits a redacted notice instead.
+### 2. Passkey Monotonic Counter Clone Detection
+
+WebAuthn authenticators maintain an internal signature counter incremented on every assertion. Upon receiving an assertion, FinnApiGo compares the incoming counter against the stored counter:
+- If `incoming_counter <= stored_counter` (and counter > 0), authenticator cloning is detected.
+- FinnApiGo immediately revokes the credential, audits the event (`passkey.clone_detected`), and terminates the ceremony with 401 Unauthorized.
+
+### 3. Outbound Webhook SSRF Loopback Defense
+
+When registering webhook endpoints via `POST /api/v1/admin/webhooks`:
+- Target URLs are parsed and resolved via DNS.
+- If the resolved IP belongs to loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`), or private RFC 1918 ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), the request is rejected with `400 Bad Request` to eliminate SSRF attacks.
+
+### 4. Logging and Secret Redaction Guarantee
+
+The application logger is wrapped in a redacting structural `slog.Handler`. Any attribute containing terms such as `password`, `token`, `secret`, `code`, `recovery_code`, `authorization`, or cookie values is replaced with `[REDACTED]` prior to emission, guaranteeing that secrets are never written to disk or centralized log collectors.
+
+---
+
+## Manual Testing with Bruno
+
+The repository includes a ready-to-use Bruno API collection under `Bruno/`:
+
+1. Open [Bruno](https://www.usebruno.com/).
+2. Select **Open Collection** and browse to `e:/FinnApiGo/Bruno`.
+3. Choose the `local` environment (`http://localhost:8080`).
+4. Execute requests in the following sequence:
+   - `Auth/register.yml` → `Auth/login.yml` (tokens are automatically saved).
+   - `Auth/sessions.yml` → View active device session.
+   - `MFA/totp-enable.yml` → `MFA/totp-verify.yml` → Complete TOTP enrollment.
+   - `Admin/list-users.yml` → Manage tenant user accounts.
+
+---
+
+## License
+
+Internal proprietary software. All rights reserved.

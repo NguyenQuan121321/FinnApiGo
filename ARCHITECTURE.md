@@ -1,79 +1,123 @@
-# FinnApiGo Architecture
+# FinnApiGo Architecture Guide
 
-## Runtime flow
+This document outlines the architectural patterns, security designs, and package boundaries in **FinnApiGo**.
+
+---
+
+## 1. System Runtime Flow
+
+FinnApiGo enforces strict transport-to-domain separation: HTTP adapters parse and validate payloads, services own business rules and cryptographic policies, and repositories perform context-aware database queries.
 
 ```mermaid
-flowchart LR
-    Client --> Routes --> Middleware --> Handlers --> Services --> Repositories --> MySQL
-    Services --> Store["In-memory Store or Redis"]
-    Services --> Audit["Async Audit Writer --> MySQL"]
-    Routes --> Metrics["Prometheus /metrics"]
-    main["cmd/server"] --> Cleanup["Cleanup + retention jobs"]
-    Logging["Redacting slog Handler"] --> Stdout["JSON logs"]
+flowchart TD
+    Client["Client / API Consumer"] --> Net["HTTP Listener"]
+    
+    subgraph GlobalMiddleware["Global Middleware Pipeline"]
+        Net --> M_Tenant["Tenant Resolution (X-Tenant-ID / Subdomain)"]
+        M_Tenant --> M_CORS["CORS Policy"]
+        M_CORS --> M_Trace["OpenTelemetry Tracing"]
+        M_Trace --> M_Log["Redacting Request Logger"]
+        M_Log --> M_Sec["Security Headers (nosniff, no-store, HSTS)"]
+        M_Sec --> M_Body["Max Request Body Limiter (1MB)"]
+    end
+
+    subgraph RouteGateways["Route Gateways & Protections"]
+        M_Body --> G_Rate["Rate Limiter (Token Bucket / Redis)"]
+        G_Rate --> G_Auth["JWT Auth Middleware (kid-keyed verification)"]
+        G_Auth --> G_RBAC["RBAC Permission Checker (e.g. users:write)"]
+        G_Auth --> G_Sudo["Sudo Mode Gate (X-Sudo-Token)"]
+        G_Auth --> G_MFA["MFA-Pending Gate (mfa_pending token only)"]
+        G_Auth --> G_Conc["TOTP Concurrency Semaphore"]
+    end
+
+    subgraph DomainLayer["Application Domain"]
+        G_Conc --> Handlers["HTTP Handlers (Sonic JSON + DTO Validation)"]
+        Handlers --> Services["Domain Services (Auth, TOTP, Passkey, Admin, Webhook)"]
+        Services --> Store["Key-Value Store (In-Memory / Redis v9)"]
+        Services --> Audit["Async Audit Writer (Buffered Channel)"]
+        Services --> Repositories["Tenant-Scoped Repositories (GORM)"]
+    end
+
+    subgraph Persistence["Persistence & Infrastructure"]
+        Repositories --> Database[("MySQL 8 / SQLite")]
+        Audit --> Database
+        Store --> RedisCache[("Redis Cluster")]
+    end
 ```
 
-The application enforces a transport-to-domain flow: handlers parse and validate HTTP, services own business decisions, and repositories perform persistence only. `context.Context` flows from handlers through repository I/O.
+---
 
-## Package boundaries
+## 2. Package Boundaries & Responsibilities
 
-- `cmd/server`: composition root, key resolution (K1), dependency wiring, background jobs, pprof server, lifecycle, and shutdown.
-- `internal/config`: typed twelve-factor configuration with fail-fast validation — `JWT_SECRET` is mandatory, invalid numeric/duration/bool values refuse to boot (R2), `DB_TLS` and `KEY_PROVIDER` values are enum-checked.
-- `internal/handlers`: HTTP adapters. Constructors accept handler-owned service interfaces, enabling isolation from the database in HTTP tests. `dto.go` owns every request/response payload struct with explicit max lengths.
-- `internal/services`: authentication, TOTP MFA, notification, CAPTCHA, disposable-domain checks, and policy rules. Gin is banned here (depguard enforces).
-- `internal/repositories`: context-aware GORM persistence adapters, plus LIMIT-batched delete helpers for the purge jobs (P1).
-- `internal/store`: TTL-aware state abstraction (`Get`/`Set`/`SetNX`/`IncrBy`/`Delete`). `InMemoryStore` is the default; `RedisStore` shares replay guards, velocity windows, and per-IP counters between instances. Failure semantics are split (A1): counters fail open, single-use guards fail closed.
-- `internal/jwt`: purpose-bound JWT issuance and verification over a versioned keyset (K2) — `kid` header on issue, `JWT_SECRET` + optional `JWT_SECRET_PREVIOUS` on verify, HS256-only (C5).
-- `internal/hash` and `internal/crypto`: one-way primitives (bcrypt, SHA-256 token/recovery-code hashing, constant-time compare) versus reversible AES-256-GCM sealing for at-rest secrets that must be re-read (recovery codes, TOTP secrets — C7).
-- `internal/logging`: redacting `slog.Handler` decorator (G2) — secret-shaped attribute values become `[REDACTED]` before reaching any sink.
-- `internal/metrics`: Prometheus registry construction (P2); counters wrap atomics maintained at runtime. Metrics carry no user-identifying labels (G2).
-- `internal/middleware`: auth, MFA-pending, sudo, rate limiting (process-local token bucket + shared store counter path), security headers (A3), and the TOTP concurrency semaphore.
-- `internal/routes`: route registration, request logger (safe fields only, request-ID correlation), trusted-proxy handling, and the `SWAGGER_ENABLED`-gated Swagger UI mount.
-- `internal/apidrift`: contract drift check — builds the real router and diffs it against `docs/openapi.yaml` (A1).
-- `internal/swagger`: documentation-only response structs referenced by swag annotations. Never imported at runtime; the generated OpenAPI 2.0 spec is a developer-experience companion, while `docs/openapi.yaml` stays the contract of record.
-- `docs/`: generated swag output (`docs.go`, `swagger.json`, `swagger.yaml`) committed so builds and CI serve Swagger UI without the swag CLI; regenerated with the pinned command in the README.
-- `internal/database`: GORM/MySQL connection plus the embedded golang-migrate runner (R1).
-- `migrations/`: embedded SQL migration pairs applied by `cmd/migrate` as the deploy step.
-- `internal/device`, `internal/geo`, `internal/response`: focused single-purpose packages (UA parsing, mockable geo resolution, response envelope).
+- **`cmd/server`**: Composition root. Reads configuration, initializes database and keysets, wires dependencies, launches background workers (audit flush, session/token cleanup), and handles graceful OS signal shutdown.
+- **`cmd/migrate`**: Standalone database migration CLI using embedded SQL files (`up`, `down`, `force`, `version`).
+- **`internal/config`**: Strongly-typed Twelve-Factor configuration with fail-fast startup validation.
+- **`internal/tenant`**: Multi-tenancy context helpers (`WithTenantID`, `TenantFromContext`) ensuring multi-tenant isolation throughout the service and persistence layers.
+- **`internal/handlers`**: HTTP presentation layer. Encapsulates request binding with `bytedance/sonic`, DTO field validation, and uniform response generation via `internal/response`. Handlers never import GORM directly.
+- **`internal/services`**: Pure domain logic (authentication, TOTP, Passkey, Admin, Trusted Devices, Webhooks, Notifier, CAPTCHA). Contains zero Gin dependencies (enforced by `depguard` linter).
+- **`internal/repositories`**: Context-aware GORM adapters handling database queries with explicit tenant scoping and LIMIT-batched deletion routines for retention purges.
+- **`internal/middleware`**:
+  - `TenantMiddleware`: Extracts tenant ID or slug from headers or subdomains.
+  - `AuthMiddleware`: Validates Bearer access tokens, enforces password-version freshness (`pwd_version`), and verifies session revocation against the denylist.
+  - `RequirePermission`: Enforces RBAC permissions dynamically.
+  - `SudoMiddleware`: Requires a valid elevated `X-Sudo-Token`.
+  - `MFAPendingMiddleware`: Restricts access exclusively to single-use `mfa_pending` JWTs.
+  - `RateLimiter`: Sliding-window and token-bucket rate limiter with store fail-open semantics.
+  - `ConcurrencyLimiter`: Semaphore capping parallel CPU-bound cryptographic operations.
+  - `SecurityHeaders`: Emits `X-Content-Type-Options`, `Referrer-Policy`, `Cache-Control: no-store`, and HSTS.
+- **`internal/store`**: High-performance key-value abstraction (`Get`, `Set`, `SetNX`, `IncrBy`, `Delete`). Default `InMemoryStore` for single instances; `RedisStore` for clustered deployments.
+- **`internal/hash` & `internal/crypto`**:
+  - `hash`: Bcrypt password hashing with configurable cost (`hash.HashPasswordWithCost`) and SHA-256 token hashing.
+  - `crypto`: AES-256-GCM authenticated sealing and unsealing for secrets at rest (TOTP seeds and recovery codes).
+- **`internal/jwt`**: Keyset-aware JWT issuance and verification (`kid` stamping, `JWT_SECRET_PREVIOUS` fallback, HS256-only enforcement).
+- **`internal/logging`**: Redacting `slog.Handler` decorator replacing sensitive parameters (passwords, tokens, codes, keys) with `[REDACTED]`.
+- **`internal/metrics`**: Prometheus metrics registry and exposition handler.
+- **`internal/apidrift`**: Bidirectional route-to-OpenAPI contract drift verification.
 
-## Security-critical decisions
+---
 
-- **Key isolation (K1)** — release mode refuses to boot without an explicit `RECOVERY_CODE_KEY`; the JWT-secret derivation fallback exists only in dev, loudly. One leaked secret no longer unravels both token integrity and sealed-secret confidentiality.
-- **JWT rotation (K2)** — signing stamps a `kid` (SHA-256 fingerprint, not secret material); verification resolves keys from the versioned keyset, so `JWT_SECRET_PREVIOUS` keeps pre-rotation tokens valid until expiry.
-- **Secrets at rest** — TOTP secrets and the re-viewable recovery-code copies are sealed with AES-256-GCM under `RECOVERY_CODE_KEY`; refresh tokens and recovery-code *verification* use SHA-256 (high-entropy inputs do not need a slow KDF).
-- **Rotation under concurrency (C1/C2)** — refresh revocation and recovery-code consumption are compare-and-set updates; parallel double-use attempts yield exactly one winner, and reuse of a rotated refresh token revokes every session (theft response) and is audited.
-- **Store failure semantics (A1)** — rate/velocity counters fail open (Redis outage must not become an auth outage; the shared limiter falls back to its process-local bucket), while single-use guards fail closed (a store outage must never replay a consumed token).
-- **Brute-force defense in depth** — per-IP token bucket + shared fixed-window counters (C4 TTL anchoring), per-account and TOTP attempt windows (successes never feed them — C9), exponential lockout backoff, adaptive CAPTCHA, concurrency-gated TOTP validation.
-- **Enumeration resistance** — timing-equalized login for unknown accounts, identical forgot-password/resend-verification responses, honeypot + velocity caps on registration.
-- **Logging guarantees (G2)** — request logs emit only safe fields; a structural redaction handler guarantees secret-shaped attributes never reach the sink regardless of call-site discipline; metrics carry no user-identifying labels.
-- **PII governance (G1)** — `audit_logs` carry PII; release mode without `AUDIT_RETENTION_DAYS` warns at boot; the durable-queue upgrade path is designed (`docs/audit-durable-queue-design.md`) but deliberately not implemented.
-- **Public API contract (A1)** — `docs/openapi.yaml` is the contract of record; the `internal/apidrift` test fails CI when the router and the spec diverge in either direction.
-- Passwords use bcrypt and are rejected above 72 bytes so bcrypt truncation cannot equate distinct credentials.
-- Public auth flows avoid account enumeration. Verification resend combines per-email, shared per-IP, and global volume caps; rejected abuse is audited.
-- Request logging emits only method, path, status, latency, client IP, and request ID via structured (slog JSON) logs.
+## 3. Security-Critical Decisions
 
-## Data-layer notes (D1)
+### 3.1. Tenant Isolation
+Every database query in multi-tenant mode filters on `tenant_id`. Tenant context is populated early in the request lifecycle (`internal/middleware/tenant.go`) and propagated through Go's `context.Context`. Repositories verify that operations cannot mutate entities across tenant boundaries.
 
-Every hot-path query is index-served (asserted against real MySQL by the
-integration suite, which fails on a full-scan plan):
+### 3.2. Passkey Clone Detection (W8)
+In compliance with FIDO2 / WebAuthn specifications, authenticators store a monotonic signature counter incremented upon each authentication event. During verification (`POST /api/v1/auth/mfa/passkey/authenticate/verify`):
+- The counter reported by the authenticator is verified against the database.
+- If `assertion_counter <= stored_counter` (and counter > 0), the authenticator has likely been cloned.
+- The service immediately invalidates the credential, emits a security audit event (`passkey.clone_detected`), and terminates the request.
 
-| Query | Plan |
-|---|---|
-| `FindByHash` (rotation lookup) | `const` on `uni_refresh_tokens_token_hash` |
-| CAS revoke (rotation) | `range` on `PRIMARY`, rows=1 |
-| `FindActiveByUser` | `ref` on `idx_refresh_tokens_user_id` |
-| Purge `expires_at <` / `created_at <` | `range` on the respective index, covering |
-| Audit by user | `ref` on `idx_audit_logs_user_id` |
+### 3.3. GitHub-Style Sudo Mode
+High-privilege actions (regenerating recovery codes, revoking passkeys, deactivating accounts) are gated by `X-Sudo-Token`. Users must verify their primary password or TOTP code within a short window (default 15 minutes) to mint this elevated token. Stolen API access tokens alone cannot strip security credentials.
 
-The rotation repository deliberately stays on GORM: the ~14 ms/rotation
-benchmark is round-trip-dominated, so a raw-SQL rewrite would save
-microseconds while duplicating SQL.
+### 3.4. Refresh Token Rotation & Theft Response (C1/C2)
+Refresh tokens are opaque high-entropy random strings stored exclusively as SHA-256 hashes. Upon presentation at `/api/v1/auth/refresh-token`:
+1. The token is checked and marked as used via an atomic compare-and-set update.
+2. If an already-consumed refresh token is presented, the system triggers a **theft response**: every active session and refresh token for that user is immediately revoked, and an audit event is logged.
 
-## Testing strategy
+### 3.5. Outbound Webhook SSRF Defense
+To prevent Server-Side Request Forgery (SSRF) when webhook subscriptions are registered:
+- Destination URLs are resolved using standard DNS lookup.
+- If the resolved IP maps to loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`), or private RFC 1918 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), registration is rejected with `400 Bad Request`.
 
-- **Unit** — hash, config, response, handler, route, service, store, middleware, and repository packages; handler tests use fakes through narrow interfaces; service tests use in-memory fakes; repository tests use fresh pure-Go SQLite databases.
-- **Integration (`-tags=integration`)** — real MySQL + Redis (service containers in CI, `TEST_MYSQL_DSN` / `TEST_REDIS_URL` locally): migration up/down/re-up (T1), EXPLAIN plan assertions (D1), Redis fixed-window/guard semantics. Skipped automatically when the env vars are unset.
-- **Fuzzing (T2)** — three targets with property invariants (no panic, no forged type acceptance, no malformed code acceptance, consumption equals exact match); 30-second smoke per target on every CI run, longer runs locally (`go test -fuzz=FuzzX -fuzztime=...`).
-- **Coverage floors (T3)** — CI enforces 73.0% (`internal/services`) and 91.0% (`internal/jwt`); raise the floors as coverage improves, never lower them.
-- **Contract drift (A1)** — `internal/apidrift` diffs the registered router against the OpenAPI spec in both directions on every test run.
-- **Security scans (T4)** — blocking standalone gosec and Trivy (vuln + misconfig) in CI, alongside vet, golangci-lint, and govulncheck.
-- `go test -race` runs in CI (Linux); local Windows machines without a C compiler cannot run it.
+### 3.6. Store Failure Semantics (A1)
+The application applies split failure postures to `store.Store` outages:
+- **Rate and velocity limits fail OPEN**: Redis outages must not take down the core authentication service. The system falls back to process-local token buckets.
+- **Single-use token guards fail CLOSED**: A store failure must never allow token replay (such as password reset or email verification tokens).
+
+---
+
+## 4. Test Execution & Performance Architecture
+
+To maintain high continuous-integration velocity without compromising security:
+
+1. **Bcrypt Cost Parameterization (`BCRYPT_COST`)**:
+   - Production defaults to `bcrypt.DefaultCost` (cost 10) or operator-configured cost.
+   - Test suites initialize services with `bcrypt.MinCost` (cost 4).
+   - This architectural change reduced total uncached test execution time across 28 packages from **181 seconds down to ~20 seconds**.
+2. **Zero-Sleep Synchronization**:
+   - Concurrency, rate limiting, and background worker test cases use channels and synchronization primitives rather than arbitrary `time.Sleep` calls.
+3. **Pure-Go SQLite Testing**:
+   - High-level integration tests (`tests/integration/`) run against in-memory SQLite (`github.com/glebarez/sqlite`) requiring no CGO, enabling instant cross-platform execution on Windows, macOS, and Linux.
+4. **API Drift Verification**:
+   - `internal/apidrift` compiles the live Gin engine and verifies that all 48 operational routes match `docs/openapi.yaml` in both directions on every CI build.

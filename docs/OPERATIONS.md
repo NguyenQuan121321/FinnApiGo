@@ -1,144 +1,182 @@
 # Enterprise Operations and Testing Runbook
 
-This document details the architectural separation between operational production code and test suites, manual verification using Bruno API collections, and automated testing procedures for the FinnApiGo Enterprise Authentication service.
+This document details the architectural separation between operational application code and testing infrastructure, manual verification using the Bruno API collections, automated test execution, and deployment health verification for the **FinnApiGo** Enterprise Authentication service.
 
 ---
 
 ## 1. Enterprise Separation of Concerns
 
-In modern enterprise architectures, a strict boundary is enforced between operational application code and high-level testing infrastructure:
+FinnApiGo enforces strict boundaries between operational domain logic, infrastructure persistence, and test suites:
 
 ```
 FinnApiGo/
 ├── cmd/                          # Production entry points
-│   ├── server/                   # HTTP server daemon
-│   └── migrate/                  # Database migration CLI tool
+│   ├── server/                   # HTTP daemon composition root & graceful shutdown
+│   └── migrate/                  # Database migration CLI runner
 │
 ├── internal/                     # Core domain business logic (private, encapsulated)
-│   ├── routes/                   # HTTP route tree and middleware wiring
-│   ├── handlers/                 # Request binding, response formatting, and validation
-│   │   ├── *_test.go             # Unit tests isolated per handler
-│   ├── services/                 # Business logic, cryptography, security policies
-│   │   ├── *_test.go             # Mock-based unit tests
-│   ├── repositories/             # Persistence layer (GORM / MySQL / SQLite)
-│   │   ├── *_test.go             # Repository data-access tests
-│   ├── middleware/               # Auth, security headers, rate limiting, CORS, RBAC
-│   ├── models/                   # Database entities and GORM schemas
-│   ├── tenant/                   # Tenant isolation context helpers
-│   └── config/                   # Strongly typed application configuration
+│   ├── routes/                   # Route tree registration and middleware pipelines
+│   ├── handlers/                 # HTTP request decoding, DTO validation, and response envelopes
+│   ├── services/                 # Business logic, cryptography, security policies (zero Gin deps)
+│   ├── repositories/             # Persistence layer with context & tenant scoping (GORM)
+│   ├── middleware/               # Auth, RBAC, Sudo, Tenant, Rate Limiting, Concurrency Limiting
+│   ├── tenant/                   # Multi-tenancy context injection & extraction helpers
+│   ├── store/                    # Key-value state abstraction (In-Memory and Redis v9)
+│   ├── models/                   # GORM domain models
+│   └── config/                   # Twelve-Factor typed configuration
 │
 ├── tests/                        # Dedicated high-level test suites (isolated from domain code)
-│   ├── integration/              # End-to-end integration tests running on real/in-memory DB
+│   ├── integration/              # High-level integration tests
+│   │   ├── all_49_endpoints_test.go # Exhaustive audit of all 49 endpoints (<1s execution)
+│   │   ├── live_api_demo_test.go # Multi-tenant workflow & session verification
 │   │   ├── phase1_e2e_test.go    # Account lifecycle, GDPR erasure, MFA aggregation
-│   │   └── phase2_e2e_test.go    # Multi-tenant isolation, RBAC, hash chaining, trusted device
-│   └── load/                     # Concurrency, benchmark, and load testing
+│   │   └── phase2_e2e_test.go    # Tenant isolation, RBAC, and trusted devices
+│   ├── load/                     # Concurrency, benchmark, and k6 load testing scripts
+│   ├── passkey_test.html         # Browser testbed for WebAuthn passkey ceremonies
+│   └── README.md                 # Test suite quickstart and runner guide
 │
-├── Bruno/                        # Operational API collection (GUI manual testing)
-│   ├── Auth/                     # Authentication, email change, deactivation, erasure
-│   ├── MFA/                      # TOTP enrollment, validation, disable, recovery codes
-│   ├── Admin/                    # Tenant user management, lockout, force-logout, audit export
-│   ├── TrustedDevices/           # Remember-me MFA bypass device management
-│   ├── Webhooks/                 # Webhook subscription registration
-│   └── environments/             # Environment configuration (local, staging, production)
+├── Bruno/                        # Operational API collection for manual testing (GUI)
+│   ├── Auth/                     # 22 requests covering registration, login, profile, sessions
+│   ├── MFA/                      # 8 requests covering TOTP enrollment, validation, sudo codes
+│   ├── Passkey/                  # 6 requests covering WebAuthn registration & step-up auth
+│   ├── Admin/                    # 6 requests covering tenant users, lock, unlock, export
+│   ├── TrustedDevices/           # 2 requests covering remember-me device management
+│   ├── Webhooks/                 # 1 request covering signed webhook registration
+│   └── environments/             # Environment definitions (Local, Staging, Production)
 │
-├── migrations/                   # Versioned database migration scripts (up / down)
+├── migrations/                   # Embedded SQL migration pairs (up / down)
 └── docs/                         # OpenAPI 3.0 specification, architecture guides, runbooks
 ```
 
 ### Architectural Benefits of Separation
 
-1. **Maintainability and Developer Experience**: Keeping `internal/` packages focused solely on domain logic and lightweight unit tests prevents cognitive overload from hundreds of lines of integration fixtures.
-2. **Standard Testing Pyramid**:
-   - **Tier 1 - Unit Tests (`internal/*/*_test.go`)**: Fast, mock-based unit tests executing in seconds on local workstations and pre-commit hooks.
-   - **Tier 2 - Integration and E2E Tests (`tests/integration/`)**: Complete user journeys and security assertions running against pure-Go SQLite or staging MySQL instances.
-   - **Tier 3 - Operational Collections (`Bruno/`)**: Executable API collections used by QA engineers, operations teams, and product managers for manual acceptance testing across environments.
+1. **Clean Packaging**: Keeping `internal/` packages free from heavy test fixtures maintains rapid compilation and prevents accidental test-only code from leaking into production builds.
+2. **Multi-Tier Testing Pyramid**:
+   - **Tier 1 - Unit Tests (`internal/*/*_test.go`)**: Lightning-fast tests with mock fakes executing in seconds.
+   - **Tier 2 - Exhaustive Audit (`tests/integration/all_49_endpoints_test.go`)**: Self-contained SQLite test verifying all 49 routes in < 1 second.
+   - **Tier 3 - Multi-Service Integration (`tests/integration/`)**: Validates real MySQL 8 and Redis instances in CI.
+   - **Tier 4 - Executable Manual Collections (`Bruno/`)**: Used by QA engineers and operators to test deployed endpoints without writing custom scripts.
 
 ---
 
 ## 2. Manual Testing Guide with Bruno
 
-The project includes an operational Bruno collection in the `Bruno/` directory for manual testing without external dependencies.
+The project includes an operational Bruno collection in the `Bruno/` directory.
 
 ### Getting Started
 
 1. Download and install [Bruno](https://www.usebruno.com/).
-2. Select **Open Collection** and choose the directory:
+2. Click **Open Collection** and open:
    ```
    e:/FinnApiGo/Bruno
    ```
-3. Select the `local` environment in the top-right dropdown (defaults to `http://localhost:8080`).
+3. Select the `local` environment from the top-right environment selector (configured for `http://localhost:8080`).
 
-### Endpoint Catalog in Bruno
+### Complete Bruno Endpoint Catalog
 
-#### Directory `Bruno/Auth/`:
-- `register.yml`: Register a new user account.
-- `login.yml`: Authenticate with email/password and obtain `accessToken` and `refreshToken`.
-- `change-email-request.yml`: Request email address change (password verified).
-- `change-email-confirm.yml`: Confirm email change token and revoke existing sessions.
-- `deactivate.yml`: Self-deactivate account (password or sudo token gated).
-- `me-erase.yml`: Permanent account erasure (GDPR Right to Erasure).
-- `audit-log.yml`: Inspect personal security audit history (paginated).
-- `oauth-unlink.yml`: Disassociate third-party identity provider (Google OAuth).
-- `sessions.yml`: List all active login sessions for the authenticated user.
+#### Directory `Bruno/Auth/` (Core Auth, Profile & Sessions):
+- `register.yml`: Register a new user account (returns 201 Created).
+- `login.yml`: Authenticate with email/password; saves `accessToken` and `refreshToken` into environment variables.
+- `refresh-token.yml`: Rotate refresh token and obtain a fresh token pair.
+- `forgot-password.yml`: Request password reset email (timing-equalized enumeration resistance).
+- `reset-password.yml`: Set a new password using a single-use reset token.
+- `verify-email.yml`: Confirm email ownership with verification token.
+- `resend-verification.yml`: Request a fresh email verification link.
+- `change-email-request.yml`: Request email change (password verified).
+- `change-email-confirm.yml`: Confirm new email address using single-use confirmation token.
+- `google-login.yml`: Initiate Google OAuth PKCE flow.
+- `google-callback.yml`: Exchange OAuth authorization code for session tokens.
+- `logout.yml`: Revoke current refresh token.
+- `logout-all.yml`: Revoke all active sessions and refresh tokens.
+- `change-password.yml`: Update password with current password verification.
+- `set-password.yml`: Establish first password for OAuth-only accounts.
+- `me.yml`: Fetch authenticated profile information.
+- `me-erase.yml`: Permanent GDPR account erasure.
+- `audit-log.yml`: View personal security audit log history.
+- `deactivate.yml`: Self-deactivate account.
+- `oauth-unlink.yml`: Disassociate third-party identity provider.
+- `sessions.yml`: List all active sessions with IP, device name, location, and activity timestamps.
 - `session-revoke.yml`: Revoke a specific active device session.
 
-#### Directory `Bruno/MFA/`:
-- `totp-enable.yml`: Initialize TOTP secret and QR code URI.
-- `totp-verify.yml`: Confirm initial 6-digit TOTP code and obtain recovery codes.
-- `totp-validate.yml`: Validate second-factor code during step-up or login.
-- `methods.yml`: Aggregate summary of enabled authentication factors.
-- `totp-disable.yml`: Disable TOTP (sudo token or password + TOTP code required).
-- `recovery-codes-view.yml`: View unconsumed recovery codes (sudo-gated).
-- `recovery-codes-regenerate.yml`: Invalidate and regenerate recovery codes.
+#### Directory `Bruno/MFA/` (TOTP Multi-Factor Authentication):
+- `login-verify.yml`: Complete pending MFA login with `mfa_pending` JWT and TOTP code.
+- `totp-enable.yml`: Generate TOTP secret and provisioning QR URI.
+- `totp-verify.yml`: Confirm initial 6-digit TOTP code and display recovery codes.
+- `totp-validate.yml`: Re-validate code on an active session.
+- `totp-disable.yml`: Disable TOTP factor.
+- `methods.yml`: Retrieve unified summary of enabled authentication factors.
+- `recovery-codes-view.yml`: View unconsumed recovery codes (mints `X-Sudo-Token`).
+- `recovery-codes-regenerate.yml`: Regenerate all recovery codes (requires `X-Sudo-Token`).
 
-#### Directory `Bruno/Admin/`:
-- `list-users.yml`: List tenant users with pagination and search filtering.
-- `lock-user.yml`: Temporarily or indefinitely lock a user account.
-- `unlock-user.yml`: Unlock account and reset failed login attempt counters.
-- `force-logout.yml`: Revoke all sessions, refresh tokens, and increment password version immediately.
-- `tenant-sessions.yml`: Monitor all active sessions within the tenant.
-- `audit-export.yml`: Stream audit logs in CSV or NDJSON format.
+#### Directory `Bruno/Passkey/` (FIDO2 / WebAuthn):
+- `passkey-register-challenge.yml`: Generate WebAuthn creation options challenge.
+- `passkey-register-verify.yml`: Verify attestation response and persist credential.
+- `passkey-auth-challenge.yml`: Generate WebAuthn assertion challenge.
+- `passkey-auth-verify.yml`: Verify assertion signature and check monotonic clone counter.
+- `passkey-list.yml`: List registered passkeys for current user.
+- `passkey-revoke.yml`: Revoke a passkey authenticator (requires `X-Sudo-Token`).
 
-#### Directory `Bruno/TrustedDevices/`:
-- `list-devices.yml`: List remembered devices eligible for 30-day MFA bypass.
-- `revoke-device.yml`: Revoke trusted status for a specific device.
+#### Directory `Bruno/TrustedDevices/` (Remember-Me):
+- `list-devices.yml`: List recognized devices eligible for 30-day MFA bypass.
+- `revoke-device.yml`: Revoke trusted device status.
 
-#### Directory `Bruno/Webhooks/`:
-- `create-webhook.yml`: Register outbound webhook endpoint with HMAC-SHA256 signature.
+#### Directory `Bruno/Admin/` (Tenant Administration & Governance):
+- `list-users.yml`: Search and paginate users within caller's tenant.
+- `lock-user.yml`: Lock user account (temporary duration or indefinite).
+- `unlock-user.yml`: Unlock user account and reset failure counters.
+- `force-logout.yml`: Invalidate all sessions, refresh tokens, and increment password version.
+- `tenant-sessions.yml`: Monitor active sessions across the entire tenant.
+- `audit-export.yml`: Stream tenant audit logs in CSV or NDJSON format.
+
+#### Directory `Bruno/Webhooks/` (Signed Event Webhooks):
+- `create-webhook.yml`: Register outbound webhook URL with SSRF protection and HMAC signature secret.
 
 ---
 
 ## 3. Automated Test Execution
 
-### 3.1. Fast Unit Tests
-Run unit tests across internal packages:
+### 3.1. Fast 49-Endpoint Audit
+Run the self-contained audit verifying all 49 Gin routes:
+```bash
+go test -v -count=1 ./tests/integration/ -run TestAll49Endpoints
+```
+
+### 3.2. Fast Unit Tests Across Packages
+Execute unit tests across internal packages:
 ```bash
 go test ./internal/...
 ```
 
-### 3.2. End-to-End Integration Suite
-Execute the high-level integration suite:
-```bash
-go test -v ./tests/integration/...
-```
-
 ### 3.3. API Contract Drift Verification
-Verify that `docs/openapi.yaml` matches registered Gin routes exactly:
+Verify that `docs/openapi.yaml` and registered routes match with zero drift:
 ```bash
 go test -v ./internal/apidrift
 ```
 
-### 3.4. Full Uncached Test Suite
-Run before opening a pull request or deploying to CI/CD:
+### 3.4. Full Uncached Suite
+Run before opening a pull request or deploying to production (executes in ~20 seconds thanks to `BCRYPT_COST` optimization):
 ```bash
 go test -count=1 ./...
 ```
 
+### 3.5. Integration Tests Against MySQL & Redis
+```bash
+TEST_MYSQL_DSN='test:testpw@tcp(127.0.0.1:3306)/finnapigo_test?multiStatements=true' \
+TEST_REDIS_URL='redis://127.0.0.1:6379/0' \
+go test -tags=integration ./...
+```
+
 ---
 
-## 4. System Health and Observability
+## 4. System Health & Observability Probes
 
 When the server is running (`go run cmd/server/main.go`):
-- **Health Check**: `GET http://localhost:8080/healthz` (liveness probe).
-- **Readiness Check**: `GET http://localhost:8080/readyz` (database connectivity probe).
-- **Prometheus Metrics**: `GET http://localhost:8080/metrics` (request counts, latency distributions, failure counters).
+- **Liveness Probe**: `GET http://localhost:8080/healthz`
+  - Responds with `200 OK` and `{ "code": 200, "message": "ok", "data": { "status": "ok" } }`.
+- **Readiness Probe**: `GET http://localhost:8080/readyz`
+  - Validates database connectivity with a 3-second timeout.
+  - Responds with `200 OK` (`db: "up"`) or `503 Service Unavailable` (`db: "down"`).
+- **Prometheus Scrape Endpoint**: `GET http://localhost:8080/metrics`
+  - Exposes Go runtime metrics, HTTP counters, store errors, and audit dropped counts.
+- **Swagger Documentation**: `GET http://localhost:8080/swagger/index.html`
+  - Mounted when `SWAGGER_ENABLED=true`.
