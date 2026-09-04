@@ -30,8 +30,8 @@ func (f fakeAuthService) Register(context.Context, services.RegisterInput) (serv
 func (fakeAuthService) Login(context.Context, services.LoginInput, string, string) (services.TokenPair, services.UserProfile, *services.MFAPendingResult, error) {
 	return services.TokenPair{}, services.UserProfile{}, nil, nil
 }
-func (fakeAuthService) Logout(context.Context, string, string, string) error  { return nil }
-func (fakeAuthService) LogoutAll(context.Context, uint, string) error { return nil }
+func (fakeAuthService) Logout(context.Context, string, string, string) error { return nil }
+func (fakeAuthService) LogoutAll(context.Context, uint, string) error        { return nil }
 func (fakeAuthService) Refresh(context.Context, string, string, string) (services.TokenPair, error) {
 	return services.TokenPair{}, nil
 }
@@ -56,10 +56,16 @@ func (fakeAuthService) CompleteMFALogin(context.Context, services.CompleteMFALog
 func (f fakeAuthService) GetUserAuditLog(context.Context, uint, int, int) ([]services.UserAuditLogItem, int64, error) {
 	return []services.UserAuditLogItem{{ID: 1, Event: "login", Success: true}}, 1, nil
 }
-func (fakeAuthService) RequestChangeEmail(context.Context, uint, services.ChangeEmailRequestInput, string) error { return nil }
+func (fakeAuthService) RequestChangeEmail(context.Context, uint, services.ChangeEmailRequestInput, string) error {
+	return nil
+}
 func (fakeAuthService) ConfirmChangeEmail(context.Context, string, string) error { return nil }
-func (fakeAuthService) DeactivateAccount(context.Context, uint, string, string, string, string) error { return nil }
-func (fakeAuthService) EraseAccount(context.Context, uint, string, string, string, string) error { return nil }
+func (fakeAuthService) DeactivateAccount(context.Context, uint, string, string, string, string) error {
+	return nil
+}
+func (fakeAuthService) EraseAccount(context.Context, uint, string, string, string, string) error {
+	return nil
+}
 
 type fakeTOTPService struct{ err error }
 

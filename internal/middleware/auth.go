@@ -11,6 +11,7 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/response"
+	"github.com/finnapigo/finnapigo/internal/tenant"
 )
 
 // Context keys for values set by AuthMiddleware.
@@ -22,6 +23,9 @@ const (
 	CtxJTI = "jti"
 	// CtxSID holds the access token's session UUID (P0.2 / P0.3).
 	CtxSID = "sid"
+	// CtxPermissions holds the RBAC permission list from the token's perms
+	// claim (P2.2), consumed by RequirePermission.
+	CtxPermissions = "permissions"
 	// CtxSudoUntil holds the expiry time.Time of the verified sudo token —
 	// set by SudoMiddleware, which must run after AuthMiddleware.
 	CtxSudoUntil = "sudo_until"
@@ -133,6 +137,20 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 		c.Set(CtxEmail, claims.Email)
 		c.Set(CtxJTI, claims.ID)
 		c.Set(CtxSID, claims.SID)
+		if len(claims.Permissions) > 0 {
+			c.Set(CtxPermissions, claims.Permissions)
+		}
+		// P2.1 — tenant binding: a signed tid claim OVERRIDES whatever tenant
+		// the request headers/subdomain resolved to. The effective tenant for
+		// every authenticated request is therefore the one bound at token
+		// issuance — clients cannot cross tenant boundaries by setting
+		// X-Tenant-ID. Tokens issued before the tid claim existed carry no
+		// tenant and keep the header-derived value (bounded by AccessTTL).
+		if claims.TenantID != "" {
+			c.Set("tenant_id", claims.TenantID)
+			c.Request = c.Request.WithContext(
+				tenant.WithTenant(c.Request.Context(), claims.TenantID))
+		}
 		c.Next()
 	}
 }

@@ -1781,4 +1781,3 @@ func TestDeactivateAndErase_P13(t *testing.T) {
 		t.Fatalf("expected anonymized email, got %s", erased.Email)
 	}
 }
-

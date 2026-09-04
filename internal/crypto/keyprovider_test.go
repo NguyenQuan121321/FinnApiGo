@@ -85,3 +85,22 @@ func TestFileKeyProvider_RejectsWrongLength_K3(t *testing.T) {
 		t.Fatal("short key file must be rejected")
 	}
 }
+
+func TestEnvKeyProvider_EmptyKeyRejected(t *testing.T) {
+	p := NewEnvKeyProvider(map[string][]byte{"empty": {}})
+	if _, err := p.Retrieve("empty"); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("empty key slice must yield ErrKeyNotFound, got %v", err)
+	}
+}
+
+func TestFileKeyProvider_ReadError(t *testing.T) {
+	dir := t.TempDir()
+	// Create a directory named anything.key so os.ReadFile fails with a read error, not NotExist
+	if err := os.Mkdir(filepath.Join(dir, "anything.key"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := NewFileKeyProvider(dir)
+	if _, err := p.Retrieve("anything"); err == nil || errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("expected non-NotFound file read error, got %v", err)
+	}
+}

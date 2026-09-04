@@ -20,16 +20,22 @@ type mockAdminTokenRepo struct {
 }
 
 func (m *mockAdminTokenRepo) Create(_ context.Context, _ *models.RefreshToken) error { return nil }
-func (m *mockAdminTokenRepo) FindByHash(_ context.Context, _ string) (*models.RefreshToken, error) { return nil, nil }
+func (m *mockAdminTokenRepo) FindByHash(_ context.Context, _ string) (*models.RefreshToken, error) {
+	return nil, nil
+}
 func (m *mockAdminTokenRepo) Revoke(_ context.Context, _ *models.RefreshToken) error { return nil }
 func (m *mockAdminTokenRepo) RevokeAllForUser(_ context.Context, userID uint) error {
 	m.revokedUser = userID
 	return nil
 }
 func (m *mockAdminTokenRepo) RevokeBySession(_ context.Context, _ string) error { return nil }
-func (m *mockAdminTokenRepo) FindActiveByUser(_ context.Context, _ uint) ([]models.RefreshToken, error) { return nil, nil }
+func (m *mockAdminTokenRepo) FindActiveByUser(_ context.Context, _ uint) ([]models.RefreshToken, error) {
+	return nil, nil
+}
 func (m *mockAdminTokenRepo) RevokeByID(_ context.Context, _, _ uint) error { return nil }
-func (m *mockAdminTokenRepo) PurgeExpired(_ context.Context, _ time.Time) (int64, error) { return 0, nil }
+func (m *mockAdminTokenRepo) PurgeExpired(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
 
 // mockAdminUserRepo implements services.AdminUserRepo for testing.
 type mockAdminUserRepo struct {

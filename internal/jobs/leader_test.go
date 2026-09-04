@@ -139,3 +139,122 @@ func TestLeaderRunner_ReleaseOnStop_S2(t *testing.T) {
 		t.Fatal("S2: contender could not claim the released lock")
 	}
 }
+
+func TestRunWhileLeader(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var count atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		RunWhileLeader(ctx, 10*time.Millisecond, func(ctx context.Context) {
+			count.Add(1)
+		})
+		close(done)
+	}()
+
+	time.Sleep(35 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunWhileLeader did not terminate on cancel")
+	}
+
+	if count.Load() == 0 {
+		t.Fatal("RunWhileLeader should execute at least once")
+	}
+}
+
+func TestLeaderRunner_StartStopIdempotence(t *testing.T) {
+	kv := store.NewInMemoryStore(0)
+	defer kv.Close()
+
+	r := NewLeaderRunner(kv, "test-idempotence", time.Hour, time.Hour, func(context.Context) {})
+	r.Start()
+	r.Start() // calling Start again should be a no-op
+
+	r.Stop()
+	r.Stop() // calling Stop again should be a no-op
+}
+
+type fakeLegacyStore struct {
+	mu     sync.Mutex
+	data   map[string]string
+	canRen bool
+}
+
+func newFakeLegacyStore(canRen bool) *fakeLegacyStore {
+	return &fakeLegacyStore{data: map[string]string{}, canRen: canRen}
+}
+
+func (f *fakeLegacyStore) Get(key string) (any, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.data[key]
+	return v, ok
+}
+
+func (f *fakeLegacyStore) Set(key string, val any, ttl time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.data[key] = val.(string)
+}
+
+func (f *fakeLegacyStore) SetNX(key string, val any, ttl time.Duration) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.data[key]; ok {
+		return false
+	}
+	f.data[key] = val.(string)
+	return true
+}
+
+func (f *fakeLegacyStore) Take(key string) (any, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.data[key]
+	delete(f.data, key)
+	return v, ok
+}
+
+func (f *fakeLegacyStore) IncrBy(key string, delta int64, ttl time.Duration) int64 { return 0 }
+func (f *fakeLegacyStore) Delete(key string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.data, key)
+}
+func (f *fakeLegacyStore) Renew(key string, ttl time.Duration) bool {
+	return f.canRen
+}
+
+func TestLeaderRunner_LegacyStoreFallback(t *testing.T) {
+	fs := newFakeLegacyStore(true)
+	r := NewLeaderRunner(fs, "legacy-job", 10*time.Millisecond, time.Hour, func(context.Context) {})
+
+	// First call: SetNX succeeds
+	if !r.isLeader() {
+		t.Fatal("first isLeader should acquire via SetNX")
+	}
+
+	// Second call: SetNX returns false, legacy Renewer invoked
+	if !r.isLeader() {
+		t.Fatal("second isLeader should renew via Renewer fallback")
+	}
+
+	// releaseLock via legacy isSelfLeader -> Delete
+	r.releaseLock()
+	if _, ok := fs.Get(r.lockKey); ok {
+		t.Fatal("lock should be deleted after releaseLock")
+	}
+
+	// Test store without Renewer
+	noRenewStore := &struct {
+		*fakeLegacyStore
+	}{newFakeLegacyStore(false)}
+	r2 := NewLeaderRunner(noRenewStore, "no-ren-job", 10*time.Millisecond, time.Hour, func(context.Context) {})
+	_ = r2.isLeader() // acquires lock
+	// Simulate already locked by self, but store has no Renewer
+	if r2.isLeader() {
+		t.Fatal("isLeader without Renewer capability should return false")
+	}
+}

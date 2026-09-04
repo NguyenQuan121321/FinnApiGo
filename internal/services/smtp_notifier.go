@@ -244,4 +244,3 @@ func (n *SMTPNotifier) SendSecurityAlert(ctx context.Context, to, event, detail 
 }
 
 var _ Notifier = (*SMTPNotifier)(nil)
-

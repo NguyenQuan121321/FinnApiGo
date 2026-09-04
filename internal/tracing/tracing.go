@@ -49,7 +49,7 @@ func Setup(ctx context.Context) (func(context.Context) error, error) {
 	}
 	res, err := sdkresource.Merge(
 		sdkresource.Default(),
-		sdkresource.NewWithAttributes(semconv.SchemaURL,
+		sdkresource.NewWithAttributes("",
 			semconv.ServiceName(ServiceName),
 		),
 	)

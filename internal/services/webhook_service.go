@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/models"
@@ -37,33 +38,76 @@ type WebhookRepo interface {
 type WebhookService struct {
 	repo           WebhookRepo
 	httpClient     *http.Client
-	allowLocalhost bool
+	allowLocalhost atomic.Bool
 	stopCh         chan struct{}
 }
 
-func NewWebhookService(repo WebhookRepo) *WebhookService {
-	return &WebhookService{
-		repo: repo,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
-		},
-		allowLocalhost: false,
-		stopCh:         make(chan struct{}),
+// blockedIP reports whether an address is in the SSRF-forbidden set: loopback,
+// RFC1918/ULA private, link-local, multicast, unspecified. Screening happens
+// BOTH at registration (fast fail) and at every dial (enforcement) — the
+// dial-time check closes the DNS-rebinding TOCTOU where a name resolves
+// publicly during validation but internally at delivery time.
+func blockedIP(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
 	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+}
+
+func NewWebhookService(repo WebhookRepo) *WebhookService {
+	s := &WebhookService{repo: repo, stopCh: make(chan struct{})}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	s.httpClient = &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			// DialContext resolves the hostname HERE, screens every candidate
+			// IP, then dials the screened address directly — the resolver
+			// cannot hand back a different (internal) address between check
+			// and connect. TLS is unaffected: http.Transport derives
+			// ServerName from the request URL host, not the dialed IP.
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if s.allowLocalhost.Load() {
+					return dialer.DialContext(ctx, network, addr)
+				}
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, fmt.Errorf("webhook dial: %w", err)
+				}
+				ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+				if err != nil {
+					return nil, fmt.Errorf("webhook dial: resolve %s: %w", host, err)
+				}
+				if len(ips) == 0 {
+					return nil, fmt.Errorf("webhook dial: no addresses for %s", host)
+				}
+				for _, ip := range ips {
+					if blockedIP(ip.IP) {
+						return nil, fmt.Errorf("%w: %s resolves to %s", ErrWebhookSSRFBlocked, host, ip.IP)
+					}
+				}
+				return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+			},
+		},
+	}
+	return s
 }
 
 // SetAllowLocalhost enables/disables localhost targets (intended for test fixtures).
 func (s *WebhookService) SetAllowLocalhost(allow bool) {
-	s.allowLocalhost = allow
+	s.allowLocalhost.Store(allow)
 }
 
 // ValidateURL performs anti-SSRF IP screening on destination webhook URLs.
+// This is the fast-fail gate at registration time; the binding enforcement
+// lives in the custom DialContext (see NewWebhookService), which re-screens
+// at connect time to defeat DNS rebinding.
 func (s *WebhookService) ValidateURL(targetURL string) error {
 	u, err := url.Parse(targetURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return ErrInvalidWebhookURL
 	}
-	if s.allowLocalhost {
+	if s.allowLocalhost.Load() {
 		return nil
 	}
 
@@ -73,7 +117,7 @@ func (s *WebhookService) ValidateURL(targetURL string) error {
 		return err
 	}
 	for _, ip := range ips {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		if blockedIP(ip) {
 			return ErrWebhookSSRFBlocked
 		}
 	}
@@ -87,7 +131,9 @@ func (s *WebhookService) RegisterEndpoint(ctx context.Context, tenantID, targetU
 	}
 
 	secretBytes := make([]byte, 32)
-	_, _ = rand.Read(secretBytes)
+	if _, err := rand.Read(secretBytes); err != nil {
+		return nil, fmt.Errorf("webhook: generate signing secret: %w", err)
+	}
 	secret := hex.EncodeToString(secretBytes)
 
 	ep := &models.WebhookEndpoint{

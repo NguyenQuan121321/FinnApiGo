@@ -1100,4 +1100,3 @@ func TestTOTPService_GetMFAMethods_P15(t *testing.T) {
 		t.Fatalf("expected TOTP enabled with default totp, got %+v", res)
 	}
 }
-

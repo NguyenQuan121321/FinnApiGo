@@ -191,3 +191,76 @@ func TestLoad_MigrateAutoDefaultOff_R1(t *testing.T) {
 		t.Fatal("MIGRATE_AUTO=true must enable the dev escape hatch")
 	}
 }
+
+func TestLoad_AdditionalValidationAndTypes(t *testing.T) {
+	// 1. TrimSpace
+	if got := TrimSpace("  padded  "); got != "padded" {
+		t.Fatalf("TrimSpace = %q, want 'padded'", got)
+	}
+
+	// 2. envInt64 invalid
+	t.Setenv("JWT_SECRET", "test-secret")
+	t.Setenv("MAX_REQUEST_BODY_BYTES", "not-a-number")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error on invalid MAX_REQUEST_BODY_BYTES")
+	}
+
+	// 3. envOptionalBool
+	t.Setenv("MAX_REQUEST_BODY_BYTES", "1048576")
+	t.Setenv("RUN_JOBS", "true")
+	cfg, err := Load()
+	if err != nil || cfg.Server.RunJobs == nil || !*cfg.Server.RunJobs {
+		t.Fatalf("expected RUN_JOBS=true, got %v, err %v", cfg.Server.RunJobs, err)
+	}
+
+	t.Setenv("RUN_JOBS", "false")
+	cfg, err = Load()
+	if err != nil || cfg.Server.RunJobs == nil || *cfg.Server.RunJobs {
+		t.Fatalf("expected RUN_JOBS=false, got %v, err %v", cfg.Server.RunJobs, err)
+	}
+
+	t.Setenv("RUN_JOBS", "invalid-bool")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error on invalid RUN_JOBS")
+	}
+
+	// 4. WebAuthn attestation validation
+	t.Setenv("RUN_JOBS", "")
+	t.Setenv("WEBAUTHN_ATTESTATION", "invalid-attestation")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error on invalid WEBAUTHN_ATTESTATION")
+	}
+
+	for _, att := range []string{"none", "indirect", "direct"} {
+		t.Setenv("WEBAUTHN_ATTESTATION", att)
+		if _, err := Load(); err != nil {
+			t.Fatalf("expected valid WEBAUTHN_ATTESTATION %s, got %v", att, err)
+		}
+	}
+
+	// 5. WebAuthn RP_ID without origins
+	t.Setenv("WEBAUTHN_ATTESTATION", "none")
+	t.Setenv("WEBAUTHN_RP_ID", "example.com")
+	t.Setenv("WEBAUTHN_RP_ORIGINS", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error when WEBAUTHN_RP_ID set without WEBAUTHN_RP_ORIGINS")
+	}
+
+	// 6. Key provider validation
+	t.Setenv("WEBAUTHN_RP_ID", "")
+	t.Setenv("KEY_PROVIDER", "invalid-provider")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error on invalid KEY_PROVIDER")
+	}
+
+	t.Setenv("KEY_PROVIDER", "file")
+	t.Setenv("KEY_DIR", "")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error on KEY_PROVIDER=file with empty KEY_DIR")
+	}
+
+	t.Setenv("KEY_DIR", "/some/dir")
+	if _, err := Load(); err != nil {
+		t.Fatalf("expected success on KEY_PROVIDER=file with KEY_DIR, got %v", err)
+	}
+}

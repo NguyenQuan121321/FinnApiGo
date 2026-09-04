@@ -82,4 +82,3 @@ func (n *ConsoleNotifier) SendSecurityAlert(ctx context.Context, to, event, deta
 }
 
 var _ Notifier = (*ConsoleNotifier)(nil)
-
