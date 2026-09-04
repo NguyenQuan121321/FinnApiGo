@@ -106,11 +106,6 @@ HTTP Client / Reverse Proxy
 
 ```
 FinnApiGo/
-├── .agent/                                # AI agent context, specifications, and execution tracking
-│   ├── enterprise-auth-execution-prompt.md# Core enterprise auth prompt & architectural guidelines
-│   ├── IMPLEMENTATION_PROGRESS.md         # Milestone and deliverable progress tracking
-│   ├── prompt_cicd_hardening.md           # CI/CD pipeline and test hardening instructions
-│   └── skill.md                           # AI assistant skill profile and capabilities
 ├── .github/                               # GitHub Actions CI/CD and dependency automation
 │   ├── workflows/
 │   │   ├── ci.yml                         # Automated lint, vet, test, integration (MySQL+Redis), fuzz, scans
