@@ -416,10 +416,10 @@ jobs:
     steps:
       - name: Trigger Render Deploy Hook
         env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL || secrets.RENDER_DEPLOY_HOOK }}
         run: |
           if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
-            echo "::error::RENDER_DEPLOY_HOOK_URL is not configured in repository/environment secrets"
+            echo "::error::Neither RENDER_DEPLOY_HOOK nor RENDER_DEPLOY_HOOK_URL is configured in repository/environment secrets"
             exit 1
           fi
           echo "Triggering production deployment via Render deploy hook..."
