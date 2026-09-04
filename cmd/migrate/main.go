@@ -143,7 +143,7 @@ func checkSchema(dsn, mode string, m *migrate.Migrate) {
 		expectedTables := []string{
 			"users", "refresh_tokens", "audit_logs", "used_tokens",
 			"totp_devices", "recovery_codes", "oauth_identities",
-			"webauthn_credentials", "sessions", "tenants",
+			"passkey_credentials", "sessions", "tenants",
 			"permissions", "roles", "role_permissions", "user_roles",
 			"trusted_devices", "webhook_endpoints", "webhook_deliveries",
 			"schema_migrations",
