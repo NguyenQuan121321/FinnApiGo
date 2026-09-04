@@ -141,8 +141,7 @@ jobs:
           DB_USER: test
           DB_PASSWORD: testpw
           DB_NAME: finnapigo_migration_test
-        run: |
-          go run ./cmd/migrate up
+        run: go run ./cmd/migrate up
 
       # Step 2: Validate migration version and schema integrity after UP
       - name: Assert schema and version after UP
@@ -153,24 +152,8 @@ jobs:
           DB_PASSWORD: testpw
           DB_NAME: finnapigo_migration_test
         run: |
-          set -euo pipefail
-          VERSION_OUT=$(go run ./cmd/migrate version)
-          echo "Migration version output: $VERSION_OUT"
-          if echo "$VERSION_OUT" | grep -q "dirty: true"; then
-            echo "::error::Migration state is DIRTY after up"
-            exit 1
-          fi
-
-          # Assert core and enterprise tables exist in information_schema
-          tables=(users refresh_tokens audit_logs used_tokens totp_devices recovery_codes oauth_identities webauthn_credentials sessions tenants permissions roles role_permissions user_roles trusted_devices webhook_endpoints webhook_deliveries schema_migrations)
-          for t in "${tables[@]}"; do
-            count=$(MYSQL_PWD="testpw" mysql -h 127.0.0.1 -u test finnapigo_migration_test -s -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='finnapigo_migration_test' AND table_name='$t';")
-            if [ "$count" -ne 1 ]; then
-              echo "::error::Expected table '$t' was not created by migrations up"
-              exit 1
-            fi
-          done
-          echo "All expected tables verified successfully after migration up."
+          go run ./cmd/migrate version
+          go run ./cmd/migrate check up
 
       # Step 3: Roll down all migrations
       - name: Rollback migrations down
@@ -180,10 +163,7 @@ jobs:
           DB_USER: test
           DB_PASSWORD: testpw
           DB_NAME: finnapigo_migration_test
-        run: |
-          # 4 total migration files exist in migrations/ directory (0001, 0002, 0003, 0004)
-          # Rolls down 4 versions to completely revert to clean database state
-          go run ./cmd/migrate down 4
+        run: go run ./cmd/migrate down 4
 
       # Step 4: Validate database returned to clean/empty state (only schema_migrations may remain)
       - name: Assert schema and version after DOWN
@@ -194,22 +174,8 @@ jobs:
           DB_PASSWORD: testpw
           DB_NAME: finnapigo_migration_test
         run: |
-          set -euo pipefail
-          VERSION_OUT=$(go run ./cmd/migrate version)
-          echo "Migration version output after down: $VERSION_OUT"
-          if ! echo "$VERSION_OUT" | grep -q "none (fresh database)"; then
-            echo "::error::Migration version expected 'none (fresh database)', got: $VERSION_OUT"
-            exit 1
-          fi
-
-          # Assert no application tables remain (excluding schema_migrations)
-          remaining=$(MYSQL_PWD="testpw" mysql -h 127.0.0.1 -u test finnapigo_migration_test -s -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='finnapigo_migration_test' AND table_name != 'schema_migrations';")
-          if [ "$remaining" -ne 0 ]; then
-            echo "::error::Expected 0 application tables remaining after rollback, found $remaining:"
-            MYSQL_PWD="testpw" mysql -h 127.0.0.1 -u test finnapigo_migration_test -e "SHOW TABLES;"
-            exit 1
-          fi
-          echo "Clean rollback confirmed: 0 application tables remaining."
+          go run ./cmd/migrate version
+          go run ./cmd/migrate check down
 
   integration:
     name: Integration (MySQL + Redis)
