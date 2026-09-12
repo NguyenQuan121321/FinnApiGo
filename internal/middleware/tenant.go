@@ -81,12 +81,31 @@ func resolveTenant(c *gin.Context) string {
 	}
 	host = strings.ToLower(strings.TrimSpace(host))
 
+	// If host is an IP address (e.g. 127.0.0.1, 192.168.1.1), return default
+	if ip := net.ParseIP(host); ip != nil {
+		return DefaultTenantID
+	}
+
 	// Check for valid subdomain (e.g. acme.example.com)
 	parts := strings.Split(host, ".")
 	if len(parts) >= 3 {
+		// Detect PaaS public domains where <app>.<platform>.<tld> has 3 parts
+		// (e.g. finnapigo.onrender.com, myapp.fly.dev, etc.)
+		lastTwo := parts[len(parts)-2] + "." + parts[len(parts)-1]
+		isPaaS := lastTwo == "onrender.com" || lastTwo == "fly.dev" ||
+			lastTwo == "railway.app" || lastTwo == "herokuapp.com" ||
+			lastTwo == "vercel.app"
+
+		if isPaaS && len(parts) == 3 {
+			// e.g. finnapigo.onrender.com is the base service domain, not a tenant
+			return DefaultTenantID
+		}
+
 		sub := parts[0]
-		// Ignore common non-tenant prefixes
-		if sub != "www" && sub != "api" && sub != "auth" && sub != "app" && sub != "localhost" {
+		// Ignore common non-tenant prefixes and base service names
+		if sub != "www" && sub != "api" && sub != "auth" && sub != "app" &&
+			sub != "admin" && sub != "staging" && sub != "dev" &&
+			sub != "localhost" && sub != "finnapigo" {
 			return sub
 		}
 	}

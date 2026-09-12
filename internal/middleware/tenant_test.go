@@ -48,6 +48,42 @@ func TestTenantMiddleware_Resolution(t *testing.T) {
 			host:       "api.example.com",
 			wantTenant: middleware.DefaultTenantID,
 		},
+		{
+			name:       "render hosting domain (finnapigo.onrender.com)",
+			headers:    nil,
+			host:       "finnapigo.onrender.com",
+			wantTenant: middleware.DefaultTenantID,
+		},
+		{
+			name:       "subdomain on render (acme.finnapigo.onrender.com)",
+			headers:    nil,
+			host:       "acme.finnapigo.onrender.com",
+			wantTenant: "acme",
+		},
+		{
+			name:       "fly.dev hosting domain",
+			headers:    nil,
+			host:       "myapp.fly.dev",
+			wantTenant: middleware.DefaultTenantID,
+		},
+		{
+			name:       "railway hosting domain",
+			headers:    nil,
+			host:       "myapp.railway.app",
+			wantTenant: middleware.DefaultTenantID,
+		},
+		{
+			name:       "ipv4 address fallback",
+			headers:    nil,
+			host:       "127.0.0.1:8080",
+			wantTenant: middleware.DefaultTenantID,
+		},
+		{
+			name:       "app name prefix ignored (finnapigo.example.com)",
+			headers:    nil,
+			host:       "finnapigo.example.com",
+			wantTenant: middleware.DefaultTenantID,
+		},
 	}
 
 	for _, tt := range tests {
