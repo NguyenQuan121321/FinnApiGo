@@ -25,6 +25,9 @@ func NewPasskeyRepository(db *gorm.DB) *PasskeyRepository {
 // index rejects a credential already bound to any user (WebAuthn guarantees
 // per-RP uniqueness; the index enforces it at rest).
 func (r *PasskeyRepository) Create(ctx context.Context, pc *models.PasskeyCredential) error {
+	if err := requireOwner(r.db, ctx, pc.UserID); err != nil {
+		return err
+	}
 	return r.db.WithContext(ctx).Create(pc).Error
 }
 
@@ -33,7 +36,7 @@ func (r *PasskeyRepository) Create(ctx context.Context, pc *models.PasskeyCreden
 // re-presentation of a revoked (possibly cloned) credential.
 func (r *PasskeyRepository) FindByCredentialID(ctx context.Context, credentialID []byte) (*models.PasskeyCredential, error) {
 	var pc models.PasskeyCredential
-	err := r.db.WithContext(ctx).Where("credential_id = ?", credentialID).First(&pc).Error
+	err := ownedRows(r.db, ctx).Where("credential_id = ?", credentialID).First(&pc).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -48,7 +51,7 @@ func (r *PasskeyRepository) FindByCredentialID(ctx context.Context, credentialID
 // list); the service chooses.
 func (r *PasskeyRepository) ListByUser(ctx context.Context, userID uint, includeRevoked bool) ([]models.PasskeyCredential, error) {
 	var rows []models.PasskeyCredential
-	q := r.db.WithContext(ctx).Where("user_id = ?", userID)
+	q := ownedRows(r.db, ctx).Where("user_id = ?", userID)
 	if !includeRevoked {
 		q = q.Where("revoked = ?", false)
 	}
@@ -59,16 +62,15 @@ func (r *PasskeyRepository) ListByUser(ctx context.Context, userID uint, include
 // TouchUsage updates the sign counter and last_used_at after a successful
 // authentication (W5/W6).
 func (r *PasskeyRepository) TouchUsage(ctx context.Context, id uint, signCount uint32, usedAt time.Time) error {
-	return r.db.WithContext(ctx).Model(&models.PasskeyCredential{}).
-		Where("id = ?", id).
-		Updates(map[string]any{"sign_count": signCount, "last_used_at": usedAt}).Error
+	return updateScoped(ownedRows(r.db, ctx).Model(&models.PasskeyCredential{}).
+		Where("id = ?", id), map[string]any{"sign_count": signCount, "last_used_at": usedAt})
 }
 
 // RevokeByID marks a credential revoked via compare-and-set, scoped to the
 // owning user (IDOR-safe, mirroring RefreshTokenRepository.RevokeByID).
 // RowsAffected == 0 → gorm.ErrRecordNotFound (unknown id or other user's).
 func (r *PasskeyRepository) RevokeByID(ctx context.Context, id, userID uint) error {
-	res := r.db.WithContext(ctx).Model(&models.PasskeyCredential{}).
+	res := ownedRows(r.db, ctx).Model(&models.PasskeyCredential{}).
 		Where("id = ? AND user_id = ? AND revoked = ?", id, userID, false).
 		Update("revoked", true)
 	if res.Error != nil {
@@ -82,7 +84,10 @@ func (r *PasskeyRepository) RevokeByID(ctx context.Context, id, userID uint) err
 
 // RevokeAllForUser marks all active credentials of a user revoked (P1.3 erasure).
 func (r *PasskeyRepository) RevokeAllForUser(ctx context.Context, userID uint) error {
-	return r.db.WithContext(ctx).Model(&models.PasskeyCredential{}).
+	if err := requireOwner(r.db, ctx, userID); err != nil {
+		return err
+	}
+	return ownedRows(r.db, ctx).Model(&models.PasskeyCredential{}).
 		Where("user_id = ? AND revoked = ?", userID, false).
 		Update("revoked", true).Error
 }

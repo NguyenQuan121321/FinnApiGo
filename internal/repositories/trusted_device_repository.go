@@ -20,12 +20,15 @@ func NewTrustedDeviceRepository(db *gorm.DB) *TrustedDeviceRepository {
 }
 
 func (r *TrustedDeviceRepository) Create(ctx context.Context, d *models.TrustedDevice) error {
+	if err := requireOwner(r.db, ctx, d.UserID); err != nil {
+		return err
+	}
 	return r.db.WithContext(ctx).Create(d).Error
 }
 
 func (r *TrustedDeviceRepository) FindByDeviceHash(ctx context.Context, hash string) (*models.TrustedDevice, error) {
 	var d models.TrustedDevice
-	err := r.db.WithContext(ctx).
+	err := ownedRows(r.db, ctx).
 		Where("device_hash = ? AND revoked = ? AND expires_at > ?", hash, false, time.Now()).
 		First(&d).Error
 	if err != nil {
@@ -38,14 +41,13 @@ func (r *TrustedDeviceRepository) FindByDeviceHash(ctx context.Context, hash str
 }
 
 func (r *TrustedDeviceRepository) TouchUsage(ctx context.Context, id uint, at time.Time) error {
-	return r.db.WithContext(ctx).Model(&models.TrustedDevice{}).
-		Where("id = ?", id).
-		Update("last_used_at", at).Error
+	return updateScoped(ownedRows(r.db, ctx).Model(&models.TrustedDevice{}).
+		Where("id = ?", id), map[string]any{"last_used_at": at})
 }
 
 func (r *TrustedDeviceRepository) ListByUser(ctx context.Context, userID uint) ([]models.TrustedDevice, error) {
 	var rows []models.TrustedDevice
-	err := r.db.WithContext(ctx).
+	err := ownedRows(r.db, ctx).
 		Where("user_id = ? AND revoked = ? AND expires_at > ?", userID, false, time.Now()).
 		Order("created_at DESC").
 		Find(&rows).Error
@@ -53,7 +55,7 @@ func (r *TrustedDeviceRepository) ListByUser(ctx context.Context, userID uint) (
 }
 
 func (r *TrustedDeviceRepository) Revoke(ctx context.Context, id, userID uint) error {
-	res := r.db.WithContext(ctx).Model(&models.TrustedDevice{}).
+	res := ownedRows(r.db, ctx).Model(&models.TrustedDevice{}).
 		Where("id = ? AND user_id = ?", id, userID).
 		Update("revoked", true)
 	if res.Error != nil {

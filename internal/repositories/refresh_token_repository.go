@@ -19,13 +19,16 @@ func NewRefreshTokenRepository(db *gorm.DB) *RefreshTokenRepository {
 }
 
 func (r *RefreshTokenRepository) Create(ctx context.Context, rt *models.RefreshToken) error {
+	if err := requireOwner(r.db, ctx, rt.UserID); err != nil {
+		return err
+	}
 	return r.db.WithContext(ctx).Create(rt).Error
 }
 
 // FindByHash returns the refresh-token row matching the given hash, or nil.
 func (r *RefreshTokenRepository) FindByHash(ctx context.Context, hash string) (*models.RefreshToken, error) {
 	var rt models.RefreshToken
-	if err := r.db.WithContext(ctx).Where("token_hash = ?", hash).First(&rt).Error; err != nil {
+	if err := ownedRows(r.db, ctx).Where("token_hash = ?", hash).First(&rt).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -38,7 +41,7 @@ func (r *RefreshTokenRepository) FindByHash(ctx context.Context, hash string) (*
 // newest activity first. Used by the "your devices / sessions" listing.
 func (r *RefreshTokenRepository) FindActiveByUser(ctx context.Context, userID uint) ([]models.RefreshToken, error) {
 	var rows []models.RefreshToken
-	err := r.db.WithContext(ctx).
+	err := ownedRows(r.db, ctx).
 		Where("user_id = ? AND revoked = ? AND expires_at > ?", userID, false, time.Now()).
 		Order("last_active_at DESC, id DESC").
 		Find(&rows).Error
@@ -53,7 +56,7 @@ func (r *RefreshTokenRepository) FindActiveByUser(ctx context.Context, userID ui
 // ids (IDOR). Returns gorm.ErrRecordNotFound when no row matched, which the
 // service maps to ErrSessionNotFound.
 func (r *RefreshTokenRepository) RevokeByID(ctx context.Context, id, userID uint) error {
-	res := r.db.WithContext(ctx).Model(&models.RefreshToken{}).
+	res := ownedRows(r.db, ctx).Model(&models.RefreshToken{}).
 		Where("id = ? AND user_id = ?", id, userID).
 		Update("revoked", true)
 	if res.Error != nil {
@@ -71,7 +74,7 @@ func (r *RefreshTokenRepository) RevokeByID(ctx context.Context, id, userID uint
 // purged) — returned as ErrTokenAlreadyRevoked so callers detect the reuse.
 func (r *RefreshTokenRepository) Revoke(ctx context.Context, rt *models.RefreshToken) error {
 	rt.Revoked = true
-	res := r.db.WithContext(ctx).Model(rt).
+	res := ownedRows(r.db, ctx).Model(rt).
 		Where("revoked = ?", false).
 		Update("revoked", true)
 	if res.Error != nil {
@@ -86,7 +89,10 @@ func (r *RefreshTokenRepository) Revoke(ctx context.Context, rt *models.RefreshT
 // RevokeAllForUser revokes every active refresh token for a user — used after
 // a password change to invalidate all existing sessions.
 func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID uint) error {
-	return r.db.WithContext(ctx).Model(&models.RefreshToken{}).
+	if err := requireOwner(r.db, ctx, userID); err != nil {
+		return err
+	}
+	return ownedRows(r.db, ctx).Model(&models.RefreshToken{}).
 		Where("user_id = ? AND revoked = ?", userID, false).
 		Update("revoked", true).Error
 }
@@ -95,7 +101,7 @@ func (r *RefreshTokenRepository) RevokeAllForUser(ctx context.Context, userID ui
 // (P0.3). Used by token-reuse detection so a stolen chain kills ONLY the
 // affected device, never the user's other sessions.
 func (r *RefreshTokenRepository) RevokeBySession(ctx context.Context, sessionID string) error {
-	return r.db.WithContext(ctx).Model(&models.RefreshToken{}).
+	return ownedRows(r.db, ctx).Model(&models.RefreshToken{}).
 		Where("session_id = ? AND revoked = ?", sessionID, false).
 		Update("revoked", true).Error
 }
@@ -104,7 +110,7 @@ func (r *RefreshTokenRepository) RevokeBySession(ctx context.Context, sessionID 
 // transaction — the credential-change flow revokes sessions inside the SAME
 // transaction as the password update (services.TxScopedTokenRevoker).
 func (r *RefreshTokenRepository) RevokeAllForUserTx(tx *gorm.DB, userID uint) error {
-	return tx.Model(&models.RefreshToken{}).
+	return ownedRows(tx, tx.Statement.Context).Model(&models.RefreshToken{}).
 		Where("user_id = ? AND revoked = ?", userID, false).
 		Update("revoked", true).Error
 }
@@ -115,7 +121,7 @@ func (r *RefreshTokenRepository) RevokeAllForUserTx(tx *gorm.DB, userID uint) er
 // delete streams (expired first, then revoked) so a large backlog never
 // holds long locks (P1).
 func (r *RefreshTokenRepository) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
-	db := r.db.WithContext(ctx)
+	db := r.db.WithContext(ctx) // Internal maintenance only; no HTTP route.
 	expired, err := batchedDelete(db, &models.RefreshToken{}, "expires_at < ?", before)
 	if err != nil {
 		return expired, err

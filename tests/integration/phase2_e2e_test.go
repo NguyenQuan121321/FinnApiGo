@@ -116,6 +116,9 @@ func TestE2E_Phase2_RBAC(t *testing.T) {
 		t.Fatalf("CreateRole Editor failed: %v", err)
 	}
 
+	if err := db.Create(&models.User{ID: 77, TenantID: "corp-main", Username: "rbac-owner", Email: "rbac@example.com", Password: "hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	// 3. Assign role to user 77
 	if err := rbacRepo.AssignRoleToUser(ctx, 77, editorRole.ID); err != nil {
 		t.Fatalf("AssignRoleToUser failed: %v", err)
@@ -175,6 +178,9 @@ func TestE2E_Phase2_TrustedDeviceMFA(t *testing.T) {
 	tdSvc := services.NewTrustedDeviceService(tdRepo)
 	ctx := context.Background()
 
+	if err := db.Create(&models.User{ID: 101, Username: "device-owner", Email: "device@example.com", Password: "hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	// 1. Issue trusted device token for user 101
 	token, exp, err := tdSvc.Issue(ctx, 101, "Pixel 9 Pro", "10.0.0.99")
 	if err != nil || token == "" {

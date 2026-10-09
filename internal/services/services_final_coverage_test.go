@@ -24,6 +24,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/store"
+	"github.com/finnapigo/finnapigo/internal/tenant"
 	"github.com/go-webauthn/webauthn/protocol"
 )
 
@@ -252,14 +253,10 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 	}
 
 	// 9. Disable branches
-	// Create dummy device for 99999 so user not found check can run
-	_ = totpRepo.Upsert(ctx, &models.TOTPDevice{UserID: 99999, Enabled: true})
-
-	// Fallback password + code:
-	// A. User not found
-	if err := svc.Disable(ctx, 99999, "", "pass", "123456", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("expected ErrUserNotFound, got %v", err)
+	if err := totpRepo.Upsert(ctx, &models.TOTPDevice{UserID: 99999, Enabled: true}); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("orphan factor must be rejected, got %v", err)
 	}
+
 	// B. Invalid password
 	if err := svc.Disable(ctx, u.ID, "", "WrongPassword!", "123456", "1.1.1.1"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("expected ErrInvalidCredentials, got %v", err)
@@ -574,7 +571,10 @@ func TestTrustedDeviceService_AllBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.TrustedDevice{})
+	_ = db.AutoMigrate(&models.User{}, &models.TrustedDevice{})
+	if err := db.Create(&models.User{ID: 10, Username: "device-owner", Email: "device@example.com", Password: "hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	repo := repositories.NewTrustedDeviceRepository(db)
 	svc := NewTrustedDeviceService(repo)
 
@@ -1075,12 +1075,12 @@ func TestAuthService_PasswordBranches(t *testing.T) {
 	}
 
 	// 6. CurrentPwdVersion int and string cache types
-	memStore.Set("pwdver:101", 42, time.Minute)
+	memStore.Set(tenant.PasswordVersionKey(ctx, 101), 42, time.Minute)
 	vInt, err := svc.CurrentPwdVersion(ctx, 101)
 	if err != nil || vInt != 42 {
 		t.Fatalf("expected 42, got %d, err=%v", vInt, err)
 	}
-	memStore.Set("pwdver:102", "99", time.Minute)
+	memStore.Set(tenant.PasswordVersionKey(ctx, 102), "99", time.Minute)
 	vStr, err := svc.CurrentPwdVersion(ctx, 102)
 	if err != nil || vStr != 99 {
 		t.Fatalf("expected 99, got %d, err=%v", vStr, err)
@@ -1205,13 +1205,8 @@ func TestOAuthService_UnlinkAndLink(t *testing.T) {
 	}
 
 	// 6. findOrCreateUser branches: dangling identity, already linked, and username collision
-	_ = oauthRepo.Create(ctx, &models.OAuthIdentity{
-		UserID:         88888,
-		Provider:       "google",
-		ProviderUserID: "dangling-sub",
-	})
-	if _, err := svc.findOrCreateUser(ctx, &GoogleIDTokenClaims{Sub: "dangling-sub"}, "dangling@example.com", "1.1.1.1"); !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("expected ErrUserNotFound for dangling identity, got %v", err)
+	if err := oauthRepo.Create(ctx, &models.OAuthIdentity{UserID: 88888, Provider: "google", ProviderUserID: "dangling-sub"}); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("orphan identity must be rejected, got %v", err)
 	}
 
 	_ = oauthRepo.Create(ctx, &models.OAuthIdentity{

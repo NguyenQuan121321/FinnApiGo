@@ -48,12 +48,12 @@ func TestRequirePermission(t *testing.T) {
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
-			name:       "admin role bypasses permission check",
+			name:       "admin role alone is denied",
 			setAuth:    true,
 			userID:     1,
 			role:       "admin",
 			reqPerm:    "users:write",
-			wantStatus: http.StatusOK,
+			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "allowed via JWT permissions claim",
@@ -65,13 +65,13 @@ func TestRequirePermission(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "allowed via checker fallback",
+			name:       "checker cannot expand signed grants",
 			setAuth:    true,
 			userID:     3,
 			role:       "user",
 			checker:    mockRBACChecker{allowed: map[string]bool{"users:write": true}},
 			reqPerm:    "users:write",
-			wantStatus: http.StatusOK,
+			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "forbidden when permission missing",

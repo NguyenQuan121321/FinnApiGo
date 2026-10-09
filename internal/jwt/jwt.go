@@ -106,8 +106,11 @@ func kidFor(secret []byte) string {
 // Issue builds and signs a token of the given type with the requested lifetime.
 // For reset and verify-email tokens a jti (UUID) is embedded so single-use
 // enforcement can track consumption (§1.8).
-func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.Duration) (string, error) {
+func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.Duration, tenantID ...string) (string, error) {
 	claims := m.baseClaims(userID, role, email, tokenType, ttl)
+	if len(tenantID) > 0 {
+		claims.TenantID = tenantID[0]
+	}
 	// §1.8 — single-use tokens get a unique jti so replay is detectable.
 	switch tokenType {
 	case TokenTypeReset, TokenTypeEmailVerify:

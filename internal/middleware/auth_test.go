@@ -217,10 +217,10 @@ func TestAuthMiddleware_StalePwdVersionRejected_A7(t *testing.T) {
 	if got := do(fresh, src); got != 200 {
 		t.Errorf("current pwdver token: status=%d, want 200", got)
 	}
-	// Source failing → fail open (AccessTTL bound).
+	// Unavailable scoped account state fails closed.
 	failSrc := func(ctx context.Context, userID uint) (int64, error) { return 0, errors.New("db down") }
-	if got := do(stale, failSrc); got != 200 {
-		t.Errorf("version source error must fail open: status=%d, want 200", got)
+	if got := do(stale, failSrc); got != 503 {
+		t.Errorf("version source error must fail closed: status=%d, want 503", got)
 	}
 }
 
