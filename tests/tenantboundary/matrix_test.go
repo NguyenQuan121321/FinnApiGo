@@ -74,10 +74,10 @@ func runF01Matrix(t *testing.T, db *gorm.DB) {
 			}
 		}
 		u := targets[tid]
-		if err := sessions.Create(ctx, &models.Session{ID: "session-" + tid, UserID: u.ID, DeviceName: "canary-" + tid, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		if err := sessions.Create(ctx, &models.Session{ID: "session-" + tid, UserID: u.ID, DeviceName: "canary-" + tid, LastActiveAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
-		if err := tokens.Create(ctx, &models.RefreshToken{UserID: u.ID, TokenHash: "hash-" + tid, SessionID: "session-" + tid, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		if err := tokens.Create(ctx, &models.RefreshToken{UserID: u.ID, TokenHash: "hash-" + tid, SessionID: "session-" + tid, LastActiveAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 			t.Fatal(err)
 		}
 		if err := passkeys.Create(ctx, &models.PasskeyCredential{UserID: u.ID, CredentialID: []byte("credential-" + tid), PublicKey: []byte("public")}); err != nil {
