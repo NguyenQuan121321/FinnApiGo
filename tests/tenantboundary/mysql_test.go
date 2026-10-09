@@ -75,16 +75,36 @@ func TestF01MySQL(t *testing.T) {
 	t.Logf("real MySQL; isolated schema %s; migrations version=%d; clientFoundRows=%v", schema, version, cfg.ClientFoundRows)
 	runF01Matrix(t, db)
 	// Predicates use existing tenant and owner indexes; no schema change.
+	for _, index := range []struct{ table, name string }{
+		{"users", "idx_users_tenant_id"},
+		{"sessions", "idx_sessions_tenant_id"},
+		{"refresh_tokens", "idx_refresh_tokens_user_id"},
+		{"audit_logs", "idx_audit_logs_tenant_created"},
+	} {
+		var count int64
+		if err := db.Raw("SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ?", schema, index.table, index.name).Scan(&count).Error; err != nil || count == 0 {
+			t.Fatalf("required index %s.%s missing: count=%d err=%v", index.table, index.name, count, err)
+		}
+		t.Logf("required index present: %s.%s", index.table, index.name)
+	}
+	type explainRow struct {
+		Table        string
+		Type         string
+		PossibleKeys sql.NullString `gorm:"column:possible_keys"`
+		Key          sql.NullString
+		Rows         uint64
+		Extra        sql.NullString
+	}
 	for _, query := range []string{
 		"EXPLAIN SELECT * FROM users WHERE id = 1 AND tenant_id = 'default'",
 		"EXPLAIN SELECT * FROM sessions WHERE tenant_id = 'default'",
 		"EXPLAIN SELECT * FROM refresh_tokens WHERE user_id IN (SELECT id FROM users WHERE tenant_id = 'default')",
 		"EXPLAIN SELECT * FROM audit_logs WHERE tenant_id = 'default' ORDER BY created_at DESC LIMIT 20",
 	} {
-		var plan []map[string]any
+		var plan []explainRow
 		if err := db.Raw(query).Scan(&plan).Error; err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("%s: %v", query, plan)
+		t.Logf("%s: %+v", query, plan)
 	}
 }
