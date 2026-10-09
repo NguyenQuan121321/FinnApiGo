@@ -213,6 +213,18 @@ func runF01Matrix(t *testing.T, db *gorm.DB) {
 					if grants, err := rbac.GetUserPermissions(ctx, actors[targetTenant].ID); err != nil || len(grants) != 0 {
 						t.Fatal("foreign grants read")
 					}
+					// Warm account state in its legitimate tenant, then present an
+					// inconsistent signed subject/tenant. The cache cannot cross scope.
+					if _, err := auth.CurrentPwdVersion(tenant.WithTenant(context.Background(), targetTenant), actors[targetTenant].ID); err != nil {
+						t.Fatal(err)
+					}
+					inconsistent, err := mgr.IssueAccessEnterprise(actors[targetTenant].ID, "admin", "fixture@example.com", time.Minute, 0, "inconsistent", tid, fullPerms)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if w := request("GET", "/api/v1/admin/users", inconsistent, targetTenant); w.Code != 401 {
+						t.Fatalf("foreign subject accepted: %d", w.Code)
+					}
 					if rows, total, err := audits.FindByUserIDPaginated(ctx, u.ID, 1, 20); err != nil || total != 0 || len(rows) != 0 {
 						t.Fatal("foreign audit owner")
 					}

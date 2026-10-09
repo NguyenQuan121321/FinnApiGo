@@ -4,6 +4,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/response"
+	"github.com/finnapigo/finnapigo/internal/services"
 	"github.com/finnapigo/finnapigo/internal/tenant"
 )
 
@@ -130,6 +132,10 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 		if pwdVersion != nil {
 			current, err := pwdVersion(c.Request.Context(), claims.UserID)
 			if err != nil {
+				if errors.Is(err, services.ErrUserNotFound) {
+					denyAuth(c, "invalid subject for tenant")
+					return
+				}
 				response.Respond(c, 503, "account state unavailable", nil)
 				c.Abort()
 				return
