@@ -22,6 +22,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/store"
+	"github.com/finnapigo/finnapigo/internal/tenant"
 	"golang.org/x/oauth2"
 )
 
@@ -526,15 +527,15 @@ func TestAuthService_Me_CurrentPwdVersion_ListSessions_RevokeSession(t *testing.
 		t.Fatalf("CurrentPwdVersion cache hit failed: v=%d, err=%v", v, err)
 	}
 	// Cache hit (string)
-	memStore.Set(fmt.Sprintf("pwdver:%d", u.ID), "2", time.Minute)
+	memStore.Set(tenant.PasswordVersionKey(ctx, u.ID), "2", time.Minute)
 	v, err = svc.CurrentPwdVersion(ctx, u.ID)
 	if err != nil || v != 2 {
 		t.Fatalf("CurrentPwdVersion string cache hit failed: v=%d, err=%v", v, err)
 	}
 	// Missing user
 	v, err = svc.CurrentPwdVersion(ctx, 888888)
-	if err != nil || v != 0 {
-		t.Fatalf("CurrentPwdVersion missing user expected 0, got %d, err=%v", v, err)
+	if !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("CurrentPwdVersion missing scoped user expected ErrUserNotFound, got %d, err=%v", v, err)
 	}
 
 	// 3. markTokenUsed
@@ -835,7 +836,10 @@ func TestTrustedDeviceService_AllMethods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.TrustedDevice{})
+	_ = db.AutoMigrate(&models.User{}, &models.TrustedDevice{})
+	if err := db.Create(&models.User{ID: 1, Username: "device-owner", Email: "device@example.com", Password: "hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	repo := repositories.NewTrustedDeviceRepository(db)
 	svc := NewTrustedDeviceService(repo)
 
@@ -1715,7 +1719,7 @@ func TestPasskeyService_FullLifecycle(t *testing.T) {
 }
 
 func TestWebhookService_EnqueueAndDeliver(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), "tenant-1")
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -2256,7 +2260,7 @@ func TestAuthService_InternalHelpers_Comprehensive(t *testing.T) {
 
 	// 4. applyCredentialChange fallback with mockUserRepo
 	mockUsers := newMockUserRepo()
-	mockTokens := tokenRepo
+	mockTokens := newMockTokenRepo()
 	uMock := &models.User{
 		Username: "mockuser",
 		Email:    "mock@ex.com",
@@ -2851,7 +2855,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 	svc.denylistSession(&models.Session{ID: ""})
 
 	// 2. CurrentPwdVersion cache hit
-	memStore.Set(fmt.Sprintf("pwdver:%d", u.ID), "42", time.Hour)
+	memStore.Set(tenant.PasswordVersionKey(ctx, u.ID), "42", time.Hour)
 	if ver, err := svc.CurrentPwdVersion(ctx, u.ID); err != nil || ver != 42 {
 		t.Fatalf("CurrentPwdVersion cache hit failed: ver=%d, err=%v", ver, err)
 	}
@@ -2944,21 +2948,8 @@ func TestServices_Final_PushTo90(t *testing.T) {
 		t.Fatalf("expected ErrOAuthTokenVerificationFailed for missing id_token, got %v", err)
 	}
 
-	// findOrCreateUser with dangling link (identity exists, but user deleted)
-	_ = oauthRepo.Create(ctx, &models.OAuthIdentity{
-		UserID:         88888,
-		Provider:       "google",
-		ProviderUserID: "dangling-sub",
-	})
-	memStore.Set(oauthChallengeKey("st-dangling"), `{"verifier":"v","nonce":"n"}`, time.Minute)
-	verifier.claims = &GoogleIDTokenClaims{
-		Sub:           "dangling-sub",
-		Email:         "dangling@example.com",
-		EmailVerified: true,
-		Nonce:         "n",
-	}
-	if _, _, _, err := oauthSvc.HandleCallback(ctx, "code", "st-dangling", "1.1.1.1", "GoTest"); !errors.Is(err, ErrUserNotFound) {
-		t.Fatalf("expected ErrUserNotFound for dangling identity, got %v", err)
+	if err := oauthRepo.Create(ctx, &models.OAuthIdentity{UserID: 88888, Provider: "google", ProviderUserID: "dangling-sub"}); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("orphan identity must be rejected, got %v", err)
 	}
 
 	// createGoogleUser username collision triggers random suffix

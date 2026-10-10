@@ -23,8 +23,13 @@ func NewSessionRepository(db *gorm.DB) *SessionRepository {
 }
 
 func (r *SessionRepository) Create(ctx context.Context, s *models.Session) error {
-	if s.TenantID == "" {
-		s.TenantID = tenant.FromContext(ctx)
+	tid, err := scopeTenant(ctx, s.TenantID)
+	if err != nil {
+		return err
+	}
+	s.TenantID = tid
+	if err := requireOwner(r.db, ctx, s.UserID); err != nil {
+		return err
 	}
 	return r.db.WithContext(ctx).Create(s).Error
 }
@@ -32,7 +37,7 @@ func (r *SessionRepository) Create(ctx context.Context, s *models.Session) error
 // FindByID returns the session row, or nil when the id is unknown.
 func (r *SessionRepository) FindByID(ctx context.Context, id string) (*models.Session, error) {
 	var s models.Session
-	if err := r.db.WithContext(ctx).Where("id = ?", id).First(&s).Error; err != nil {
+	if err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant.FromContext(ctx)).Where("id = ?", id).First(&s).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -45,7 +50,7 @@ func (r *SessionRepository) FindByID(ctx context.Context, id string) (*models.Se
 // newest activity first.
 func (r *SessionRepository) FindActiveByUser(ctx context.Context, userID uint) ([]models.Session, error) {
 	var rows []models.Session
-	err := r.db.WithContext(ctx).
+	err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant.FromContext(ctx)).
 		Where("user_id = ? AND revoked = ? AND expires_at > ?", userID, false, time.Now()).
 		Order("last_active_at DESC").
 		Find(&rows).Error
@@ -58,10 +63,12 @@ func (r *SessionRepository) FindActiveByUser(ctx context.Context, userID uint) (
 // FindAllActiveByTenant returns all active sessions for a tenant (P2.3 admin monitor).
 func (r *SessionRepository) FindAllActiveByTenant(ctx context.Context, tenantID string) ([]models.Session, error) {
 	var rows []models.Session
-	if tenantID == "" {
-		tenantID = tenant.FromContext(ctx)
+	var err error
+	tenantID, err = scopeTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
 	}
-	err := r.db.WithContext(ctx).
+	err = r.db.WithContext(ctx).Where("tenant_id = ?", tenant.FromContext(ctx)).
 		Where("tenant_id = ? AND revoked = ? AND expires_at > ?", tenantID, false, time.Now()).
 		Order("last_active_at DESC").
 		Find(&rows).Error
@@ -75,21 +82,20 @@ func (r *SessionRepository) FindAllActiveByTenant(ctx context.Context, tenantID 
 // rotation. RowsAffected == 0 (unknown/expired session) is NOT an error — the
 // caller re-validates the session before rotating.
 func (r *SessionRepository) Touch(ctx context.Context, id, ip, ua, deviceName, location string, at time.Time) error {
-	return r.db.WithContext(ctx).Model(&models.Session{}).
-		Where("id = ?", id).
-		Updates(map[string]any{
-			"ip_address":        ip,
-			"user_agent":        ua,
-			"device_name":       deviceName,
-			"location_estimate": location,
-			"last_active_at":    at,
-		}).Error
+	return updateScoped(r.db.WithContext(ctx).Model(&models.Session{}).Where("tenant_id = ?", tenant.FromContext(ctx)).
+		Where("id = ?", id), map[string]any{
+		"ip_address":        ip,
+		"user_agent":        ua,
+		"device_name":       deviceName,
+		"location_estimate": location,
+		"last_active_at":    at,
+	})
 }
 
 // RevokeByID marks one session revoked, scoped to userID (IDOR defense).
 // Returns gorm.ErrRecordNotFound when no row matched.
 func (r *SessionRepository) RevokeByID(ctx context.Context, id string, userID uint) error {
-	res := r.db.WithContext(ctx).Model(&models.Session{}).
+	res := r.db.WithContext(ctx).Model(&models.Session{}).Where("tenant_id = ?", tenant.FromContext(ctx)).
 		Where("id = ? AND user_id = ?", id, userID).
 		Update("revoked", true)
 	if res.Error != nil {
@@ -103,7 +109,10 @@ func (r *SessionRepository) RevokeByID(ctx context.Context, id string, userID ui
 
 // RevokeAllForUser revokes every active session of a user.
 func (r *SessionRepository) RevokeAllForUser(ctx context.Context, userID uint) error {
-	return r.db.WithContext(ctx).Model(&models.Session{}).
+	if err := requireOwner(r.db, ctx, userID); err != nil {
+		return err
+	}
+	return r.db.WithContext(ctx).Model(&models.Session{}).Where("tenant_id = ?", tenant.FromContext(ctx)).
 		Where("user_id = ? AND revoked = ?", userID, false).
 		Update("revoked", true).Error
 }
@@ -112,7 +121,7 @@ func (r *SessionRepository) RevokeAllForUser(ctx context.Context, userID uint) e
 // transaction — the credential-change flow revokes sessions inside the SAME
 // transaction as the password update.
 func (r *SessionRepository) RevokeAllForUserTx(tx *gorm.DB, userID uint) error {
-	return tx.Model(&models.Session{}).
+	return tx.Model(&models.Session{}).Where("tenant_id = ?", tenant.FromContext(tx.Statement.Context)).
 		Where("user_id = ? AND revoked = ?", userID, false).
 		Update("revoked", true).Error
 }

@@ -361,7 +361,7 @@ func TestAuditRepository_Advanced(t *testing.T) {
 	repo := NewAuditRepository(db, WithAuditHMACKey(customKey))
 
 	// 1. VerifyChain on empty tenant
-	ok, err := repo.VerifyChain(ctx, "empty-tenant")
+	ok, err := repo.VerifyChain(tenant.WithTenant(ctx, "empty-tenant"), "empty-tenant")
 	if err != nil || !ok {
 		t.Fatalf("VerifyChain on empty tenant failed: ok=%v, err=%v", ok, err)
 	}
@@ -395,7 +395,7 @@ func TestAuditRepository_Advanced(t *testing.T) {
 	if err != nil || total != 2 || len(logs) != 2 {
 		t.Fatalf("FindAllPaginated tenant from context failed: total=%d, len=%d, err=%v", total, len(logs), err)
 	}
-	logs, total, err = repo.FindAllPaginated(ctx, "tenant-audit", 0, 0)
+	logs, total, err = repo.FindAllPaginated(tCtx, "tenant-audit", 0, 0)
 	if err != nil || total != 2 || len(logs) != 2 {
 		t.Fatalf("FindAllPaginated default pagination failed: total=%d, len=%d, err=%v", total, len(logs), err)
 	}
@@ -405,7 +405,7 @@ func TestAuditRepository_Advanced(t *testing.T) {
 	if err != nil || len(all) != 2 {
 		t.Fatalf("StreamAll from context failed: len=%d, err=%v", len(all), err)
 	}
-	all, err = repo.StreamAll(ctx, "tenant-audit")
+	all, err = repo.StreamAll(tCtx, "tenant-audit")
 	if err != nil || len(all) != 2 {
 		t.Fatalf("StreamAll explicit tenant failed: len=%d, err=%v", len(all), err)
 	}
@@ -505,10 +505,13 @@ func TestTOTPRepository_RecoveryCodeUsedTwice(t *testing.T) {
 }
 
 func TestSessionRepository_RevokeAndFindTenant(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), "sess-tenant")
 	db := fullTestDB(t)
 	repo := NewSessionRepository(db)
 	u := testUser(t, db)
+	if err := db.Model(u).Update("tenant_id", "sess-tenant").Error; err != nil {
+		t.Fatal(err)
+	}
 
 	tCtx := tenant.WithTenant(ctx, "sess-tenant")
 	sess := &models.Session{
@@ -760,7 +763,7 @@ func TestWebhookRepository_AllBranches(t *testing.T) {
 		t.Fatalf("FindActiveEndpointsByEvent login expected 2 matches, got %d, err=%v", len(matches), err)
 	}
 
-	matchesOther, err := repo.FindActiveEndpointsByEvent(ctx, "webhook-tenant", "payment.created")
+	matchesOther, err := repo.FindActiveEndpointsByEvent(tCtx, "webhook-tenant", "payment.created")
 	if err != nil || len(matchesOther) != 1 {
 		t.Fatalf("FindActiveEndpointsByEvent wildcard expected 1 match, got %d, err=%v", len(matchesOther), err)
 	}
@@ -790,10 +793,13 @@ func TestWebhookRepository_AllBranches(t *testing.T) {
 }
 
 func TestRBACRepository_RolesAndPerms(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), "rbac-tenant")
 	db := fullTestDB(t)
 	repo := NewRBACRepository(db)
 	u := testUser(t, db)
+	if err := db.Model(u).Update("tenant_id", "rbac-tenant").Error; err != nil {
+		t.Fatal(err)
+	}
 
 	// ListPermissions
 	_ = db.Create(&models.Permission{Name: "users:read"}).Error
@@ -883,6 +889,7 @@ func TestUserRepository_ListPaginatedNoSearch(t *testing.T) {
 func TestRepositories_ExtraCoverage(t *testing.T) {
 	ctx := context.Background()
 	db := fullTestDB(t)
+	u := testUser(t, db)
 
 	// 1. AuditRepository BatchInsert empty & FindByUserIDPaginated edge pages
 	auditRepo := NewAuditRepository(db)
@@ -915,7 +922,6 @@ func TestRepositories_ExtraCoverage(t *testing.T) {
 
 	// 4. UserRepository IncrementFailedAttempts with lockUntil and SetEmailVerified
 	userRepo := NewUserRepository(db)
-	u := testUser(t, db)
 	lockTime := time.Now().Add(10 * time.Minute)
 	if err := userRepo.IncrementFailedAttempts(ctx, u, &lockTime); err != nil {
 		t.Fatal(err)

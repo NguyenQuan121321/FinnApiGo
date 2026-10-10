@@ -199,7 +199,9 @@ func run() error {
 	)
 	// NIST 800-63B breached-password screening (fail-open, k-anonymity):
 	// only a 5-hex-char SHA-1 prefix of the password leaves the process.
+	rbacRepo := repositories.NewRBACRepository(db)
 	var authOpts []services.AuthServiceOption
+	authOpts = append(authOpts, services.WithAuthPermissions(rbacRepo))
 	authOpts = append(authOpts, services.WithSessionRepo(sessionRepo))
 	if cfg.Security.BreachedPasswordCheck {
 		authOpts = append(authOpts, services.WithBreachedPasswordChecker(
@@ -262,7 +264,6 @@ func run() error {
 	sessionHandler := handlers.NewSessionHandler(authSvc)
 
 	// --- Enterprise Repositories & Services (Phase 2) ---
-	rbacRepo := repositories.NewRBACRepository(db)
 	trustedDeviceRepo := repositories.NewTrustedDeviceRepository(db)
 	trustedDeviceSvc := services.NewTrustedDeviceService(trustedDeviceRepo)
 	trustedDeviceHandler := handlers.NewTrustedDeviceHandler(trustedDeviceSvc)

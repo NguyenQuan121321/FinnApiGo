@@ -28,9 +28,11 @@ func (r *RBACRepository) ListPermissions(ctx context.Context) ([]models.Permissi
 
 // CreateRole inserts a new role scoped to the tenant with assigned permission names.
 func (r *RBACRepository) CreateRole(ctx context.Context, role *models.Role, permNames []string) error {
-	if role.TenantID == "" {
-		role.TenantID = tenant.FromContext(ctx)
+	tid, err := scopeTenant(ctx, role.TenantID)
+	if err != nil {
+		return err
 	}
+	role.TenantID = tid
 
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(role).Error; err != nil {
@@ -58,8 +60,17 @@ func (r *RBACRepository) CreateRole(ctx context.Context, role *models.Role, perm
 
 // AssignRoleToUser associates a role with a user.
 func (r *RBACRepository) AssignRoleToUser(ctx context.Context, userID, roleID uint) error {
-	ur := models.UserRole{UserID: userID, RoleID: roleID}
-	return r.db.WithContext(ctx).Create(&ur).Error
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := requireOwner(tx, ctx, userID); err != nil {
+			return err
+		}
+		var role models.Role
+		if err := tx.Where("id = ? AND tenant_id = ?", roleID, tenant.FromContext(ctx)).First(&role).Error; err != nil {
+			return err
+		}
+		ur := models.UserRole{UserID: userID, RoleID: roleID}
+		return tx.Create(&ur).Error
+	})
 }
 
 // GetUserPermissions returns all permission names granted to a user across all their roles.
@@ -68,6 +79,9 @@ func (r *RBACRepository) GetUserPermissions(ctx context.Context, userID uint) ([
 	err := r.db.WithContext(ctx).Table("permissions").
 		Joins("JOIN role_permissions ON role_permissions.permission_id = permissions.id").
 		Joins("JOIN user_roles ON user_roles.role_id = role_permissions.role_id").
+		Joins("JOIN users ON users.id = user_roles.user_id").
+		Joins("JOIN roles ON roles.id = user_roles.role_id").
+		Where("users.tenant_id = ? AND roles.tenant_id = ?", tenant.FromContext(ctx), tenant.FromContext(ctx)).
 		Where("user_roles.user_id = ?", userID).
 		Distinct("permissions.name").
 		Pluck("permissions.name", &permNames).Error
@@ -80,6 +94,9 @@ func (r *RBACRepository) UserHasPermission(ctx context.Context, userID uint, per
 	err := r.db.WithContext(ctx).Table("permissions").
 		Joins("JOIN role_permissions ON role_permissions.permission_id = permissions.id").
 		Joins("JOIN user_roles ON user_roles.role_id = role_permissions.role_id").
+		Joins("JOIN users ON users.id = user_roles.user_id").
+		Joins("JOIN roles ON roles.id = user_roles.role_id").
+		Where("users.tenant_id = ? AND roles.tenant_id = ?", tenant.FromContext(ctx), tenant.FromContext(ctx)).
 		Where("user_roles.user_id = ? AND permissions.name = ?", userID, permission).
 		Count(&count).Error
 	if err != nil {

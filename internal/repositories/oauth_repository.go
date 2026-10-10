@@ -25,6 +25,9 @@ func NewOAuthIdentityRepository(db *gorm.DB) *OAuthIdentityRepository {
 // Create inserts a new OAuth identity link. Duplicate (provider, provider_user_id)
 // rows are rejected by the DB-level unique index.
 func (r *OAuthIdentityRepository) Create(ctx context.Context, identity *models.OAuthIdentity) error {
+	if err := requireOwner(r.db, ctx, identity.UserID); err != nil {
+		return err
+	}
 	return r.db.WithContext(ctx).Create(identity).Error
 }
 
@@ -33,7 +36,7 @@ func (r *OAuthIdentityRepository) Create(ctx context.Context, identity *models.O
 // Returns nil, nil when no matching row exists.
 func (r *OAuthIdentityRepository) FindByProviderAndProviderUserID(ctx context.Context, provider, providerUserID string) (*models.OAuthIdentity, error) {
 	var identity models.OAuthIdentity
-	if err := r.db.WithContext(ctx).
+	if err := ownedRows(r.db, ctx).
 		Where("provider = ? AND provider_user_id = ?", provider, providerUserID).
 		First(&identity).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -48,7 +51,7 @@ func (r *OAuthIdentityRepository) FindByProviderAndProviderUserID(ctx context.Co
 // combination. Returns nil, nil when not found.
 func (r *OAuthIdentityRepository) FindByUserIDAndProvider(ctx context.Context, userID uint, provider string) (*models.OAuthIdentity, error) {
 	var identity models.OAuthIdentity
-	if err := r.db.WithContext(ctx).
+	if err := ownedRows(r.db, ctx).
 		Where("user_id = ? AND provider = ?", userID, provider).
 		First(&identity).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -61,14 +64,14 @@ func (r *OAuthIdentityRepository) FindByUserIDAndProvider(ctx context.Context, u
 
 // DeleteByUserIDAndProvider removes the identity link for a local user + provider (P1.6).
 func (r *OAuthIdentityRepository) DeleteByUserIDAndProvider(ctx context.Context, userID uint, provider string) error {
-	return r.db.WithContext(ctx).
+	return ownedRows(r.db, ctx).
 		Where("user_id = ? AND provider = ?", userID, provider).
 		Delete(&models.OAuthIdentity{}).Error
 }
 
 // DeleteAllByUserID removes all OAuth identity links for a user (P1.3 erasure).
 func (r *OAuthIdentityRepository) DeleteAllByUserID(ctx context.Context, userID uint) error {
-	return r.db.WithContext(ctx).
+	return ownedRows(r.db, ctx).
 		Where("user_id = ?", userID).
 		Delete(&models.OAuthIdentity{}).Error
 }

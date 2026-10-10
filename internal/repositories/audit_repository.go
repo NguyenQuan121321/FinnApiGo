@@ -54,9 +54,12 @@ func computeRecordHash(key []byte, prevHash, tenantID, event string, userID uint
 // Record writes an audit row. Context is threaded for future async/worker
 // migration (§7). Implements tamper-evident hash chaining (P2.6).
 func (r *AuditRepository) Record(ctx context.Context, entry *models.AuditLog) {
-	if entry.TenantID == "" {
-		entry.TenantID = tenant.FromContext(ctx)
+	tid, err := scopeTenant(ctx, entry.TenantID)
+	if err != nil {
+		slog.Error("audit tenant mismatch", "event", entry.Event)
+		return
 	}
+	entry.TenantID = tid
 	if len(r.hmacKey) > 0 && entry.RecordHash == "" {
 		var last models.AuditLog
 		prevHash := GenesisAuditHash
@@ -114,12 +117,12 @@ func (r *AuditRepository) FindByUserIDPaginated(ctx context.Context, userID uint
 	}
 	offset := (page - 1) * limit
 	var total int64
-	if err := r.db.WithContext(ctx).Model(&models.AuditLog{}).Where("user_id = ?", userID).Count(&total).Error; err != nil {
+	if err := r.db.WithContext(ctx).Model(&models.AuditLog{}).Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var entries []models.AuditLog
 	err := r.db.WithContext(ctx).
-		Where("user_id = ?", userID).
+		Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).
 		Order("created_at DESC, id DESC").
 		Offset(offset).
 		Limit(limit).
@@ -130,14 +133,16 @@ func (r *AuditRepository) FindByUserIDPaginated(ctx context.Context, userID uint
 // AnonymizeUser scrubs PII email from audit records belonging to the erased user (P1.3 GDPR).
 func (r *AuditRepository) AnonymizeUser(ctx context.Context, userID uint) error {
 	return r.db.WithContext(ctx).Model(&models.AuditLog{}).
-		Where("user_id = ?", userID).
+		Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).
 		Update("email", "anonymized@gdpr.local").Error
 }
 
 // FindAllPaginated returns paginated audit events for a tenant (P2.3 admin).
 func (r *AuditRepository) FindAllPaginated(ctx context.Context, tenantID string, page, limit int) ([]models.AuditLog, int64, error) {
-	if tenantID == "" {
-		tenantID = tenant.FromContext(ctx)
+	var err error
+	tenantID, err = scopeTenant(ctx, tenantID)
+	if err != nil {
+		return nil, 0, err
 	}
 	if page < 1 {
 		page = 1
@@ -148,14 +153,12 @@ func (r *AuditRepository) FindAllPaginated(ctx context.Context, tenantID string,
 	offset := (page - 1) * limit
 	var total int64
 	q := r.db.WithContext(ctx).Model(&models.AuditLog{})
-	if tenantID != "" {
-		q = q.Where("tenant_id = ?", tenantID)
-	}
+	q = q.Where("tenant_id = ?", tenantID)
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var entries []models.AuditLog
-	err := q.Order("created_at DESC, id DESC").
+	err = q.Order("created_at DESC, id DESC").
 		Offset(offset).
 		Limit(limit).
 		Find(&entries).Error
@@ -164,25 +167,27 @@ func (r *AuditRepository) FindAllPaginated(ctx context.Context, tenantID string,
 
 // StreamAll returns all audit records for a tenant ordered by time, used for CSV/NDJSON exports (P2.3).
 func (r *AuditRepository) StreamAll(ctx context.Context, tenantID string) ([]models.AuditLog, error) {
-	if tenantID == "" {
-		tenantID = tenant.FromContext(ctx)
+	var err error
+	tenantID, err = scopeTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
 	}
 	var entries []models.AuditLog
 	q := r.db.WithContext(ctx).Model(&models.AuditLog{})
-	if tenantID != "" {
-		q = q.Where("tenant_id = ?", tenantID)
-	}
-	err := q.Order("id ASC").Find(&entries).Error
+	q = q.Where("tenant_id = ?", tenantID)
+	err = q.Order("id ASC").Find(&entries).Error
 	return entries, err
 }
 
 // VerifyChain verifies cryptographic continuity and HMAC integrity of the audit hash chain (P2.6).
 func (r *AuditRepository) VerifyChain(ctx context.Context, tenantID string) (bool, error) {
-	if tenantID == "" {
-		tenantID = tenant.FromContext(ctx)
+	var err error
+	tenantID, err = scopeTenant(ctx, tenantID)
+	if err != nil {
+		return false, err
 	}
 	var entries []models.AuditLog
-	err := r.db.WithContext(ctx).
+	err = r.db.WithContext(ctx).
 		Where("tenant_id = ?", tenantID).
 		Order("id ASC").
 		Find(&entries).Error

@@ -9,6 +9,7 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/response"
+	"github.com/finnapigo/finnapigo/internal/tenant"
 )
 
 // MFAPendingMiddleware verifies the Bearer JWT from the Authorization header
@@ -43,6 +44,12 @@ func MFAPendingMiddleware(jwtMgr *jwt.JWTManager) gin.HandlerFunc {
 			return
 		}
 		c.Set(CtxUserID, claims.UserID)
+		tid := claims.TenantID
+		if tid == "" {
+			tid = tenant.DefaultTenantID
+		}
+		c.Set("tenant_id", tid)
+		c.Request = c.Request.WithContext(tenant.WithTenant(c.Request.Context(), tid))
 		c.Next()
 	}
 }

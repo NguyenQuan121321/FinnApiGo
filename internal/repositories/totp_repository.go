@@ -12,11 +12,17 @@ type TOTPRepository struct{ db *gorm.DB }
 
 func NewTOTPRepository(db *gorm.DB) *TOTPRepository { return &TOTPRepository{db: db} }
 func (r *TOTPRepository) Upsert(ctx context.Context, d *models.TOTPDevice) error {
-	return r.db.WithContext(ctx).Save(d).Error
+	if err := requireOwner(r.db, ctx, d.UserID); err != nil {
+		return err
+	}
+	if d.ID == 0 {
+		return r.db.WithContext(ctx).Create(d).Error
+	}
+	return updateScoped(ownedRows(r.db, ctx).Model(&models.TOTPDevice{}).Where("id = ? AND user_id = ?", d.ID, d.UserID).Select("*").Omit("id", "user_id", "created_at"), d)
 }
 func (r *TOTPRepository) FindByUserID(ctx context.Context, userID uint) (*models.TOTPDevice, error) {
 	var d models.TOTPDevice
-	err := r.db.WithContext(ctx).Where("user_id = ?", userID).First(&d).Error
+	err := ownedRows(r.db, ctx).Where("user_id = ?", userID).First(&d).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -25,7 +31,10 @@ func (r *TOTPRepository) FindByUserID(ctx context.Context, userID uint) (*models
 
 // Disable marks the user's TOTP device as disabled and clears secrets (P1.1).
 func (r *TOTPRepository) Disable(ctx context.Context, userID uint) error {
-	return r.db.WithContext(ctx).Model(&models.TOTPDevice{}).
+	if err := requireOwner(r.db, ctx, userID); err != nil {
+		return err
+	}
+	return ownedRows(r.db, ctx).Model(&models.TOTPDevice{}).
 		Where("user_id = ?", userID).
 		Updates(map[string]interface{}{
 			"enabled":                  false,
@@ -41,8 +50,16 @@ func (r *TOTPRepository) Disable(ctx context.Context, userID uint) error {
 // within one transaction, so a regenerate can never leave a mixed old/new set
 // or drop the user to zero codes if the insert fails.
 func (r *TOTPRepository) ReplaceRecoveryCodes(ctx context.Context, userID uint, codes []*models.RecoveryCode) error {
+	if err := requireOwner(r.db, ctx, userID); err != nil {
+		return err
+	}
+	for _, c := range codes {
+		if c.UserID != userID {
+			return gorm.ErrRecordNotFound
+		}
+	}
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("user_id = ?", userID).Delete(&models.RecoveryCode{}).Error; err != nil {
+		if err := ownedRows(tx, ctx).Where("user_id = ?", userID).Delete(&models.RecoveryCode{}).Error; err != nil {
 			return err
 		}
 		if len(codes) == 0 {
@@ -53,7 +70,7 @@ func (r *TOTPRepository) ReplaceRecoveryCodes(ctx context.Context, userID uint, 
 }
 func (r *TOTPRepository) ActiveRecoveryCodes(ctx context.Context, userID uint) ([]models.RecoveryCode, error) {
 	var c []models.RecoveryCode
-	err := r.db.WithContext(ctx).Where("user_id = ? AND used_at IS NULL", userID).Find(&c).Error
+	err := ownedRows(r.db, ctx).Where("user_id = ? AND used_at IS NULL", userID).Find(&c).Error
 	return c, err
 }
 
@@ -62,7 +79,7 @@ func (r *TOTPRepository) ActiveRecoveryCodes(ctx context.Context, userID uint) (
 // one winner; the loser gets ErrRecoveryCodeUsed.
 func (r *TOTPRepository) MarkRecoveryCodeUsed(ctx context.Context, c *models.RecoveryCode) error {
 	now := time.Now()
-	res := r.db.WithContext(ctx).Model(c).
+	res := ownedRows(r.db, ctx).Model(c).
 		Where("used_at IS NULL").
 		Update("used_at", now)
 	if res.Error != nil {

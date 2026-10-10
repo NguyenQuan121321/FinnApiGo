@@ -1,6 +1,9 @@
 package tenant
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 type contextKey string
 
@@ -27,4 +30,9 @@ func WithTenant(ctx context.Context, tenantID string) context.Context {
 		tenantID = DefaultTenantID
 	}
 	return context.WithValue(ctx, contextKeyTenantID, tenantID)
+}
+
+// PasswordVersionKey partitions cached account state by the bound tenant.
+func PasswordVersionKey(ctx context.Context, userID uint) string {
+	return fmt.Sprintf("pwdver:%s:%d", FromContext(ctx), userID)
 }

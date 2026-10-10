@@ -13,7 +13,7 @@ import (
 
 func testPhase2DB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,6 +39,9 @@ func testPhase2DB(t *testing.T) *gorm.DB {
 func TestSessionRepository_AllMethods(t *testing.T) {
 	ctx := tenant.WithTenant(context.Background(), "tenant-sess")
 	db := testPhase2DB(t)
+	if err := db.Create(&models.User{ID: 10, TenantID: "tenant-sess", Username: "owner", Email: "owner@example.com", Password: "hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	repo := NewSessionRepository(db)
 
 	sess := &models.Session{
@@ -95,7 +98,7 @@ func TestSessionRepository_AllMethods(t *testing.T) {
 	// 8. RevokeAllForUserTx
 	sess3 := &models.Session{ID: "sess-789", TenantID: "tenant-sess", UserID: 10, ExpiresAt: time.Now().Add(time.Hour)}
 	_ = repo.Create(ctx, sess3)
-	err = db.Transaction(func(tx *gorm.DB) error {
+	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		return repo.RevokeAllForUserTx(tx, 10)
 	})
 	if err != nil {
@@ -104,8 +107,11 @@ func TestSessionRepository_AllMethods(t *testing.T) {
 }
 
 func TestRBACRepository_AllMethods(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), "tenant-rbac")
 	db := testPhase2DB(t)
+	if err := db.Create(&models.User{ID: 42, TenantID: "tenant-rbac", Username: "owner", Email: "owner@example.com", Password: "hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	repo := NewRBACRepository(db)
 
 	p1 := &models.Permission{Name: "users:read", Description: "Read users"}
@@ -154,6 +160,9 @@ func TestRBACRepository_AllMethods(t *testing.T) {
 func TestTrustedDeviceRepository_AllMethods(t *testing.T) {
 	ctx := context.Background()
 	db := testPhase2DB(t)
+	if err := db.Create(&models.User{ID: 55, TenantID: "default", Username: "owner", Email: "owner@example.com", Password: "hash"}).Error; err != nil {
+		t.Fatal(err)
+	}
 	repo := NewTrustedDeviceRepository(db)
 
 	now := time.Now()
@@ -200,7 +209,7 @@ func TestTrustedDeviceRepository_AllMethods(t *testing.T) {
 }
 
 func TestWebhookRepository_AllMethods(t *testing.T) {
-	ctx := context.Background()
+	ctx := tenant.WithTenant(context.Background(), "tenant-hook")
 	db := testPhase2DB(t)
 	repo := NewWebhookRepository(db)
 

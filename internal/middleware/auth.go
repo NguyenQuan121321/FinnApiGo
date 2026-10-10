@@ -4,6 +4,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/response"
+	"github.com/finnapigo/finnapigo/internal/services"
 	"github.com/finnapigo/finnapigo/internal/tenant"
 )
 
@@ -77,10 +79,7 @@ type VersionSource func(ctx context.Context, userID uint) (int64, error)
 // for downstream handlers. On failure it short-circuits with 401.
 //
 // A7 — when a VersionSource is wired, access tokens whose embedded pwdver
-// falls behind the live counter (the credential changed) are rejected. If the
-// version cannot be LOADED (store + DB both unreachable) the request is
-// allowed through with a warning: the residual exposure is bounded by the
-// access TTL, the documented worst case.
+// falls behind the live counter (the credential changed) are rejected. Unavailable account state rejects the request with 503.
 func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...AuthOption) gin.HandlerFunc {
 	var opt authOptions
 	for _, fn := range opts {
@@ -107,6 +106,14 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 			denyAuth(c, "invalid token type")
 			return
 		}
+		// Bind before account/permission lookups. Legacy tid-less access is
+		// confined to the ordinary default tenant; headers select no authority.
+		tid := claims.TenantID
+		if tid == "" {
+			tid = tenant.DefaultTenantID
+		}
+		c.Set("tenant_id", tid)
+		c.Request = c.Request.WithContext(tenant.WithTenant(c.Request.Context(), tid))
 		// P0.2 — denylist check: if the token's JTI or SID was revoked, abort 401.
 		if opt.denylist != nil {
 			if claims.ID != "" {
@@ -125,8 +132,13 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 		if pwdVersion != nil {
 			current, err := pwdVersion(c.Request.Context(), claims.UserID)
 			if err != nil {
-				slog.Warn("auth: password version unavailable — failing open (bounded by access TTL)",
-					"user_id", claims.UserID, "err", err)
+				if errors.Is(err, services.ErrUserNotFound) {
+					denyAuth(c, "invalid subject for tenant")
+					return
+				}
+				response.Respond(c, 503, "account state unavailable", nil)
+				c.Abort()
+				return
 			} else if claims.PwdVer < current {
 				denyAuth(c, "credentials changed, please sign in again")
 				return
@@ -137,20 +149,8 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 		c.Set(CtxEmail, claims.Email)
 		c.Set(CtxJTI, claims.ID)
 		c.Set(CtxSID, claims.SID)
-		if len(claims.Permissions) > 0 {
-			c.Set(CtxPermissions, claims.Permissions)
-		}
-		// P2.1 — tenant binding: a signed tid claim OVERRIDES whatever tenant
-		// the request headers/subdomain resolved to. The effective tenant for
-		// every authenticated request is therefore the one bound at token
-		// issuance — clients cannot cross tenant boundaries by setting
-		// X-Tenant-ID. Tokens issued before the tid claim existed carry no
-		// tenant and keep the header-derived value (bounded by AccessTTL).
-		if claims.TenantID != "" {
-			c.Set("tenant_id", claims.TenantID)
-			c.Request = c.Request.WithContext(
-				tenant.WithTenant(c.Request.Context(), claims.TenantID))
-		}
+		c.Set(CtxPermissions, claims.Permissions)
+
 		c.Next()
 	}
 }

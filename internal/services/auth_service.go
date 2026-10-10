@@ -22,6 +22,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/netutil"
 	"github.com/finnapigo/finnapigo/internal/repositories"
 	"github.com/finnapigo/finnapigo/internal/store"
+	"github.com/finnapigo/finnapigo/internal/tenant"
 	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/nbutton23/zxcvbn-go"
@@ -44,6 +45,7 @@ func init() {
 // AuthService holds all core-auth business logic. It depends only on repo
 // interfaces + stateless helpers (jwt, hashing), so it is trivially unit-testable.
 type AuthService struct {
+	permissions   PermissionSource
 	users         UserRepo
 	tokens        RefreshTokenRepo
 	usedTokens    UsedTokenRepo
@@ -77,6 +79,15 @@ type AuthService struct {
 // AuthServiceOption customizes optional service capabilities without growing
 // the positional constructor further.
 type AuthServiceOption func(*AuthService)
+
+// PermissionSource resolves explicit tenant role grants at token issuance.
+type PermissionSource interface {
+	GetUserPermissions(ctx context.Context, userID uint) ([]string, error)
+}
+
+func WithAuthPermissions(source PermissionSource) AuthServiceOption {
+	return func(s *AuthService) { s.permissions = source }
+}
 
 // WithBcryptCost configures a custom bcrypt cost work factor (e.g. hash.MinCost for fast tests).
 func WithBcryptCost(cost int) AuthServiceOption {
@@ -250,7 +261,7 @@ func (s *AuthService) applyCredentialChange(ctx context.Context, user *models.Us
 		// The tx bumped pwd_version in SQL — drop the A7 cache so
 		// AuthMiddleware sees the new version immediately.
 		if s.store != nil {
-			s.store.Delete(fmt.Sprintf("pwdver:%d", user.ID))
+			s.store.Delete(tenant.PasswordVersionKey(ctx, user.ID))
 		}
 		return nil
 	}
@@ -358,7 +369,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 	// The token is NEVER returned to the client — the user must prove
 	// control of their inbox to self-verify.
 	verifyToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		jwt.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL)
+		jwt.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL, tenant.FromContext(ctx))
 	if err != nil {
 		return UserProfile{}, err
 	}
@@ -602,7 +613,7 @@ func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.Us
 			// only uid + type (no role/permissions). The user must complete
 			// MFA via /mfa/login-verify to receive real tokens.
 			mfaToken, err := s.jwt.Issue(user.ID, "", "",
-				jwt.TokenTypeMFAPending, s.jwtCfg.MFAPendingTTL)
+				jwt.TokenTypeMFAPending, s.jwtCfg.MFAPendingTTL, tenant.FromContext(ctx))
 			if err != nil {
 				return TokenPair{}, UserProfile{}, nil, err
 			}
@@ -864,7 +875,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 		return nil
 	}
 	resetToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		jwt.TokenTypeReset, s.jwtCfg.ResetTTL)
+		jwt.TokenTypeReset, s.jwtCfg.ResetTTL, tenant.FromContext(ctx))
 	if err != nil {
 		return err
 	}
@@ -961,7 +972,7 @@ func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) e
 	}
 
 	verifyToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
-		jwt.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL)
+		jwt.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL, tenant.FromContext(ctx))
 	if err != nil {
 		return err
 	}
@@ -981,6 +992,7 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 	if err != nil || claims.Type != jwt.TokenTypeReset {
 		return ErrInvalidToken
 	}
+	ctx = tenant.WithTenant(ctx, claims.TenantID)
 	user, err := s.users.FindByID(ctx, claims.UserID)
 	if err != nil {
 		return err
@@ -1497,6 +1509,7 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 	if err != nil || claims.Type != jwt.TokenTypeEmailVerify {
 		return ErrInvalidToken
 	}
+	ctx = tenant.WithTenant(ctx, claims.TenantID)
 	user, err := s.users.FindByID(ctx, claims.UserID)
 	if err != nil {
 		return err
@@ -1559,6 +1572,17 @@ func (s *AuthService) denylistSession(sess *models.Session) {
 // login session. The access token embeds the user's password version so the
 // next credential change kills it (A7).
 func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua, reuseSessionID string) (TokenPair, error) {
+	if user.TenantID != "" && user.TenantID != tenant.FromContext(ctx) {
+		return TokenPair{}, ErrUserNotFound
+	}
+	perms := []string{}
+	if s.permissions != nil {
+		var err error
+		perms, err = s.permissions.GetUserPermissions(ctx, user.ID)
+		if err != nil {
+			return TokenPair{}, err
+		}
+	}
 	sid := reuseSessionID
 	if sid == "" && s.sessions != nil {
 		sid = uuid.NewString()
@@ -1583,7 +1607,7 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip,
 	// the effective tenant for authenticated requests is always the one bound
 	// at issuance — an X-Tenant-ID spoof cannot cross tenant boundaries.
 	access, err := s.jwt.IssueAccessEnterprise(user.ID, user.Role, user.Email,
-		s.jwtCfg.AccessTTL, user.PwdVersion, sid, user.TenantID, nil)
+		s.jwtCfg.AccessTTL, user.PwdVersion, sid, tenant.FromContext(ctx), perms)
 	if err != nil {
 		return TokenPair{}, err
 	}
@@ -1842,7 +1866,7 @@ func (s *AuthService) bumpPwdVersion(ctx context.Context, userID uint) error {
 		return err
 	}
 	if s.store != nil {
-		s.store.Delete(fmt.Sprintf("pwdver:%d", userID))
+		s.store.Delete(tenant.PasswordVersionKey(ctx, userID))
 	}
 	return nil
 }
@@ -1850,10 +1874,9 @@ func (s *AuthService) bumpPwdVersion(ctx context.Context, userID uint) error {
 // CurrentPwdVersion returns the user's live credential version for
 // AuthMiddleware (A7): store-cached for pwdVerCacheTTL, DB on cache miss.
 // A store failure falls through to the DB; when both fail the error is
-// returned and callers must decide (the middleware then fails OPEN — the
-// remaining bound is AccessTTL, the documented worst case).
+// returned and authenticated requests fail closed.
 func (s *AuthService) CurrentPwdVersion(ctx context.Context, userID uint) (int64, error) {
-	key := fmt.Sprintf("pwdver:%d", userID)
+	key := tenant.PasswordVersionKey(ctx, userID)
 	if s.store != nil {
 		if v, ok := s.store.Get(key); ok {
 			switch n := v.(type) {
@@ -1873,7 +1896,7 @@ func (s *AuthService) CurrentPwdVersion(ctx context.Context, userID uint) (int64
 		return 0, err
 	}
 	if user == nil {
-		return 0, nil
+		return 0, ErrUserNotFound
 	}
 	if s.store != nil {
 		s.store.Set(key, user.PwdVersion, pwdVerCacheTTL)

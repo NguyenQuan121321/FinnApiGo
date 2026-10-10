@@ -9,6 +9,7 @@ import (
 
 	"github.com/finnapigo/finnapigo/internal/config"
 	"github.com/finnapigo/finnapigo/internal/models"
+	"github.com/finnapigo/finnapigo/internal/tenant"
 )
 
 // maxAuditDetail matches the audit_logs.detail column size (500). Longer
@@ -81,6 +82,9 @@ func NewAsyncAuditWriter(repo AuditRepo, inserter BatchInserter, cfg config.Audi
 // drained channel — straggler handlers that finish after srv.Shutdown keep
 // producing audit rows, and they must not die for it.
 func (w *AsyncAuditWriter) Record(ctx context.Context, entry *models.AuditLog) {
+	copyEntry := *entry
+	copyEntry.TenantID = tenant.FromContext(ctx)
+	entry = &copyEntry
 	truncateDetail(entry)
 	if w.syncMode {
 		w.repo.Record(ctx, entry)

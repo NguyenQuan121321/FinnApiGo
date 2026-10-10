@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,7 +31,12 @@ func TestAuthMiddleware_TenantClaimOverridesHeader(t *testing.T) {
 	captured := ""
 	r := gin.New()
 	r.Use(TenantMiddleware())
-	r.Use(AuthMiddleware(mgr, nil))
+	r.Use(AuthMiddleware(mgr, func(ctx context.Context, uid uint) (int64, error) {
+		if tenant.FromContext(ctx) != "acme" {
+			t.Errorf("account state lookup saw client tenant: %s", tenant.FromContext(ctx))
+		}
+		return 0, nil
+	}))
 	r.GET("/probe", func(c *gin.Context) {
 		captured = tenant.FromContext(c.Request.Context())
 		c.Status(http.StatusOK)
@@ -51,10 +57,10 @@ func TestAuthMiddleware_TenantClaimOverridesHeader(t *testing.T) {
 	}
 }
 
-// TestAuthMiddleware_NoTidClaim_HeaderStands — tokens minted before the tid
+// TestAuthMiddleware_NoTidClaim_DefaultOnly — tokens minted before the tid
 // claim (legacy AccessTTL window) carry no tenant; the header-derived value
-// remains effective so those requests keep working until expiry.
-func TestAuthMiddleware_NoTidClaim_HeaderStands(t *testing.T) {
+// is ignored; legacy tokens are confined to default.
+func TestAuthMiddleware_NoTidClaim_DefaultOnly(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mgr := jwt.NewJWTManager("test-secret-tenant-binding", "iss")
 	tok, err := mgr.IssueAccess(7, "user", "u@acme.io", time.Minute, 0, "sid-legacy")
@@ -80,8 +86,8 @@ func TestAuthMiddleware_NoTidClaim_HeaderStands(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
 	}
-	if captured != "legacy-co" {
-		t.Fatalf("effective tenant = %q, want header value for a tid-less legacy token", captured)
+	if captured != "default" {
+		t.Fatalf("effective tenant = %q, want default for a tid-less legacy token", captured)
 	}
 }
 

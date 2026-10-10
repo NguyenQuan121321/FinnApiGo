@@ -8,7 +8,6 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/models"
-	"github.com/finnapigo/finnapigo/internal/tenant"
 )
 
 // WebhookRepository persists webhook endpoints and outbox deliveries (P2.5).
@@ -21,18 +20,22 @@ func NewWebhookRepository(db *gorm.DB) *WebhookRepository {
 }
 
 func (r *WebhookRepository) CreateEndpoint(ctx context.Context, ep *models.WebhookEndpoint) error {
-	if ep.TenantID == "" {
-		ep.TenantID = tenant.FromContext(ctx)
+	tid, err := scopeTenant(ctx, ep.TenantID)
+	if err != nil {
+		return err
 	}
+	ep.TenantID = tid
 	return r.db.WithContext(ctx).Create(ep).Error
 }
 
 func (r *WebhookRepository) FindActiveEndpointsByEvent(ctx context.Context, tenantID, event string) ([]models.WebhookEndpoint, error) {
-	if tenantID == "" {
-		tenantID = tenant.FromContext(ctx)
+	var err error
+	tenantID, err = scopeTenant(ctx, tenantID)
+	if err != nil {
+		return nil, err
 	}
 	var endpoints []models.WebhookEndpoint
-	err := r.db.WithContext(ctx).
+	err = r.db.WithContext(ctx).
 		Where("tenant_id = ? AND is_active = ?", tenantID, true).
 		Find(&endpoints).Error
 	if err != nil {

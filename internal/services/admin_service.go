@@ -86,7 +86,7 @@ func (s *AdminService) LockUser(ctx context.Context, adminID, targetUserID uint,
 	if err != nil {
 		return err
 	}
-	if u == nil {
+	if u == nil || u.TenantID != tenant.FromContext(ctx) {
 		return ErrUserNotFound
 	}
 
@@ -118,7 +118,7 @@ func (s *AdminService) UnlockUser(ctx context.Context, adminID, targetUserID uin
 	if err != nil {
 		return err
 	}
-	if u == nil {
+	if u == nil || u.TenantID != tenant.FromContext(ctx) {
 		return ErrUserNotFound
 	}
 
@@ -146,19 +146,25 @@ func (s *AdminService) ForceLogout(ctx context.Context, adminID, targetUserID ui
 	if err != nil {
 		return err
 	}
-	if u == nil {
+	if u == nil || u.TenantID != tenant.FromContext(ctx) {
 		return ErrUserNotFound
 	}
 
 	if s.tokens != nil {
-		_ = s.tokens.RevokeAllForUser(ctx, targetUserID)
+		if err := s.tokens.RevokeAllForUser(ctx, targetUserID); err != nil {
+			return err
+		}
 	}
 	if s.sessions != nil {
-		_ = s.sessions.RevokeAllForUser(ctx, targetUserID)
+		if err := s.sessions.RevokeAllForUser(ctx, targetUserID); err != nil {
+			return err
+		}
 	}
-	_ = s.users.BumpPwdVersion(ctx, targetUserID)
+	if err := s.users.BumpPwdVersion(ctx, targetUserID); err != nil {
+		return err
+	}
 	if s.store != nil {
-		s.store.Delete(fmt.Sprintf("pwdver:%d", targetUserID))
+		s.store.Delete(tenant.PasswordVersionKey(ctx, targetUserID))
 	}
 
 	if s.audits != nil {
