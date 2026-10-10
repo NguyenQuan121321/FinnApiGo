@@ -29,7 +29,7 @@ jobs:
           cache: true
 
       - name: Install Syft for SBOM generation
-        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2 (SHA-pinned)
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.2 (SHA-pinned)
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@90a3faa9d01826838573329317ddec43f8e02525 # v6.2.1 (SHA-pinned)
