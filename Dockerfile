@@ -1,6 +1,7 @@
 # Multi-stage build for FinnApiGo.
-FROM golang:alpine AS builder
+FROM golang:1.26.9-alpine AS builder
 WORKDIR /src
+ENV GOTOOLCHAIN=local
 
 # Cache deps first.
 COPY go.mod go.sum* ./
@@ -13,6 +14,10 @@ RUN go build -ldflags="-s -w" -o /out/finnapigo ./cmd/server
 # The deploy-step binary: Render Release Command runs `/app/migrate up` before
 # the new release serves traffic (R1 — production never auto-migrates).
 RUN go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate
+# Fail the build if either artifact was compiled with a different toolchain.
+RUN go version -m /out/finnapigo /out/migrate && \
+    test "$(go version /out/finnapigo)" = "/out/finnapigo: go1.26.9" && \
+    test "$(go version /out/migrate)" = "/out/migrate: go1.26.9"
 
 # Runtime base: alpine with apk upgrade ensures all patched packages are pulled
 # so the Trivy container image scan passes with 0 HIGH/CRITICAL CVEs.

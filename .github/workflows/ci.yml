@@ -65,7 +65,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.9'
           cache: true
 
       - name: golangci-lint
@@ -84,7 +84,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.9'
           cache: true
 
       - name: Go Vet
@@ -130,7 +130,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.9'
           cache: true
 
       # Step 1: Apply all migrations up
@@ -212,7 +212,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.9'
           cache: true
 
       # T1 — the integration-tagged suite against REAL service containers:
@@ -239,7 +239,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.9'
           cache: true
 
       # T2 — 30-second smoke per fuzz target. Full-time runs are local/nightly.
@@ -263,7 +263,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.9'
           cache: true
 
       # T3 — per-package ratchet floors set at the measured coverage of the
@@ -313,7 +313,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (SHA-pinned)
         with:
-          go-version: '1.26.7'
+          go-version: '1.26.9'
           cache: true
 
       # T4a — dedicated gosec run (the linter already includes gosec; this
