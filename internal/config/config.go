@@ -30,8 +30,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port    string
-	GinMode string
+	TLSCertFile, TLSKeyFile string
+	Port                    string
+	GinMode                 string
 	// TrustedProxies is the comma-separated list (TRUSTED_PROXIES) of CIDR/IPs
 	// that may set X-Forwarded-For / X-Real-IP. Empty (default) trusts NO proxy,
 	// so c.ClientIP() returns the direct RemoteAddr — the spoof-proof default.
@@ -107,7 +108,9 @@ func (d DBConfig) DSN() string {
 }
 
 type JWTConfig struct {
-	Secret string
+	Algorithm, KeyID, PreviousKeyID, PreviousLastIssued                                  string
+	StateSecret, StateKeyID, StatePreviousSecret, StatePreviousKeyID, StatePreviousUntil string
+	Secret                                                                               string
 	// PreviousSecret (env JWT_SECRET_PREVIOUS) optionally holds the prior
 	// JWT secret during a rotation (K2): new tokens are signed with Secret,
 	// while tokens carrying the previous kid keep verifying until they
@@ -292,6 +295,8 @@ func Load() (*Config, error) {
 	l := &loader{}
 	cfg := &Config{
 		Server: ServerConfig{
+			TLSCertFile:        l.env("SERVER_TLS_CERT_FILE", ""),
+			TLSKeyFile:         l.env("SERVER_TLS_KEY_FILE", ""),
 			Port:               l.env("SERVER_PORT", "8080"),
 			GinMode:            l.env("GIN_MODE", "debug"),
 			TrustedProxies:     l.envCSV("TRUSTED_PROXIES"),
@@ -315,15 +320,24 @@ func Load() (*Config, error) {
 			MigrateAuto:  l.envBool("MIGRATE_AUTO", false),
 		},
 		JWT: JWTConfig{
-			Secret:         l.env("JWT_SECRET", ""),
-			PreviousSecret: l.env("JWT_SECRET_PREVIOUS", ""),
-			Issuer:         l.env("JWT_ISSUER", "finnapigo"),
-			AccessTTL:      l.envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
-			RefreshTTL:     l.envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
-			ResetTTL:       l.envDuration("RESET_TOKEN_TTL", 15*time.Minute),
-			VerifyTTL:      l.envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
-			MFAPendingTTL:  l.envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
-			SudoTTL:        l.envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
+			Algorithm:           l.env("JWT_ALGORITHM", "HS256"),
+			KeyID:               l.env("JWT_KEY_ID", ""),
+			PreviousKeyID:       l.env("JWT_PREVIOUS_KEY_ID", ""),
+			PreviousLastIssued:  l.env("JWT_PREVIOUS_LAST_ISSUED_AT", ""),
+			StateSecret:         l.env("IDENTITY_STATE_SECRET", ""),
+			StateKeyID:          l.env("IDENTITY_STATE_KEY_ID", ""),
+			StatePreviousSecret: l.env("IDENTITY_STATE_PREVIOUS_SECRET", ""),
+			StatePreviousKeyID:  l.env("IDENTITY_STATE_PREVIOUS_KEY_ID", ""),
+			StatePreviousUntil:  l.env("IDENTITY_STATE_PREVIOUS_UNTIL", ""),
+			Secret:              l.env("JWT_SECRET", ""),
+			PreviousSecret:      l.env("JWT_SECRET_PREVIOUS", ""),
+			Issuer:              l.env("JWT_ISSUER", "finnapigo"),
+			AccessTTL:           l.envDuration("ACCESS_TOKEN_TTL", 15*time.Minute),
+			RefreshTTL:          l.envDuration("REFRESH_TOKEN_TTL", 7*24*time.Hour),
+			ResetTTL:            l.envDuration("RESET_TOKEN_TTL", 15*time.Minute),
+			VerifyTTL:           l.envDuration("EMAIL_VERIFY_TOKEN_TTL", 24*time.Hour),
+			MFAPendingTTL:       l.envDuration("MFA_PENDING_TOKEN_TTL", 5*time.Minute),
+			SudoTTL:             l.envDuration("SUDO_TOKEN_TTL", 15*time.Minute),
 		},
 		Auth: AuthConfig{
 			MaxLoginAttempts:     l.envInt("MAX_LOGIN_ATTEMPTS", 5),

@@ -45,6 +45,10 @@ func init() {
 // AuthService holds all core-auth business logic. It depends only on repo
 // interfaces + stateless helpers (jwt, hashing), so it is trivially unit-testable.
 type AuthService struct {
+	accessState   func(context.Context, *jwt.Claims) error
+	accessRevoker interface {
+		RevokeAccess(context.Context, string, time.Time) error
+	}
 	permissions   PermissionSource
 	users         UserRepo
 	tokens        RefreshTokenRepo
@@ -83,6 +87,16 @@ type AuthServiceOption func(*AuthService)
 // PermissionSource resolves explicit tenant role grants at token issuance.
 type PermissionSource interface {
 	GetUserPermissions(ctx context.Context, userID uint) ([]string, error)
+}
+
+func WithAccessState(check func(context.Context, *jwt.Claims) error) AuthServiceOption {
+	return func(s *AuthService) { s.accessState = check }
+}
+
+func WithAccessRevoker(r interface {
+	RevokeAccess(context.Context, string, time.Time) error
+}) AuthServiceOption {
+	return func(s *AuthService) { s.accessRevoker = r }
 }
 
 func WithAuthPermissions(source PermissionSource) AuthServiceOption {
@@ -510,7 +524,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		return TokenPair{}, UserProfile{}, nil, ErrEmailNotVerified
 	}
 
-	if !user.IsActive {
+	if !user.IsActive || user.AdminSuspended {
 		LoginFailures.Add(1)
 		s.audits.Record(ctx, loginFailedEvent(&user.ID, email, ip, "disabled"))
 		return TokenPair{}, UserProfile{}, nil, ErrAccountDisabled
@@ -571,7 +585,7 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 	if err != nil {
 		return TokenPair{}, UserProfile{}, err
 	}
-	if user == nil || !user.IsActive {
+	if user == nil || !user.IsActive || user.AdminSuspended {
 		return TokenPair{}, UserProfile{}, ErrInvalidToken
 	}
 
@@ -597,6 +611,9 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 // auditDetail is an optional label for the audit row (e.g. "" for password,
 // "google-oauth" for Google sign-in).
 func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.User, ip, ua, auditDetail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+	if user.AdminSuspended || !user.IsActive {
+		return TokenPair{}, UserProfile{}, nil, ErrAccountDisabled
+	}
 	// The password check passed — count the login as a credential success
 	// regardless of which branch below completes it (O3).
 	LoginSuccesses.Add(1)
@@ -646,6 +663,11 @@ func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.Us
 func (s *AuthService) Logout(ctx context.Context, refreshToken, accessJTI, ip string) error {
 	// P0.2 — the caller's own access token dies NOW, regardless of what the
 	// refresh-token lookup below finds.
+	if s.accessRevoker != nil && accessJTI != "" {
+		if err := s.accessRevoker.RevokeAccess(ctx, accessJTI, time.Now().Add(jwt.KeyDrain)); err != nil {
+			return fmt.Errorf("%w: durable revocation", ErrIdentityUnavailable)
+		}
+	}
 	s.denylistAccessToken(accessJTI)
 
 	hash := hash.HashToken(refreshToken)
@@ -747,7 +769,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 	if err != nil {
 		return TokenPair{}, err
 	}
-	if user == nil || !user.IsActive {
+	if user == nil || !user.IsActive || user.AdminSuspended {
 		return TokenPair{}, ErrInvalidToken
 	}
 
@@ -1572,6 +1594,12 @@ func (s *AuthService) denylistSession(sess *models.Session) {
 // login session. The access token embeds the user's password version so the
 // next credential change kills it (A7).
 func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip, ua, reuseSessionID string) (TokenPair, error) {
+	if s.jwt.Strict() && (s.sessions == nil || s.permissions == nil || s.accessState == nil) {
+		return TokenPair{}, ErrIdentityUnavailable
+	}
+	if s.jwt.Strict() && (!user.IsActive || user.AdminSuspended) {
+		return TokenPair{}, ErrAccountDisabled
+	}
 	if user.TenantID != "" && user.TenantID != tenant.FromContext(ctx) {
 		return TokenPair{}, ErrUserNotFound
 	}
@@ -1580,7 +1608,7 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip,
 		var err error
 		perms, err = s.permissions.GetUserPermissions(ctx, user.ID)
 		if err != nil {
-			return TokenPair{}, err
+			return TokenPair{}, fmt.Errorf("%w: permission lookup", ErrIdentityUnavailable)
 		}
 	}
 	sid := reuseSessionID
@@ -1606,10 +1634,27 @@ func (s *AuthService) issueTokenPair(ctx context.Context, user *models.User, ip,
 	// AuthMiddleware promotes it over any client-supplied tenant header, so
 	// the effective tenant for authenticated requests is always the one bound
 	// at issuance — an X-Tenant-ID spoof cannot cross tenant boundaries.
-	access, err := s.jwt.IssueAccessEnterprise(user.ID, user.Role, user.Email,
-		s.jwtCfg.AccessTTL, user.PwdVersion, sid, tenant.FromContext(ctx), perms)
+	var access string
+	var err error
+	if s.jwt.Strict() {
+		access, err = s.jwt.IssueAccessV1(user.ID, user.Role, user.Email, s.jwtCfg.AccessTTL, user.PwdVersion, user.AuthEpoch, sid, tenant.FromContext(ctx), perms)
+	} else {
+		access, err = s.jwt.IssueAccessEnterprise(user.ID, user.Role, user.Email, s.jwtCfg.AccessTTL, user.PwdVersion, sid, tenant.FromContext(ctx), perms)
+	}
 	if err != nil {
 		return TokenPair{}, err
+	}
+	if s.jwt.Strict() {
+		claims, err := s.jwt.VerifyAccessV1(access, jwt.FinnAudience)
+		if err != nil {
+			return TokenPair{}, err
+		}
+		if err := s.accessState(ctx, claims); err != nil {
+			if errors.Is(err, ErrInvalidCredentials) {
+				return TokenPair{}, ErrInvalidCredentials
+			}
+			return TokenPair{}, fmt.Errorf("%w: issuance state check", ErrIdentityUnavailable)
+		}
 	}
 	refreshPlain, err := hash.GenerateOpaqueToken()
 	if err != nil {
@@ -2065,7 +2110,7 @@ func loginFailedEvent(uid *uint, email, ip, detail string) *models.AuditLog {
 // gate: a disabled account can never mint sessions here, exactly like it
 // cannot via password, OAuth, or refresh.
 func (s *AuthService) IssuePasskeyTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, UserProfile, error) {
-	if !user.IsActive {
+	if !user.IsActive || user.AdminSuspended {
 		return TokenPair{}, UserProfile{}, ErrAccountDisabled
 	}
 	pair, err := s.issueTokenPair(ctx, user, ip, ua, "")

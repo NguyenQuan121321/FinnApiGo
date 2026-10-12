@@ -69,7 +69,10 @@ func (r *RBACRepository) AssignRoleToUser(ctx context.Context, userID, roleID ui
 			return err
 		}
 		ur := models.UserRole{UserID: userID, RoleID: roleID}
-		return tx.Create(&ur).Error
+		if err := tx.Create(&ur).Error; err != nil {
+			return err
+		}
+		return tx.Model(&models.User{}).Where("id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).Update("auth_epoch", gorm.Expr("auth_epoch + 1")).Error
 	})
 }
 

@@ -57,6 +57,8 @@ func statusForError(err error) (int, string) {
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, services.ErrOAuthCodeExchangeFailed), errors.Is(err, services.ErrOAuthTokenVerificationFailed):
 		return http.StatusBadGateway, err.Error()
+	case errors.Is(err, services.ErrIdentityUnavailable):
+		return http.StatusServiceUnavailable, "identity state unavailable"
 	case errors.Is(err, services.ErrRateLimited):
 		return http.StatusTooManyRequests, err.Error()
 	}

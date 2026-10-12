@@ -6,6 +6,7 @@ import "errors"
 // codes and the standardized response envelope — services never touch HTTP.
 
 var (
+	ErrIdentityUnavailable = errors.New("identity state unavailable")
 	// 400 / validation-ish
 	ErrInvalidInput    = errors.New("invalid input")
 	ErrPasswordTooWeak = errors.New("password does not meet complexity requirements")

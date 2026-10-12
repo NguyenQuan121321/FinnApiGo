@@ -5,7 +5,7 @@ info:
   description: |
     Contract of record for the FinnApiGo authentication API.
 
-    - All responses use a common envelope: `{ "code": <http status>, "message": <text>, "data": <payload|null> }`.
+    - User API responses use a common envelope: `{ "code": <http status>, "message": <text>, "data": <payload|null> }`.
     - Access tokens are JWTs (HS256, `type: access`) sent as `Authorization: Bearer <accessToken>`.
     - Refresh tokens are opaque strings, rotated on every use (the old token is consumed).
     - Sudo-gated endpoints require the short-lived `X-Sudo-Token` minted by
@@ -29,6 +29,61 @@ tags:
   - name: webhooks
 
 paths:
+  /api/v1/identity/introspect:
+    post:
+      tags: [identity]
+      summary: Dedicated service credential and TLS authoritative v1 state check
+      operationId: introspectIdentity
+      description: |
+        Raw minimized JSON (no user response envelope). Caller is jakeai-service,
+        authenticated by an independent rotating service credential and explicit
+        X-Service-Key-ID. TLS is required; forwarded headers cannot assert TLS.
+        User token must authorize jakeai-service and match tenant_id. No user
+        token issuance or OBO exchange is provided. Global service limit is 120
+        requests per second across replicas; outage fails closed. See identity-v1.md.
+      parameters:
+        - in: header
+          name: X-Service-Key-ID
+          required: true
+          schema: {type: string}
+        - in: header
+          name: Authorization
+          required: true
+          schema: {type: string, description: 'Bearer dedicated service credential'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, tenant_id]
+              properties:
+                token: {type: string, description: Signed v1 user access token}
+                tenant_id: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Authoritative active state; positive cache at most 15 seconds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [contract_ver, active, tid, sub, sid, jti, pwdver, auth_epoch, checked_at, max_cache_seconds]
+                properties:
+                  contract_ver: {type: integer, enum: [1]}
+                  active: {type: boolean, enum: [true]}
+                  tid: {type: string}
+                  sub: {type: string}
+                  sid: {type: string}
+                  jti: {type: string}
+                  pwdver: {type: integer}
+                  auth_epoch: {type: integer}
+                  checked_at: {type: integer, description: UTC Unix seconds}
+                  max_cache_seconds: {type: integer, enum: [15]}
+        '400': {description: Invalid or oversized request}
+        '401': {description: Invalid service credential or inactive/invalid user credential}
+        '403': {description: User tenant does not match requested tenant}
+        '429': {description: Shared service rate limit exceeded}
+        '503': {description: TLS absent or authoritative database/store unavailable; no degraded protected reads}
   /healthz:
     get:
       tags: [health]

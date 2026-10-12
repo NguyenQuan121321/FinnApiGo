@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/finnapigo/finnapigo/internal/crypto"
 	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/handlers"
+	"github.com/finnapigo/finnapigo/internal/identity"
 	"github.com/finnapigo/finnapigo/internal/jobs"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/logging"
@@ -69,6 +71,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	jwtMgr, stateKeys, err := identityPolicy(cfg)
+	if err != nil {
+		return err
+	}
 	gin.SetMode(cfg.Server.GinMode)
 
 	// O1 — distributed tracing: no-op provider (and zero export overhead)
@@ -104,7 +110,7 @@ func run() error {
 	if cfg.DB.MigrateAuto {
 		slog.Warn("MIGRATE_AUTO=true — running GORM AutoMigrate at boot (dev escape hatch; production must use cmd/migrate)")
 		if err := db.AutoMigrate(
-			&models.User{}, &models.RefreshToken{}, &models.Session{},
+			&models.User{}, &models.RefreshToken{}, &models.Session{}, &models.AccessRevocation{},
 			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
 			&models.OAuthIdentity{}, &models.PasskeyCredential{},
 		); err != nil {
@@ -147,9 +153,14 @@ func run() error {
 	}
 
 	// --- JWT (K2: versioned keyset when JWT_SECRET_PREVIOUS is set) ---
-	jwtMgr := jwt.NewRotatingJWTManager(cfg.JWT.Secret, cfg.JWT.PreviousSecret, cfg.JWT.Issuer)
+	securityStore, ok := kvStore.(identity.SecurityStore)
+	if !ok {
+		return fmt.Errorf("error-aware identity store required")
+	}
+	stateAuthority := &identity.Authority{DB: db, Store: securityStore}
+	stateHandler := &identity.Handler{JWT: jwtMgr, Authority: stateAuthority, Keys: stateKeys}
 	if cfg.JWT.PreviousSecret != "" && cfg.JWT.PreviousSecret != cfg.JWT.Secret {
-		slog.Info("jwt: rotation active — current + previous secrets accepted until legacy tokens expire")
+		slog.Info("jwt: rotation active — current + previous secrets accepted until configured retirement deadline")
 	}
 
 	// --- Notifier (§1.2: SMTP when configured, Console fallback) ---
@@ -202,7 +213,13 @@ func run() error {
 	rbacRepo := repositories.NewRBACRepository(db)
 	var authOpts []services.AuthServiceOption
 	authOpts = append(authOpts, services.WithAuthPermissions(rbacRepo))
-	authOpts = append(authOpts, services.WithSessionRepo(sessionRepo))
+	authOpts = append(authOpts, services.WithSessionRepo(sessionRepo), services.WithAccessRevoker(stateAuthority), services.WithAccessState(func(ctx context.Context, c *jwt.Claims) error {
+		err := stateAuthority.Check(ctx, c)
+		if errors.Is(err, identity.ErrInactive) {
+			return services.ErrInvalidCredentials
+		}
+		return err
+	}))
 	if cfg.Security.BreachedPasswordCheck {
 		authOpts = append(authOpts, services.WithBreachedPasswordChecker(
 			services.NewBreachedPasswordChecker("", cfg.Security.BreachedPasswordTimeout)))
@@ -299,6 +316,7 @@ func run() error {
 
 	// --- Router ---
 	router := routes.Register(routes.Deps{
+		IdentityState:       stateHandler,
 		Auth:                authHandler,
 		OAuth:               oauthHandler,
 		MFA:                 mfaHandler,
@@ -327,6 +345,7 @@ func run() error {
 	srv := &http.Server{
 		Addr:              ":" + cfg.Server.Port,
 		Handler:           router,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
@@ -343,7 +362,13 @@ func run() error {
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("server listening", "port", cfg.Server.Port, "mode", cfg.Server.GinMode)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if cfg.Server.TLSCertFile != "" {
+			err = srv.ListenAndServeTLS(cfg.Server.TLSCertFile, cfg.Server.TLSKeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()

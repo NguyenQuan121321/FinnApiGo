@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
+	"github.com/finnapigo/finnapigo/internal/identity"
 	"github.com/finnapigo/finnapigo/internal/metrics"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/routes"
@@ -56,6 +57,7 @@ func TestOpenAPIMatchesRegisteredRoutes(t *testing.T) {
 // values — the drift check never dispatches a request.
 func buildRealRouter() *gin.Engine {
 	deps := routes.Deps{
+		IdentityState:       &identity.Handler{Authority: &identity.Authority{}},
 		Auth:                handlers.NewAuthHandler(nil, nil),
 		OAuth:               handlers.NewOAuthHandler(nil),
 		MFA:                 handlers.NewMFAHandler(nil, nil, 15*time.Minute),

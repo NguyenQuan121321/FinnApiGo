@@ -33,9 +33,11 @@ type User struct {
 	// first set). Access tokens embed the version at issue time and are
 	// rejected once it falls behind (A7) — revoking existing access tokens
 	// without a server-side session list.
-	PwdVersion int64     `gorm:"not null;default:0" json:"-"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	AuthEpoch      int64     `gorm:"not null;default:0" json:"-"`
+	AdminSuspended bool      `gorm:"not null;default:false" json:"-"`
+	PwdVersion     int64     `gorm:"not null;default:0" json:"-"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 func (User) TableName() string { return "users" }

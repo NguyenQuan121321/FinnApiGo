@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/finnapigo/finnapigo/internal/identity"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/response"
 	"github.com/finnapigo/finnapigo/internal/services"
@@ -43,6 +44,7 @@ type DenylistChecker interface {
 
 type authOptions struct {
 	denylist DenylistChecker
+	state    func(context.Context, *jwt.Claims) error
 }
 
 // AuthOption configures optional AuthMiddleware capabilities.
@@ -51,6 +53,10 @@ type AuthOption func(*authOptions)
 // WithDenylist wires a store/cache to check for revoked jti/sid entries (P0.2).
 func WithDenylist(d DenylistChecker) AuthOption {
 	return func(o *authOptions) { o.denylist = d }
+}
+
+func WithIdentityState(check func(context.Context, *jwt.Claims) error) AuthOption {
+	return func(o *authOptions) { o.state = check }
 }
 
 // denyAuth answers 401 and makes the denial observable: one slog.Warn per
@@ -114,8 +120,24 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 		}
 		c.Set("tenant_id", tid)
 		c.Request = c.Request.WithContext(tenant.WithTenant(c.Request.Context(), tid))
+		if opt.state != nil || jwtMgr.Strict() {
+			if opt.state == nil {
+				response.Respond(c, 503, "identity state unavailable", nil)
+				c.Abort()
+				return
+			}
+			if err := opt.state(c.Request.Context(), claims); err != nil {
+				if errors.Is(err, identity.ErrInactive) {
+					denyAuth(c, "inactive credential")
+				} else {
+					response.Respond(c, 503, "identity state unavailable", nil)
+					c.Abort()
+				}
+				return
+			}
+		}
 		// P0.2 — denylist check: if the token's JTI or SID was revoked, abort 401.
-		if opt.denylist != nil {
+		if opt.denylist != nil && opt.state == nil {
 			if claims.ID != "" {
 				if _, revoked := opt.denylist.Get("denylist:jti:" + claims.ID); revoked {
 					denyAuth(c, "token revoked")
@@ -129,7 +151,7 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 				}
 			}
 		}
-		if pwdVersion != nil {
+		if pwdVersion != nil && opt.state == nil {
 			current, err := pwdVersion(c.Request.Context(), claims.UserID)
 			if err != nil {
 				if errors.Is(err, services.ErrUserNotFound) {
