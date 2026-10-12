@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -318,5 +319,10 @@ func TestServiceKeyPolicy(t *testing.T) {
 	}
 	if identity.ValidateServiceKeys(base, base.CurrentSecret) == nil {
 		t.Fatal("application key reused")
+	}
+	material, err := base64.StdEncoding.DecodeString(base.CurrentSecret)
+	must(t, err)
+	if identity.ValidateServiceKeys(base, hex.EncodeToString(material)) == nil {
+		t.Fatal("resolved recovery key material reused")
 	}
 }

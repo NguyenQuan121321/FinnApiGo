@@ -34,4 +34,16 @@ func TestIdentityStartupPolicy(t *testing.T) {
 	if _, err := optionalUTC("2026-01-01T00:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
+	for _, set := range []func(*config.Config){
+		func(c *config.Config) { c.DB.Password = c.JWT.StateSecret },
+		func(c *config.Config) { c.SMTP.Password = c.JWT.StateSecret },
+		func(c *config.Config) { c.Captcha.Secret = c.JWT.StateSecret },
+		func(c *config.Config) { c.GoogleOAuth.ClientSecret = c.JWT.StateSecret },
+	} {
+		c := base
+		set(&c)
+		if _, _, err := identityPolicy(&c); err == nil {
+			t.Fatal("application credential reused as state secret")
+		}
+	}
 }

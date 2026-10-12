@@ -196,6 +196,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Compare the resolved bytes too: file-backed and derived recovery keys
+	// cannot be detected by comparing environment strings alone.
+	if err := identity.ValidateServiceKeys(stateKeys, hex.EncodeToString(recoveryEncKey)); err != nil {
+		return err
+	}
 	// Build the AES-256-GCM cipher ONCE — the key never changes at runtime, so
 	// the key schedule is computed here instead of per Encrypt/Decrypt call.
 	recoveryEnc, err := crypto.NewEncryptor(recoveryEncKey)

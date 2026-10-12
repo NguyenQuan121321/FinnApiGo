@@ -33,7 +33,7 @@ func identityPolicy(c *config.Config) (*jwt.JWTManager, identity.ServiceKeys, er
 	if err != nil {
 		return nil, k, err
 	}
-	if err := identity.ValidateServiceKeys(k, c.JWT.Secret, c.JWT.PreviousSecret, c.Auth.RecoveryCodeKey, c.Server.MetricsToken); err != nil {
+	if err := identity.ValidateServiceKeys(k, c.JWT.Secret, c.JWT.PreviousSecret, c.Auth.RecoveryCodeKey, c.Server.MetricsToken, c.DB.Password, c.SMTP.Password, c.Captcha.Secret, c.GoogleOAuth.ClientSecret); err != nil {
 		return nil, k, err
 	}
 	return m, k, nil
