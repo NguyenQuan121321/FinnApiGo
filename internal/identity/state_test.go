@@ -63,6 +63,8 @@ func runStateMatrix(t *testing.T, db *gorm.DB, s identity.SecurityStore) {
 	m := manager(t)
 	a := &identity.Authority{DB: db, Store: s}
 	perms := []string{"chat:read", "users:read"}
+	foreign := models.Tenant{ID: "foreign", Slug: "foreign", Name: "Foreign tenant", IsActive: true}
+	must(t, db.Where("id = ?", foreign.ID).FirstOrCreate(&foreign).Error)
 	var pp []models.Permission
 	for _, name := range perms {
 		p := models.Permission{Name: name}
@@ -76,6 +78,8 @@ func runStateMatrix(t *testing.T, db *gorm.DB, s identity.SecurityStore) {
 			must(t, db.Where("id = ?", tid).FirstOrCreate(&tr).Error)
 			u := models.User{TenantID: tid, Username: "f02-" + tid, Email: tid + "@example.invalid", Password: "synthetic hash", IsActive: true, Role: "admin"}
 			must(t, db.Create(&u).Error)
+			other := models.User{TenantID: tid, Username: "f02-other-" + tid, Email: "other-" + tid + "@example.invalid", Password: "synthetic hash", IsActive: true}
+			must(t, db.Create(&other).Error)
 			sess := models.Session{ID: uuid.NewString(), TenantID: tid, UserID: u.ID, LastActiveAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}
 			must(t, db.Create(&sess).Error)
 			r := models.Role{TenantID: tid, Name: "f02-role"}
@@ -105,7 +109,7 @@ func runStateMatrix(t *testing.T, db *gorm.DB, s identity.SecurityStore) {
 					must(t, db.Model(&u).Updates(map[string]any{"is_active": true, "admin_suspended": false, "pwd_version": 0, "auth_epoch": 0}).Error)
 				})
 			}
-			for name, delta := range map[string]map[string]any{"revoked session": {"revoked": true}, "expired session": {"expires_at": time.Now().Add(-time.Second)}, "foreign session": {"tenant_id": "tenant-foreign"}, "other owner": {"user_id": u.ID + 10000}} {
+			for name, delta := range map[string]map[string]any{"revoked session": {"revoked": true}, "expired session": {"expires_at": time.Now().Add(-time.Second)}, "foreign session": {"tenant_id": foreign.ID}, "other owner": {"user_id": other.ID}} {
 				t.Run(name, func(t *testing.T) {
 					must(t, db.Model(&sess).Updates(delta).Error)
 					if !errors.Is(a.Check(ctx, c), identity.ErrInactive) {
