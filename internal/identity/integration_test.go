@@ -73,6 +73,9 @@ func TestF02RealAdapters(t *testing.T) {
 	must(t, client.Ping(context.Background()).Err())
 	s := store.NewRedisStore(client)
 	runStateMatrix(t, db, s)
+	if t.Failed() {
+		t.Fatal("real durable state matrix failed; adapter acceptance incomplete")
+	}
 	ctx := context.Background()
 	t.Run("Redis absence vs revocation", func(t *testing.T) {
 		jti, sid := uuid.NewString(), uuid.NewString()

@@ -120,6 +120,28 @@ func TestV1ConfigAndRotation(t *testing.T) {
 	}
 }
 
+func TestV1FreshPurposeIsolation(t *testing.T) {
+	m := strictManager(t)
+	for _, purpose := range []string{TokenTypeReset, TokenTypeEmailVerify, TokenTypeMFAPending, TokenTypeSudo, "service"} {
+		t.Run(purpose, func(t *testing.T) {
+			token, err := m.Issue(7, "user", "", purpose, time.Minute, "tenant-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := m.Verify(token)
+			if err != nil || c.Type != purpose || c.TenantID != "tenant-a" || len(c.Audience) != 1 || c.Audience[0] != "finnapigo-purpose:"+purpose {
+				t.Fatalf("valid fresh purpose failed: %v", err)
+			}
+			if _, err := m.VerifyAccessV1(token, FinnAudience); err == nil {
+				t.Fatal("fresh purpose became broad access")
+			}
+			if _, err := m.VerifyAccessV1(token, JakeAudience); err == nil {
+				t.Fatal("fresh purpose became Jake access")
+			}
+		})
+	}
+}
+
 type contractFixture struct {
 	Name, Token, Tenant, Audience string
 	Active                        bool

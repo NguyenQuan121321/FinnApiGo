@@ -76,7 +76,7 @@ func runStateMatrix(t *testing.T, db *gorm.DB, s identity.SecurityStore) {
 			must(t, db.Where("id = ?", tid).FirstOrCreate(&tr).Error)
 			u := models.User{TenantID: tid, Username: "f02-" + tid, Email: tid + "@example.invalid", Password: "synthetic hash", IsActive: true, Role: "admin"}
 			must(t, db.Create(&u).Error)
-			sess := models.Session{ID: uuid.NewString(), TenantID: tid, UserID: u.ID, ExpiresAt: time.Now().Add(time.Hour)}
+			sess := models.Session{ID: uuid.NewString(), TenantID: tid, UserID: u.ID, LastActiveAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}
 			must(t, db.Create(&sess).Error)
 			r := models.Role{TenantID: tid, Name: "f02-role"}
 			must(t, db.Create(&r).Error)
