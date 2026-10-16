@@ -202,6 +202,11 @@ func (m *JWTManager) baseClaims(userID uint, role, email, tokenType string, ttl 
 // it returns the typed claims. Callers must additionally check claims.Type
 // matches the expected purpose (Verify does not assume a single type).
 func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
+	if m.strict {
+		if err := validateTokenNames(tokenStr); err != nil {
+			return nil, err
+		}
+	}
 	if kid := peekKid(tokenStr); kid != "" {
 		if m.strict && kid == m.previousID && !m.now().Before(m.previousRetires) {
 			return nil, ErrUnknownKeyID

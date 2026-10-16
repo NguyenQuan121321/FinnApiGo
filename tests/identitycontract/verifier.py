@@ -22,16 +22,24 @@ def decode(segment):
     return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
 
 
+def canonical_names(obj, protected):
+    assert isinstance(obj, dict)
+    folded = {name.casefold(): name for name in protected}
+    assert all(key.casefold() not in folded or key == folded[key.casefold()] for key in obj)
+
+
 def verify(token, keys, tenant, audience, now, retired=None):
     header_bytes, claim_bytes, signature = token.split(".")
     header = json.loads(decode(header_bytes), object_pairs_hook=unique_object)
     claims = json.loads(decode(claim_bytes), object_pairs_hook=unique_object)
+    required = {"contract_ver", "iss", "aud", "sub", "uid", "type", "tid", "exp", "iat", "nbf", "jti", "sid", "pwdver", "auth_epoch", "perms"}
+    canonical_names(header, {"alg", "kid", "typ", "cty", "crit", "jku", "jwk", "x5u", "x5c", "x5t", "x5t#S256", "b64"})
+    canonical_names(claims, required | {"role", "email", "tenant_id", "permissions", "roles", "scopes", "id"})
     assert header["alg"] == "HS256" and header["kid"] in keys
     assert not retired or now < retired.get(header["kid"], float("inf"))
     key = base64.b64decode(keys[header["kid"]], validate=True)
     expected = hmac.new(key, f"{header_bytes}.{claim_bytes}".encode(), hashlib.sha256).digest()
     assert hmac.compare_digest(expected, decode(signature))
-    required = {"contract_ver", "iss", "aud", "sub", "uid", "type", "tid", "exp", "iat", "nbf", "jti", "sid", "pwdver", "auth_epoch", "perms"}
     assert required <= claims.keys() and all(claims[k] is not None for k in required)
     assert not {"tenant_id", "permissions", "roles", "scopes", "id"}.intersection(claims)
     for name in ("contract_ver", "uid", "pwdver", "auth_epoch", "exp", "iat", "nbf"):
@@ -40,6 +48,7 @@ def verify(token, keys, tenant, audience, now, retired=None):
     assert claims["uid"] > 0 and claims["sub"] == str(claims["uid"])
     assert isinstance(claims["tid"], str) and claims["tid"].strip() and claims["tid"] == tenant
     assert all(isinstance(claims[k], str) and claims[k] for k in ("jti", "sid"))
+    assert all(isinstance(claims[k], str) for k in ("role", "email") if k in claims)
     assert isinstance(claims["perms"], list) and all(isinstance(p, str) for p in claims["perms"])
     assert 0 < claims["exp"] - claims["iat"] <= 900
     assert claims["iat"] <= claims["nbf"] <= claims["exp"]
