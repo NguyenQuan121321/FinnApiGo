@@ -146,7 +146,7 @@ func checkSchema(dsn, mode string, m *migrate.Migrate) {
 			"passkey_credentials", "sessions", "tenants",
 			"permissions", "roles", "role_permissions", "user_roles",
 			"trusted_devices", "webhook_endpoints", "webhook_deliveries",
-			"schema_migrations",
+			"access_revocations", "schema_migrations",
 		}
 		for _, tbl := range expectedTables {
 			var count int

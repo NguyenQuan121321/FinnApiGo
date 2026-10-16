@@ -31,7 +31,9 @@ type Claims struct {
 	// PwdVer (access tokens only) is the user's password-version counter at
 	// issue time; AuthMiddleware rejects the token once the live version is
 	// higher (credential changed — A7).
-	PwdVer int64 `json:"pwdver,omitempty"`
+	PwdVer          int64 `json:"pwdver"`
+	AuthEpoch       int64 `json:"auth_epoch"`
+	ContractVersion int   `json:"contract_ver,omitempty"`
 	// SID (access tokens only) is the server-side session UUID the token was
 	// issued for (P0.2). Revoking a session denylists this value so every
 	// outstanding access token of that session dies before its exp.
@@ -39,7 +41,7 @@ type Claims struct {
 	// TenantID identifies the tenant isolation partition (P2.1).
 	TenantID string `json:"tid,omitempty"`
 	// Permissions list the fine-grained RBAC capabilities granted (P2.2).
-	Permissions []string `json:"perms,omitempty"`
+	Permissions []string `json:"perms"`
 	jwt.RegisteredClaims
 }
 
@@ -50,24 +52,31 @@ type Claims struct {
 // rotation (JWT_SECRET + JWT_SECRET_PREVIOUS). HS256-only enforcement (C5)
 // is unchanged.
 type JWTManager struct {
-	issuer     string
-	current    []byte
-	currentKid string
-	keys       map[string][]byte // kid -> secret
+	strict          bool
+	previousID      string
+	previousRetires time.Time
+	now             func() time.Time
+	issuer          string
+	current         []byte
+	currentKid      string
+	keys            map[string][]byte // kid -> secret
 	// tryOrder lists kids current-first; it drives the fallback path for
 	// legacy tokens issued before kid headers existed.
 	tryOrder []string
 }
 
-// NewJWTManager constructs a single-key JWTManager. The secret is captured as
-// bytes so it is not accidentally logged via %s formatting of a struct.
+// NewJWTManager constructs a legacy-policy manager for existing unit fixtures.
+// The secret is captured as bytes to avoid accidental string logging.
+//
+// Deployments must use NewConfiguredJWTManager; these constructors are fixture compatibility only.
 func NewJWTManager(secret, issuer string) *JWTManager {
 	return newJWTManager([]byte(secret), nil, issuer)
 }
 
-// NewRotatingJWTManager constructs a manager that signs with current and
-// verifies tokens signed by current OR previous (K2). An empty or identical
-// previous secret degrades to a single-key keyset.
+// NewRotatingJWTManager is retained for legacy unit fixtures only. It signs
+// with current and verifies current or previous, without deployment v1 policy.
+//
+// Deployments must use NewConfiguredJWTManager; these constructors are fixture compatibility only.
 func NewRotatingJWTManager(current, previous, issuer string) *JWTManager {
 	var prev []byte
 	if previous != "" && previous != current {
@@ -107,7 +116,16 @@ func kidFor(secret []byte) string {
 // For reset and verify-email tokens a jti (UUID) is embedded so single-use
 // enforcement can track consumption (§1.8).
 func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.Duration, tenantID ...string) (string, error) {
+	if m.strict && tokenType == TokenTypeAccess {
+		return "", ErrInvalidToken
+	}
 	claims := m.baseClaims(userID, role, email, tokenType, ttl)
+	if m.strict {
+		if len(tenantID) != 1 || tenantID[0] == "" {
+			return "", ErrInvalidToken
+		}
+		claims.Audience = jwt.ClaimStrings{"finnapigo-purpose:" + tokenType}
+	}
 	if len(tenantID) > 0 {
 		claims.TenantID = tenantID[0]
 	}
@@ -126,6 +144,9 @@ func (m *JWTManager) Issue(userID uint, role, email, tokenType string, ttl time.
 // session's outstanding access tokens at once. Callers must pass the live
 // users.pwd_version so the next credential change invalidates the token.
 func (m *JWTManager) IssueAccess(userID uint, role, email string, ttl time.Duration, pwdVer int64, sessionID string) (string, error) {
+	if m.strict {
+		return "", ErrInvalidToken
+	}
 	claims := m.baseClaims(userID, role, email, TokenTypeAccess, ttl)
 	claims.PwdVer = pwdVer
 	claims.ID = uuid.New().String()
@@ -135,6 +156,9 @@ func (m *JWTManager) IssueAccess(userID uint, role, email string, ttl time.Durat
 
 // IssueAccessEnterprise issues an access token carrying tenant isolation (P2.1) and RBAC permissions (P2.2).
 func (m *JWTManager) IssueAccessEnterprise(userID uint, role, email string, ttl time.Duration, pwdVer int64, sessionID, tenantID string, perms []string) (string, error) {
+	if m.strict {
+		return m.IssueAccessV1(userID, role, email, ttl, pwdVer, 0, sessionID, tenantID, perms)
+	}
 	claims := m.baseClaims(userID, role, email, TokenTypeAccess, ttl)
 	claims.PwdVer = pwdVer
 	claims.ID = uuid.New().String()
@@ -179,11 +203,17 @@ func (m *JWTManager) baseClaims(userID uint, role, email, tokenType string, ttl 
 // matches the expected purpose (Verify does not assume a single type).
 func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
 	if kid := peekKid(tokenStr); kid != "" {
+		if m.strict && kid == m.previousID && !m.now().Before(m.previousRetires) {
+			return nil, ErrUnknownKeyID
+		}
 		key, ok := m.keys[kid]
 		if !ok {
 			return nil, fmt.Errorf("verify token: %w: %q", ErrUnknownKeyID, kid)
 		}
 		return m.parse(tokenStr, key)
+	}
+	if m.strict {
+		return nil, ErrUnknownKeyID
 	}
 	var firstErr error
 	for i, kid := range m.tryOrder {
@@ -201,21 +231,33 @@ func (m *JWTManager) Verify(tokenStr string) (*Claims, error) {
 // parse runs the full golang-jwt validation against one specific key.
 func (m *JWTManager) parse(tokenStr string, key []byte) (*Claims, error) {
 	claims := &Claims{}
+	options := []jwt.ParserOption{jwt.WithIssuer(m.issuer), jwt.WithExpirationRequired(), jwt.WithValidMethods([]string{"HS256"})}
+	if m.strict {
+		options = append(options, jwt.WithLeeway(MaxSkew), jwt.WithIssuedAt(), jwt.WithTimeFunc(m.now))
+	}
 	tok, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrUnexpectedSigningMethod
 		}
 		return key, nil
 	},
-		jwt.WithIssuer(m.issuer),
-		jwt.WithExpirationRequired(),
-		jwt.WithValidMethods([]string{"HS256"}),
+		options...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
 	}
 	if !tok.Valid {
 		return nil, ErrInvalidToken
+	}
+	if m.strict && claims.Type == TokenTypeAccess {
+		if err := m.validateAccess(tokenStr, claims, FinnAudience); err != nil {
+			return nil, err
+		}
+	}
+	if m.strict && claims.Type != TokenTypeAccess {
+		if claims.TenantID == "" || claims.UserID == 0 || claims.Subject != fmt.Sprintf("%d", claims.UserID) || len(claims.Audience) != 1 || claims.Audience[0] != "finnapigo-purpose:"+claims.Type || claims.IssuedAt == nil || claims.NotBefore == nil {
+			return nil, ErrInvalidToken
+		}
 	}
 	return claims, nil
 }

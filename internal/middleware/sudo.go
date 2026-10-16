@@ -36,7 +36,7 @@ func SudoMiddleware(jwtMgr *jwt.JWTManager) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		if claims.Type != jwt.TokenTypeSudo {
+		if claims.Type != jwt.TokenTypeSudo || (jwtMgr.Strict() && claims.TenantID != c.GetString("tenant_id")) {
 			response.Respond(c, http.StatusForbidden, "sudo verification required", nil)
 			c.Abort()
 			return

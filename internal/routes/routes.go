@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/finnapigo/finnapigo/internal/handlers"
+	"github.com/finnapigo/finnapigo/internal/identity"
 	"github.com/finnapigo/finnapigo/internal/jwt"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/response"
@@ -24,6 +25,7 @@ import (
 
 // Deps bundles everything the router needs. Constructed in main.go.
 type Deps struct {
+	IdentityState       *identity.Handler
 	Auth                *handlers.AuthHandler
 	OAuth               *handlers.OAuthHandler
 	MFA                 *handlers.MFAHandler
@@ -138,6 +140,9 @@ func Register(deps Deps) *gin.Engine {
 
 	api := r.Group("/api/v1")
 	auth := api.Group("/auth")
+	if deps.IdentityState != nil {
+		api.POST("/identity/introspect", deps.IdentityState.Handle)
+	}
 
 	// ---- Public core-auth endpoints (no auth middleware) ----
 	auth.POST("/register", deps.RateLimit.Handler(), deps.Auth.Register)
@@ -164,6 +169,9 @@ func Register(deps Deps) *gin.Engine {
 	// ---- Authenticated core-auth endpoints ----
 	authed := auth.Group("")
 	var authOpts []middleware.AuthOption
+	if deps.IdentityState != nil {
+		authOpts = append(authOpts, middleware.WithIdentityState(deps.IdentityState.Authority.Check))
+	}
 	if deps.Store != nil {
 		authOpts = append(authOpts, middleware.WithDenylist(deps.Store))
 	}

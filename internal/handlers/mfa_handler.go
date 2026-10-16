@@ -186,7 +186,7 @@ func (h *MFAHandler) ViewRecoveryCodes(c *gin.Context) {
 		if ttl <= 0 {
 			ttl = 15 * time.Minute
 		}
-		sudo, err := h.jwtMgr.Issue(uid, ctxString(c, middleware.CtxRole), ctxString(c, middleware.CtxEmail), jwt.TokenTypeSudo, ttl)
+		sudo, err := h.jwtMgr.Issue(uid, ctxString(c, middleware.CtxRole), ctxString(c, middleware.CtxEmail), jwt.TokenTypeSudo, ttl, ctxString(c, "tenant_id"))
 		if err != nil {
 			respondError(c, err)
 			return
