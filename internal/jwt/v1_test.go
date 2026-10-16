@@ -209,6 +209,7 @@ func TestV1CrossLanguageContract(t *testing.T) {
 		}
 		return c
 	}
+	ambiguousNameFixtures(t, m, payload, add)
 	for _, claim := range []string{"contract_ver", "iss", "aud", "sub", "uid", "type", "tid", "exp", "iat", "nbf", "jti", "sid", "pwdver", "auth_epoch", "perms"} {
 		for _, null := range []bool{false, true} {
 			c := clone()

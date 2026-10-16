@@ -23,6 +23,9 @@ type UserRepo interface {
 	FindByEmail(ctx context.Context, email string) (*models.User, error)
 	FindByUsername(ctx context.Context, username string) (*models.User, error)
 	Update(ctx context.Context, user *models.User) error
+	UpdateEmail(ctx context.Context, user *models.User) error
+	Deactivate(ctx context.Context, userID uint) error
+	Erase(ctx context.Context, user *models.User) error
 	UpdatePassword(ctx context.Context, user *models.User, hashedPassword string) error
 	IncrementFailedAttempts(ctx context.Context, user *models.User, lockUntil *time.Time) error
 	ResetFailedAttempts(ctx context.Context, user *models.User) error

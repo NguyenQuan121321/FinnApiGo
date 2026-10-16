@@ -79,13 +79,47 @@ func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*
 	return &u, nil
 }
 
+// Update owns only ordinary profile fields. A snapshot is never authority for
+// credentials, verification, account activity, suspension, versions or lockout.
 func (r *UserRepository) Update(ctx context.Context, user *models.User) error {
 	if _, err := scopeTenant(ctx, user.TenantID); err != nil {
 		return err
 	}
 	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)).
-		Select("*").Omit("id", "tenant_id", "created_at"), user)
+		Select("username", "full_name"), user)
+}
+
+// UpdateEmail is the confirmed-email mutation, including intentional false
+// verification values. It cannot write any security state from the snapshot.
+func (r *UserRepository) UpdateEmail(ctx context.Context, user *models.User) error {
+	if _, err := scopeTenant(ctx, user.TenantID); err != nil {
+		return err
+	}
+	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)),
+		map[string]any{"email": user.Email, "is_email_verified": user.IsEmailVerified})
+}
+
+// Deactivate never allows a stale caller to reactivate an account. Version
+// increments and session containment remain the service's explicit operations.
+func (r *UserRepository) Deactivate(ctx context.Context, userID uint) error {
+	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)),
+		map[string]any{"is_active": false})
+}
+
+// Erase owns the anonymization fields and forces credential/activity removal;
+// it preserves suspension, monotonic versions and lockout state. Full factor,
+// audit and session erasure is coordinated explicitly by AuthService.
+func (r *UserRepository) Erase(ctx context.Context, user *models.User) error {
+	if _, err := scopeTenant(ctx, user.TenantID); err != nil {
+		return err
+	}
+	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+		Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)),
+		map[string]any{"email": user.Email, "username": user.Username, "password": "",
+			"full_name": "", "is_active": false, "is_email_verified": false})
 }
 
 // UpdatePassword sets a new bcrypt hash and (optionally) clears lockout state.

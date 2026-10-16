@@ -1353,7 +1353,7 @@ func (s *AuthService) ConfirmChangeEmail(ctx context.Context, token, ip string) 
 
 	user.Email = newEmail
 	user.IsEmailVerified = true
-	if err := s.users.Update(ctx, user); err != nil {
+	if err := s.users.UpdateEmail(ctx, user); err != nil {
 		return err
 	}
 
@@ -1418,7 +1418,7 @@ func (s *AuthService) DeactivateAccount(ctx context.Context, userID uint, sudoTo
 	}
 
 	user.IsActive = false
-	if err := s.users.Update(ctx, user); err != nil {
+	if err := s.users.Deactivate(ctx, userID); err != nil {
 		return err
 	}
 
@@ -1472,7 +1472,7 @@ func (s *AuthService) EraseAccount(ctx context.Context, userID uint, sudoToken, 
 	user.FullName = ""
 	user.IsActive = false
 	user.IsEmailVerified = false
-	if err := s.users.Update(ctx, user); err != nil {
+	if err := s.users.Erase(ctx, user); err != nil {
 		return err
 	}
 

@@ -100,6 +100,23 @@ func (m *mockUserRepo) UpdatePassword(ctx context.Context, user *models.User, ha
 	return nil
 }
 
+func (m *mockUserRepo) UpdateEmail(ctx context.Context, user *models.User) error {
+	return m.Update(ctx, user)
+}
+
+func (m *mockUserRepo) Deactivate(ctx context.Context, userID uint) error {
+	u, err := m.FindByID(ctx, userID)
+	if err != nil || u == nil {
+		return errNotFound
+	}
+	u.IsActive = false
+	return m.Update(ctx, u)
+}
+
+func (m *mockUserRepo) Erase(ctx context.Context, user *models.User) error {
+	return m.Update(ctx, user)
+}
+
 func (m *mockUserRepo) IncrementFailedAttempts(ctx context.Context, user *models.User, lockUntil *time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

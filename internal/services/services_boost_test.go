@@ -1172,7 +1172,9 @@ func TestAuthService_Deactivate_And_EraseAccount(t *testing.T) {
 
 	// Reactivate for erase test
 	reloaded.IsActive = true
-	_ = userRepo.Update(ctx, reloaded)
+	if err := db.Model(reloaded).Update("is_active", true).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	// Add passkey, totp, and oauth identity for this user
 	_ = passkeyRepo.Create(ctx, &models.PasskeyCredential{
@@ -1612,7 +1614,9 @@ func TestOAuthService_FullLifecycle(t *testing.T) {
 	// Test Unlink with password present
 	hashed, _ := hash.HashPassword("Password123!", hash.MinCost)
 	testUser.Password = hashed
-	_ = userRepo.Update(ctx, testUser)
+	if err := userRepo.UpdatePassword(ctx, testUser, hashed); err != nil {
+		t.Fatal(err)
+	}
 	_ = oauthRepo.Create(ctx, &models.OAuthIdentity{
 		UserID:         testUser.ID,
 		Provider:       "google",

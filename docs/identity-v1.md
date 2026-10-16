@@ -24,6 +24,14 @@ excessive lifetime, future times and subject mismatches fail. No header-directed
 key URL, algorithm fallback, permission wildcard expansion or platform tenant
 authority. `default` is an ordinary tenant.
 
+Protected claim and JOSE header names require exact canonical spelling before
+typed decoding, for access and purpose tokens. Case aliases (including Unicode
+case equivalents), either member order, same-value aliases and exact duplicate
+members are rejected. Optional typed `role`/`email` and forbidden authority
+aliases are protected too. Unknown benign extension names remain case-sensitive
+and may coexist. The Go/Python corpus exercises both rejection and extension
+compatibility; it does not certify Jake runtime enforcement.
+
 The shared AuthService path covers password, OAuth, passkey, MFA completion and
 refresh. It reads exact tenant grants, creates/reuses a durable session, signs and
 checks authoritative state before returning credentials. Only an exact
@@ -101,6 +109,24 @@ exposed admin operation or proof of complete refresh-family/factor containment.
 F04 owns complete refresh/replay/suspension lifecycle and truthful multi-step
 containment. F03 owns transactional critical audit; neither is claimed complete.
 Temporary brute-force `locked_until` remains separate from administrative state.
+
+User mutation ownership prevents stale snapshots from restoring security state:
+
+| Mutation | Owned fields / operation |
+|---|---|
+| `UserRepository.Update` | Profile `username`, `full_name` only, including empty values |
+| `UpdateEmail` / `ConfirmChangeEmail` | `email`, `is_email_verified` only |
+| `Deactivate` / `DeactivateAccount` | Forces `is_active=false` |
+| `Erase` / `EraseAccount` | Anonymized email/username, empty password/name, inactive/unverified |
+| Credential, lockout, suspension and grants | Existing dedicated password transaction/CAS, SQL version increments, lockout APIs, `Authority.Suspend`, transactional RBAC epoch increment |
+
+All three former production broad-update callers use the dedicated operations.
+No ordinary profile/email snapshot writes password, activity, suspension,
+versions or lockout. Deactivation/erasure preserve intervening suspension and
+versions. Tenant predicates, missing-row errors and dependency failures remain
+enforced; there is no upsert. Existing multi-step email/deactivation/erasure
+containment and factor/audit error handling remain F04/F03 work. These repairs
+do not certify the complete lifecycle. No schema change is needed.
 Expired revocation records are safe to retain; no unapproved retention/purge job
 is added. Future cleanup must preserve security through expiry plus skew.
 
@@ -143,3 +169,8 @@ disposable `F02_MYSQL_ADMIN_DSN`, `F02_MYSQL_ALLOW_CREATE_DROP=1`,
 `TEST_REDIS_URL` plus existing repository integration inputs. F02 creates/drops a
 unique schema, applies real migrations, and uses actual MySQL/Redis adapters for
 tenant/session/permission/epoch/JTI/outage/admission cases. No production data.
+`TestF02RealUserMutations` additionally runs the deterministic stale-snapshot
+service/repository matrix against a separate migrated schema and Redis DB 14:
+suspension, grant/epoch, credential, activity and lockout interleavings; actual
+password login after the mutation; old-session rejection; zero values;
+default/foreign tenant negatives; idempotent/missing rows and closed DB errors.

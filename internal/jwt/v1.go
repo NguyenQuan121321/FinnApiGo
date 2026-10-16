@@ -213,6 +213,38 @@ func (m *JWTManager) validateAccess(token string, c *Claims, audience string) er
 
 func (m *JWTManager) Strict() bool { return m.strict }
 
+// Validate before Go's typed decoder can fold JSON names (including Unicode
+// equivalents such as long s). Extensions remain case-sensitive and may coexist;
+// names interpreted as claims or JOSE parameters must use their exact spelling.
+func validateTokenNames(token string) error {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ErrInvalidToken
+	}
+	protected := [][]string{
+		{"alg", "kid", "typ", "cty", "crit", "jku", "jwk", "x5u", "x5c", "x5t", "x5t#S256", "b64"},
+		{"contract_ver", "iss", "aud", "sub", "uid", "type", "tid", "exp", "iat", "nbf", "jti", "sid", "pwdver", "auth_epoch", "perms", "role", "email", "tenant_id", "permissions", "roles", "scopes", "id"},
+	}
+	for i, names := range protected {
+		b, err := base64.RawURLEncoding.DecodeString(parts[i])
+		if err != nil {
+			return ErrInvalidToken
+		}
+		obj, err := uniqueObject(b)
+		if err != nil {
+			return ErrInvalidToken
+		}
+		for key := range obj {
+			for _, canonical := range names {
+				if key != canonical && strings.EqualFold(key, canonical) {
+					return ErrInvalidToken
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func uniqueObject(b []byte) (map[string]json.RawMessage, error) {
 	d := json.NewDecoder(bytes.NewReader(b))
 	t, err := d.Token()
