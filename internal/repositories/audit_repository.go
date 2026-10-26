@@ -106,7 +106,7 @@ func (r *AuditRepository) FindByUserIDPaginated(ctx context.Context, userID uint
 func (r *AuditRepository) AnonymizeUser(ctx context.Context, userID uint) error {
 	return database.FromContext(ctx, r.db).Model(&models.AuditLog{}).
 		Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).
-		Updates(map[string]any{"email": "anonymized@gdpr.local", "ip_address": "", "detail": ""}).Error
+		Updates(map[string]any{"email": gorm.Expr("CASE WHEN version = 1 THEN '' ELSE ? END", legacyAuditErasureMarker), "ip_address": "", "detail": ""}).Error
 }
 
 // FindAllPaginated returns paginated audit events for a tenant (P2.3 admin).

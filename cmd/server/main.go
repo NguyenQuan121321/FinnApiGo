@@ -208,6 +208,9 @@ func run() error {
 	if err := identity.ValidateServiceKeys(stateKeys, hex.EncodeToString(recoveryEncKey)); err != nil {
 		return err
 	}
+	if err := auditKeys.RejectSharedMaterial(recoveryEncKey); err != nil {
+		return err
+	}
 	// Build the AES-256-GCM cipher ONCE — the key never changes at runtime, so
 	// the key schedule is computed here instead of per Encrypt/Decrypt call.
 	recoveryEnc, err := crypto.NewEncryptor(recoveryEncKey)

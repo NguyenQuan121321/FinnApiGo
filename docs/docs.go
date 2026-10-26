@@ -613,7 +613,7 @@ const docTemplate = `{
         },
         "/api/v1/auth/forgot-password": {
             "post": {
-                "description": "Always responds 200 with the same message regardless of whether the email exists (anti-enumeration). A reset link is emailed only when the account exists.",
+                "description": "Responds identically regardless of account existence: neutral 200 normally, or 503 when required durable audit admission is unavailable. A reset link is emailed only when the account exists and admission succeeds.",
                 "consumes": [
                     "application/json"
                 ],
@@ -650,6 +650,12 @@ const docTemplate = `{
                     },
                     "429": {
                         "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
                         "schema": {
                             "$ref": "#/definitions/swagger.ErrorEnvelope"
                         }
@@ -1886,7 +1892,7 @@ const docTemplate = `{
         },
         "/api/v1/auth/resend-verification": {
             "post": {
-                "description": "Responds 200 with the same message whether or not the email exists and whether it is already verified (anti-enumeration); a link is sent only to unverified existing accounts. Exceeding the resend rate limit surfaces a 429 so legitimate clients can back off.",
+                "description": "Responds identically for unknown, verified and unverified accounts: neutral 200 normally, 503 when required durable audit admission fails, or 429 when rate limited. A link is sent only to unverified existing accounts after admission succeeds.",
                 "consumes": [
                     "application/json"
                 ],
@@ -1923,6 +1929,12 @@ const docTemplate = `{
                     },
                     "429": {
                         "description": "Too Many Requests",
+                        "schema": {
+                            "$ref": "#/definitions/swagger.ErrorEnvelope"
+                        }
+                    },
+                    "503": {
+                        "description": "Service Unavailable",
                         "schema": {
                             "$ref": "#/definitions/swagger.ErrorEnvelope"
                         }
@@ -2340,6 +2352,15 @@ const docTemplate = `{
         "github_com_finnapigo_finnapigo_internal_models.AuditLog": {
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string"
+                },
+                "actorId": {
+                    "type": "integer"
+                },
+                "actorKind": {
+                    "type": "string"
+                },
                 "createdAt": {
                     "type": "string"
                 },
@@ -2353,10 +2374,16 @@ const docTemplate = `{
                 "event": {
                     "type": "string"
                 },
+                "eventId": {
+                    "type": "string"
+                },
                 "id": {
                     "type": "integer"
                 },
                 "ipAddress": {
+                    "type": "string"
+                },
+                "keyId": {
                     "type": "string"
                 },
                 "prevHash": {
@@ -2367,6 +2394,12 @@ const docTemplate = `{
                     "description": "P2.6 tamper-evident HMAC",
                     "type": "string"
                 },
+                "requestId": {
+                    "type": "string"
+                },
+                "sequence": {
+                    "type": "integer"
+                },
                 "success": {
                     "type": "boolean"
                 },
@@ -2375,6 +2408,9 @@ const docTemplate = `{
                 },
                 "userId": {
                     "description": "nil if pre-auth",
+                    "type": "integer"
+                },
+                "version": {
                     "type": "integer"
                 }
             }

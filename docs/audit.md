@@ -25,6 +25,15 @@ verification rules. The old best-effort adapter remains only for optional test
 doubles without durable capability; production wiring uses the concrete durable
 repository.
 
+Recovery requests (`forgot-password`, `resend-verification`) admit one required
+request event before account lookup or token minting, including unknown and
+already-verified accounts. It carries no account-dependent subject or email.
+Healthy responses remain neutral 200; unavailable admission gives the identical
+503 for all account states and emits no reset/verification credential. Existing
+rate limits still give 429; disposable-domain rejection also requires admission.
+These events attest to request admission, not account existence or email delivery.
+An SMTP failure after admission remains a neutral response, not proof of delivery.
+
 Expected authentication denials commit lockout/containment evidence and return the
 original denial. Unexpected operation errors roll back SQL. The service wrappers
 cover registration, password login, MFA completion/pending issuance, refresh,
@@ -108,6 +117,15 @@ select only configured material, never URLs or algorithms. Development without
 configuration uses ephemeral random keys and cannot promise verification after
 restart. Use retained configured keys for any persistent environment.
 
+Audit signing/checkpoint and current/previous JWT/service keys require canonical
+padded standard Base64 (no line wrapping, alternate pad bits or raw encoding).
+Recovery keys use exactly 32 decoded hex bytes (either hex case); file providers
+trim file whitespace under their existing contract. Separation compares decoded
+bytes across every active/retained signing and checkpoint key, current/previous
+authentication/service keys and the resolved recovery key, including file-backed
+or development-derived material. Startup rejects reuse before serving and reports
+redacted configuration errors. These repairs require no key rotation or migration.
+
 Rotate by deploying the union of old verification keys and the new key to all
 replicas, then select the new current ID. Only the current ID signs. Keep retired
 keys externally as verification-only material for all retained hot history,
@@ -153,6 +171,13 @@ prefix, preserves newer history/admitted head, rejects duplicates or conflicts a
 never recreates excluded PII. Failed restore rolls back rows and boundary. Backup
 restore must reconcile external checkpoints, keys and current erasure/containment
 state before serving; a DB snapshot alone is insufficient recovery evidence.
+
+V1 erasure clears ancillary email/IP/detail to empty strings, retaining the exact
+signed identifiers, canonical bytes, MACs and checkpoints. Older v1 history or
+archives containing the exact nonpersonal `anonymized@gdpr.local` email marker
+are compatible: export and restore normalize copies to empty email. Arbitrary
+email, IP or detail values still fail the restore PII guard. Legacy v0 rows keep
+their historical erasure marker and remain unverifiable; none are promoted to v1.
 
 Apply migration 0006 before the new binary, with old writers stopped/drained.
 It adds nullable identity/sequence columns, uniqueness constraints and fresh

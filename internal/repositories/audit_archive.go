@@ -28,6 +28,21 @@ type AuditArchive struct {
 	Events []models.AuditLog
 }
 
+const legacyAuditErasureMarker = "anonymized@gdpr.local"
+
+// Older erasure wrote this nonpersonal marker into unsigned v1 Email. Accept
+// only that exact compatibility value, normalize a copy, and retain the PII
+// guard. Signed identifiers, canonical bytes and trusted references never change.
+func normalizeArchivedAncillary(e models.AuditLog) (models.AuditLog, error) {
+	if e.Version == 1 && e.Email == legacyAuditErasureMarker {
+		e.Email = ""
+	}
+	if e.Email != "" || e.IPAddress != "" || e.Detail != "" {
+		return models.AuditLog{}, audit.ErrIntegrity
+	}
+	return e, nil
+}
+
 func (r *AuditRepository) Checkpoint(ctx context.Context) (audit.Checkpoint, error) {
 	var h models.AuditHead
 	err := r.db.WithContext(ctx).Where("tenant_id = ?", tenant.FromContext(ctx)).First(&h).Error
@@ -124,6 +139,11 @@ func (r *AuditRepository) Archive(ctx context.Context, p RetentionPolicy, base a
 			a.Events = a.Events[:i]
 			break
 		}
+		var err error
+		a.Events[i], err = normalizeArchivedAncillary(e)
+		if err != nil {
+			return AuditArchive{}, err
+		}
 	}
 	a.End = base
 	if len(a.Events) > 0 {
@@ -207,10 +227,11 @@ func (r *AuditRepository) RestoreArchive(ctx context.Context, a AuditArchive, tr
 		}
 		for _, e := range a.Events {
 			e.ID = 0
-			if e.Email != "" || e.IPAddress != "" || e.Detail != "" {
-				return audit.ErrIntegrity
+			normalized, err := normalizeArchivedAncillary(e)
+			if err != nil {
+				return err
 			}
-			if err := tx.Create(&e).Error; err != nil {
+			if err := tx.Create(&normalized).Error; err != nil {
 				return err
 			}
 		}

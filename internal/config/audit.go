@@ -1,18 +1,17 @@
 package config
 
 import (
-	"bytes"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"github.com/finnapigo/finnapigo/internal/audit"
+	"github.com/finnapigo/finnapigo/internal/jwt"
 )
 
 // AuditKeys is called before opening production stores or serving requests.
 // Development may use ephemeral keys; production key history is operator held.
 func (c *Config) AuditKeys() (*audit.Keys, error) {
-	if c.Audit.SigningKeys == "" && c.Audit.CheckpointKey == "" && c.Server.GinMode != "release" {
+	if c.Audit.SigningKeys == "" && c.Audit.CheckpointKey == "" && c.Audit.CheckpointKeys == "" && c.Server.GinMode != "release" {
 		return audit.EphemeralKeys(), nil
 	}
 	var encoded map[string]string
@@ -31,21 +30,32 @@ func (c *Config) AuditKeys() (*audit.Keys, error) {
 	} else {
 		checkpoints[cpID] = c.Audit.CheckpointKey
 	}
-	all := make([]string, 0, len(encoded)+len(checkpoints))
-	for _, v := range encoded {
-		all = append(all, v)
+	k, err := audit.NewKeyRing(c.Audit.KeyID, encoded, cpID, checkpoints)
+	if err != nil {
+		return nil, err
 	}
-	for _, v := range checkpoints {
-		all = append(all, v)
-	}
-	for _, value := range all {
-		b, _ := base64.StdEncoding.DecodeString(value)
-		for _, other := range []string{c.JWT.Secret, c.JWT.PreviousSecret, c.JWT.StateSecret, c.JWT.StatePreviousSecret, c.Auth.RecoveryCodeKey} {
-			decodedHex, _ := hex.DecodeString(other)
-			if other != "" && (string(b) == other || value == other || (len(decodedHex) > 0 && bytes.Equal(b, decodedHex))) {
-				return nil, errors.New("audit keys must be separate from authentication/encryption keys")
-			}
+	var materials [][]byte
+	for _, value := range []string{c.JWT.Secret, c.JWT.PreviousSecret, c.JWT.StateSecret, c.JWT.StatePreviousSecret} {
+		if value == "" {
+			continue
 		}
+		b, err := jwt.DecodeStrongKey(value)
+		if err != nil {
+			return nil, errors.New("invalid authentication key encoding")
+		}
+		materials = append(materials, b)
 	}
-	return audit.NewKeyRing(c.Audit.KeyID, encoded, cpID, checkpoints)
+	// File providers override the environment value; main checks the resolved
+	// recovery bytes as well, before opening a public listener.
+	if c.Security.KeyProvider != "file" && c.Auth.RecoveryCodeKey != "" {
+		b, err := hex.DecodeString(c.Auth.RecoveryCodeKey)
+		if err != nil || len(b) != 32 {
+			return nil, errors.New("invalid recovery key encoding")
+		}
+		materials = append(materials, b)
+	}
+	if err := k.RejectSharedMaterial(materials...); err != nil {
+		return nil, err
+	}
+	return k, nil
 }
