@@ -226,6 +226,15 @@ func TestF03RealProductionServiceTransactions(t *testing.T) {
 			if before != after {
 				t.Fatal("session escaped rollback")
 			}
+			jti := uuid.NewString()
+			if err := svc.Logout(audit.WithActor(ctx, u.ID), "unknown-refresh", jti, "127.0.0.1"); !errors.Is(err, audit.ErrUnavailable) {
+				t.Fatal("idempotent logout JTI mutation lacked admission", err)
+			}
+			var revocations int64
+			mutationMust(t, db.Model(&models.AccessRevocation{}).Where("tenant_id = ? AND jti = ?", tid, jti).Count(&revocations).Error)
+			if revocations != 0 {
+				t.Fatal("logout JTI mutation escaped admission rollback")
+			}
 			if err := admin.LockUser(ctx, adminID, u.ID, time.Hour, "127.0.0.1"); !errors.Is(err, audit.ErrUnavailable) {
 				t.Fatal("admin returned success", err)
 			}

@@ -683,6 +683,11 @@ func (s *AuthService) logoutAudited(ctx context.Context, refreshToken, accessJTI
 		return fmt.Errorf("logout: find token: %w", err)
 	}
 	if rt == nil || rt.Revoked {
+		// Idempotent refresh-family handling still changed the caller's
+		// durable JTI state above. Admit that evidence in the same transaction.
+		if accessJTI != "" && s.audits != nil {
+			s.audits.Record(ctx, &models.AuditLog{Event: models.AuditEventAccessTokenRevoked, Success: true})
+		}
 		return nil
 	}
 	// A concurrent revocation (rotation race) also leaves the session dead —
