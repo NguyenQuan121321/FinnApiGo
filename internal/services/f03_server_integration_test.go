@@ -223,6 +223,10 @@ func TestF03ActualServerAdmissionAndStartup(t *testing.T) {
 	mutationMust(t, db.Model(&models.Session{}).Count(&before).Error)
 	mutationMust(t, db.Exec("CREATE TRIGGER f03_http_reject BEFORE INSERT ON audit_outboxes FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='F03 synthetic admission outage'").Error)
 	defer func() { mutationMust(t, db.Exec("DROP TRIGGER IF EXISTS f03_http_reject").Error) }()
+	// Keep the production 10-request/2-second public IP limit. The healthy
+	// matrix already used seven requests; start the outage matrix in its next
+	// window so a legitimate 429 does not mask admission behavior under test.
+	time.Sleep(2100 * time.Millisecond)
 	recoveryHTTP(503)
 	resp, raw = login()
 	if resp.StatusCode != 503 || bytes.Contains(raw, []byte("accessToken")) || !bytes.Contains(raw, []byte("durable audit unavailable")) {
