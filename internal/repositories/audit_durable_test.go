@@ -147,6 +147,22 @@ func TestAuditOperationRollsBackAndDenialsPersist(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatal("denial evidence lost")
 	}
+	for _, withSuccess := range []bool{false, true} {
+		err = r.AuditOperation(ctx, func(inner context.Context) error {
+			auditMust(t, users.Create(inner, &models.User{Username: "denied", Email: "denied@example.invalid"}))
+			if withSuccess {
+				r.Record(inner, &models.AuditLog{Event: "factor_validated", Success: true})
+			}
+			return denial
+		}, func(e error) bool { return errors.Is(e, denial) })
+		if !errors.Is(err, denial) {
+			t.Fatal(err)
+		}
+		auditMust(t, db.Model(&models.User{}).Where("username = ?", "denied").Count(&n).Error)
+		if n != 0 {
+			t.Fatal("denied issuance left partially prepared SQL state")
+		}
+	}
 	err = r.AuditOperation(ctx, func(inner context.Context) error {
 		r.Record(inner, &models.AuditLog{Event: "login"})
 		return errors.New("infrastructure error")

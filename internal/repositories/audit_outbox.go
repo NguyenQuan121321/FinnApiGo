@@ -31,7 +31,7 @@ func (r *AuditRepository) AuditOperation(ctx context.Context, fn func(context.Co
 		if failure := op.Failure(); failure != nil {
 			return audit.ErrUnavailable
 		}
-		if result != nil && !denial(result) {
+		if result != nil && (!denial(result) || !op.DenialMayCommit()) {
 			return result
 		}
 		return nil
@@ -56,7 +56,7 @@ func (r *AuditRepository) Admit(ctx context.Context, in *models.AuditLog) error 
 	if err != nil {
 		return audit.ErrUnavailable
 	}
-	return database.FromContext(ctx, r.db).Transaction(func(tx *gorm.DB) error {
+	err = database.FromContext(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		var old models.AuditOutbox
 		err := tx.Where("event_id = ?", e.EventID).First(&old).Error
 		if err == nil {
@@ -89,6 +89,12 @@ func (r *AuditRepository) Admit(ctx context.Context, in *models.AuditLog) error 
 		}
 		return tx.Model(&h).Updates(map[string]any{"sequence": seq, "hash": e.RecordHash, "pending": h.Pending + 1}).Error
 	})
+	if err == nil {
+		if op := database.CurrentOperation(ctx); op != nil {
+			op.Admitted(e.Success)
+		}
+	}
+	return err
 }
 
 const auditLease = 30 * time.Second

@@ -81,7 +81,7 @@ func TestCanonicalGoldenAndKeyLifecycle(t *testing.T) {
 }
 
 func TestKeysRejectInvalidAndCaptureTrust(t *testing.T) {
-	for _, value := range []string{"", "not-base64", base64.StdEncoding.EncodeToString([]byte("short")), base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32))), base64.StdEncoding.EncodeToString([]byte("audit-hash-chain-default-secret-32b"))} {
+	for _, value := range []string{"", "not-base64", base64.StdEncoding.EncodeToString([]byte("short")), base64.StdEncoding.EncodeToString([]byte(strings.Repeat("a", 32))), base64.StdEncoding.EncodeToString([]byte(strings.Repeat("ab", 16))), base64.StdEncoding.EncodeToString([]byte("audit-hash-chain-default-secret-32b"))} {
 		if _, err := NewKeys("k", map[string]string{"k": value}, testKey("cp")); err == nil {
 			t.Fatal("invalid key accepted")
 		}

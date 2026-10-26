@@ -150,6 +150,19 @@ func decodeKey(encoded string) ([]byte, error) {
 	if err != nil || len(b) < 32 || len(b) > 128 || bytes.Equal(b, bytes.Repeat(b[:min(1, len(b))], len(b))) || strings.Contains(strings.ToLower(string(b)), "default") || strings.Contains(strings.ToLower(string(b)), "secret") {
 		return nil, ErrUnavailable
 	}
+	// Match the authentication key convention: length alone must not accept
+	// a long, low-diversity guessable value such as a repeated two-byte word.
+	var seen [256]bool
+	var diversity int
+	for _, value := range b {
+		if !seen[value] {
+			seen[value] = true
+			diversity++
+		}
+	}
+	if diversity < 16 {
+		return nil, ErrUnavailable
+	}
 	return b, nil
 }
 
