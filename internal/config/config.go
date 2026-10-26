@@ -274,15 +274,16 @@ type WebAuthnConfig struct {
 
 // AuditConfig drives async audit logging (§7).
 type AuditConfig struct {
-	// BufferSize is the channel capacity; on overflow entries are dropped
-	// (never block a request). 0 => synchronous fallback.
+	KeyID, SigningKeys, CheckpointKey string
+	CheckpointKeyID, CheckpointKeys   string
+	MaxPending                        int
+	// BufferSize enables asynchronous delivery; RAM holds a coalesced wakeup.
+	// 0 requests synchronous delivery after durable admission.
 	BufferSize int
 	// FlushBatch is how many rows the worker inserts per DB round-trip.
 	FlushBatch int
-	// RetentionDays caps how long audit rows are kept (env
-	// AUDIT_RETENTION_DAYS): the cleanup job batch-deletes older rows. 0
-	// (default) keeps audit history forever. Audit rows contain PII (email,
-	// IP) — see the README retention note before enabling.
+	// RetentionDays is a legacy warning input only. A duration cannot authorize
+	// purge; archive/checkpoint/legal-hold policy is required (docs/audit.md).
 	RetentionDays int
 }
 
@@ -405,9 +406,15 @@ func Load() (*Config, error) {
 			AttestationPreference: l.env("WEBAUTHN_ATTESTATION", "none"),
 		},
 		Audit: AuditConfig{
-			BufferSize:    l.envInt("AUDIT_BUFFER_SIZE", 1024),
-			FlushBatch:    l.envInt("AUDIT_FLUSH_BATCH", 64),
-			RetentionDays: l.envInt("AUDIT_RETENTION_DAYS", 0),
+			CheckpointKeyID: l.env("AUDIT_CHECKPOINT_KEY_ID", "checkpoint-v1"),
+			CheckpointKeys:  l.env("AUDIT_CHECKPOINT_KEYS", ""),
+			KeyID:           l.env("AUDIT_KEY_ID", ""),
+			SigningKeys:     l.env("AUDIT_SIGNING_KEYS", ""),
+			CheckpointKey:   l.env("AUDIT_CHECKPOINT_KEY", ""),
+			MaxPending:      l.envInt("AUDIT_MAX_PENDING", 10000),
+			BufferSize:      l.envInt("AUDIT_BUFFER_SIZE", 1024),
+			FlushBatch:      l.envInt("AUDIT_FLUSH_BATCH", 64),
+			RetentionDays:   l.envInt("AUDIT_RETENTION_DAYS", 0),
 		},
 	}
 

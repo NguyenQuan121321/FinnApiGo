@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"log/slog"
 	"math"
 	"strconv"
@@ -310,7 +311,7 @@ func (s *AuthService) passwordBreached(ctx context.Context, pw string) bool {
 // Register creates a new user account: validates complexity, rejects duplicate
 // email/username, hashes the password, sends a verification email via the
 // notifier (§1.1 — token is NO LONGER returned in the API response).
-func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfile, error) {
+func (s *AuthService) registerAudited(ctx context.Context, in RegisterInput) (UserProfile, error) {
 	in.Username = strings.TrimSpace(in.Username)
 	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
 	emailLocalPart := ""
@@ -379,6 +380,7 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (UserProfi
 		return UserProfile{}, err
 	}
 
+	s.audits.Record(ctx, &models.AuditLog{UserID: &user.ID, Event: "registered", Success: true})
 	// §1.1 — Issue a verification JWT and deliver it via the notifier.
 	// The token is NEVER returned to the client — the user must prove
 	// control of their inbox to self-verify.
@@ -473,7 +475,7 @@ func (s *AuthService) shouldThrottleDuplicateRegisterAlert(email, ip string) boo
 // access + refresh token pair — unless the user has TOTP enabled, in which case
 // it returns a short-lived mfa_pending token and a nil TokenPair so the handler
 // can prompt for a second factor before issuing real tokens.
-func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+func (s *AuthService) loginAudited(ctx context.Context, in LoginInput, ip, ua string) (TokenPair, UserProfile, *MFAPendingResult, error) {
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 
 	// §3 — per-account login velocity limit: throttle repeated attempts against
@@ -572,7 +574,7 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 // issues the real access+refresh token pair and creates the session/device DB
 // record. The TOTP validation is delegated to the injected TOTPValidator,
 // reusing the exact same logic as the existing /totp/validate endpoint.
-func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginInput) (TokenPair, UserProfile, error) {
+func (s *AuthService) completeMFALoginAudited(ctx context.Context, in CompleteMFALoginInput) (TokenPair, UserProfile, error) {
 	if s.totpValidator == nil {
 		return TokenPair{}, UserProfile{}, ErrInvalidToken
 	}
@@ -589,6 +591,7 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 		return TokenPair{}, UserProfile{}, ErrInvalidToken
 	}
 
+	ctx = audit.WithActor(ctx, user.ID)
 	pair, err := s.issueTokenPair(ctx, user, in.IP, in.UA, "")
 	if err != nil {
 		return TokenPair{}, UserProfile{}, err
@@ -597,6 +600,7 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 		UserID: &user.ID, Email: user.Email, Event: models.AuditEventLogin,
 		IPAddress: in.IP, Success: true, Detail: "mfa-complete",
 	})
+	s.audits.Record(ctx, &models.AuditLog{UserID: &user.ID, Event: "token_issued", Success: true})
 	return pair, FromUser(user), nil
 }
 
@@ -610,10 +614,11 @@ func (s *AuthService) CompleteMFALogin(ctx context.Context, in CompleteMFALoginI
 //
 // auditDetail is an optional label for the audit row (e.g. "" for password,
 // "google-oauth" for Google sign-in).
-func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.User, ip, ua, auditDetail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+func (s *AuthService) checkMFAOrIssueTokensAudited(ctx context.Context, user *models.User, ip, ua, auditDetail string) (TokenPair, UserProfile, *MFAPendingResult, error) {
 	if user.AdminSuspended || !user.IsActive {
 		return TokenPair{}, UserProfile{}, nil, ErrAccountDisabled
 	}
+	ctx = audit.WithActor(ctx, user.ID)
 	// The password check passed — count the login as a credential success
 	// regardless of which branch below completes it (O3).
 	LoginSuccesses.Add(1)
@@ -634,6 +639,7 @@ func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.Us
 			if err != nil {
 				return TokenPair{}, UserProfile{}, nil, err
 			}
+			s.audits.Record(ctx, &models.AuditLog{UserID: &user.ID, Event: "mfa_pending", Success: true})
 			return TokenPair{}, UserProfile{}, &MFAPendingResult{
 				MFARequired: true,
 				MFAToken:    mfaToken,
@@ -641,6 +647,7 @@ func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.Us
 		}
 	}
 
+	ctx = audit.WithActor(ctx, user.ID)
 	pair, err := s.issueTokenPair(ctx, user, ip, ua, "")
 	if err != nil {
 		return TokenPair{}, UserProfile{}, nil, err
@@ -660,7 +667,7 @@ func (s *AuthService) CheckMFAOrIssueTokens(ctx context.Context, user *models.Us
 // accessJTI comes from AuthMiddleware's context; an empty value (legacy
 // token) degrades to refresh-token-only revocation. Idempotent — revoking an
 // already-revoked or unknown token is not an error, to avoid leaking state.
-func (s *AuthService) Logout(ctx context.Context, refreshToken, accessJTI, ip string) error {
+func (s *AuthService) logoutAudited(ctx context.Context, refreshToken, accessJTI, ip string) error {
 	// P0.2 — the caller's own access token dies NOW, regardless of what the
 	// refresh-token lookup below finds.
 	if s.accessRevoker != nil && accessJTI != "" {
@@ -712,7 +719,7 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken, accessJTI, ip st
 // a "sign out everywhere" action (§4) — and bumps the password version (A7)
 // so outstanding ACCESS tokens are rejected by AuthMiddleware immediately,
 // not at their exp (P0.2).
-func (s *AuthService) LogoutAll(ctx context.Context, userID uint, ip string) error {
+func (s *AuthService) logoutAllAudited(ctx context.Context, userID uint, ip string) error {
 	if err := s.tokens.RevokeAllForUser(ctx, userID); err != nil {
 		return err
 	}
@@ -740,7 +747,7 @@ func (s *AuthService) LogoutAll(ctx context.Context, userID uint, ip string) err
 // owner is notified. Legacy session-less rows fall back to the documented
 // global revocation. The caller's ip/ua are stamped onto the family and used
 // for audit events.
-func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) (TokenPair, error) {
+func (s *AuthService) refreshAudited(ctx context.Context, refreshToken, ip, ua string) (TokenPair, error) {
 	hash := hash.HashToken(refreshToken)
 	rt, err := s.tokens.FindByHash(ctx, hash)
 	if err != nil {
@@ -804,6 +811,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken, ip, ua string) 
 		}
 		return TokenPair{}, err
 	}
+	ctx = audit.WithActor(ctx, user.ID)
 	pair, err := s.issueTokenPair(ctx, user, ip, ua, rt.SessionID)
 	if err != nil {
 		return TokenPair{}, err
@@ -901,6 +909,9 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 	if err != nil {
 		return err
 	}
+	if err := admitBeforeExternal(ctx, s.audits, &models.AuditLog{UserID: &user.ID, Event: "password_reset_requested", Success: true}); err != nil {
+		return err
+	}
 	if err := s.notify.SendPasswordReset(ctx, email, resetToken); err != nil {
 		return fmt.Errorf("forgot-password: send: %w", err)
 	}
@@ -926,7 +937,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 //
 // All rate-limit trips and disposable rejections are recorded as audit events
 // (ASVS v4.0-7.3.1) for SOC visibility.
-func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) error {
+func (s *AuthService) resendVerifyEmailAudited(ctx context.Context, email, ip string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
 
 	// Layer 2 (§7.6.3) — GLOBAL volume cap: the only control that stops an
@@ -998,6 +1009,9 @@ func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) e
 	if err != nil {
 		return err
 	}
+	if err := admitBeforeExternal(ctx, s.audits, &models.AuditLog{UserID: &user.ID, Event: "verification_requested", Success: true}); err != nil {
+		return err
+	}
 	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {
 		return fmt.Errorf("resend-verify: send: %w", err)
 	}
@@ -1009,7 +1023,7 @@ func (s *AuthService) ResendVerifyEmail(ctx context.Context, email, ip string) e
 // ResetPassword verifies the reset JWT and sets the new password. The JWT
 // carries type=reset so it cannot be replayed as an access token.
 // §1.8 — single-use enforcement via jti (SetNX).
-func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, ip string) error {
+func (s *AuthService) resetPasswordAudited(ctx context.Context, in ResetPasswordInput, ip string) error {
 	claims, err := s.jwt.Verify(in.Token)
 	if err != nil || claims.Type != jwt.TokenTypeReset {
 		return ErrInvalidToken
@@ -1067,7 +1081,7 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput, 
 
 // ChangePassword verifies the old password before accepting the new one, then
 // revokes all existing refresh tokens (so all other sessions must log in again).
-func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput, ip string) error {
+func (s *AuthService) changePasswordAudited(ctx context.Context, in ChangePasswordInput, ip string) error {
 	user, err := s.users.FindByID(ctx, in.UserID)
 	if err != nil {
 		return err
@@ -1128,7 +1142,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, in ChangePasswordInput
 // usable password is hard-rejected so this endpoint can never become a
 // change-password bypass. The guard lives in the SERVICE layer (not only in
 // the handler) so any future caller of this method inherits the protection.
-func (s *AuthService) SetPassword(ctx context.Context, userID uint, newPassword, ip string) error {
+func (s *AuthService) setPasswordAudited(ctx context.Context, userID uint, newPassword, ip string) error {
 	user, err := s.users.FindByID(ctx, userID)
 	if err != nil {
 		return err
@@ -1220,7 +1234,7 @@ func (s *AuthService) GetUserAuditLog(ctx context.Context, userID uint, page, li
 // RequestChangeEmail initiates the email change ceremony (P1.2).
 // Verifies password, validates disposable-email and collision checks,
 // stages a 1h token in the store, sends verification to new email, and alert to old email.
-func (s *AuthService) RequestChangeEmail(ctx context.Context, userID uint, in ChangeEmailRequestInput, ip string) error {
+func (s *AuthService) requestChangeEmailAudited(ctx context.Context, userID uint, in ChangeEmailRequestInput, ip string) error {
 	user, err := s.users.FindByID(ctx, userID)
 	if err != nil {
 		return err
@@ -1287,28 +1301,21 @@ func (s *AuthService) RequestChangeEmail(ctx context.Context, userID uint, in Ch
 		s.store.Set(storeKey, payload, time.Hour)
 	}
 
+	if err := admitBeforeExternal(ctx, s.audits, &models.AuditLog{UserID: &user.ID, Event: models.AuditEventEmailChangeRequested, Success: true}); err != nil {
+		return err
+	}
 	if s.notify != nil {
 		_ = s.notify.SendEmailVerification(ctx, newEmail, token)
 		_ = s.notify.SendSecurityAlert(ctx, user.Email, "email_change_requested", fmt.Sprintf("A request was made to change your email address to %s. If you did not make this request, secure your account immediately.", newEmail))
 	}
 
-	if s.audits != nil {
-		s.audits.Record(ctx, &models.AuditLog{
-			UserID:    &user.ID,
-			Email:     user.Email,
-			Event:     models.AuditEventEmailChangeRequested,
-			IPAddress: ip,
-			Success:   true,
-			Detail:    "staged change to " + newEmail,
-		})
-	}
 	return nil
 }
 
 // ConfirmChangeEmail completes the email change ceremony (P1.2).
 // Consumes the staged token, re-checks collision, updates the email in DB,
 // revokes all existing sessions/tokens, bumps pwd_version, and sends confirmation to old email.
-func (s *AuthService) ConfirmChangeEmail(ctx context.Context, token, ip string) error {
+func (s *AuthService) confirmChangeEmailAudited(ctx context.Context, token, ip string) error {
 	if s.store == nil || token == "" {
 		return ErrInvalidToken
 	}
@@ -1405,7 +1412,7 @@ func (s *AuthService) verifySudoOrPassword(ctx context.Context, user *models.Use
 // Gated by sudo token or password.
 // Sets is_active=false, revokes refresh tokens and sessions, bumps pwd_version,
 // and denylists the caller's access token jti.
-func (s *AuthService) DeactivateAccount(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error {
+func (s *AuthService) deactivateAccountAudited(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error {
 	user, err := s.users.FindByID(ctx, userID)
 	if err != nil {
 		return err
@@ -1452,7 +1459,7 @@ func (s *AuthService) DeactivateAccount(ctx context.Context, userID uint, sudoTo
 // Anonymizes email and username, clears password and full name, deletes
 // TOTP rows and recovery codes, unlinks OAuth identities, anonymizes audit email,
 // revokes all sessions/tokens, bumps pwd_version, and denylists caller's access token.
-func (s *AuthService) EraseAccount(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error {
+func (s *AuthService) eraseAccountAudited(ctx context.Context, userID uint, sudoToken, password, accessJTI, ip string) error {
 	user, err := s.users.FindByID(ctx, userID)
 	if err != nil {
 		return err
@@ -1526,7 +1533,7 @@ func (s *AuthService) EraseAccount(ctx context.Context, userID uint, sudoToken, 
 
 // VerifyEmail accepts a type=verify-email JWT and marks the account verified.
 // §1.8 — single-use enforcement via jti (SetNX).
-func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) error {
+func (s *AuthService) verifyEmailAudited(ctx context.Context, in EmailVerifyInput) error {
 	claims, err := s.jwt.Verify(in.Token)
 	if err != nil || claims.Type != jwt.TokenTypeEmailVerify {
 		return ErrInvalidToken
@@ -1549,7 +1556,11 @@ func (s *AuthService) VerifyEmail(ctx context.Context, in EmailVerifyInput) erro
 		return err
 	}
 
-	return s.users.SetEmailVerified(ctx, user, true)
+	if err := s.users.SetEmailVerified(ctx, user, true); err != nil {
+		return err
+	}
+	s.audits.Record(audit.WithActor(ctx, user.ID), &models.AuditLog{UserID: &user.ID, Event: "email_verified", Success: true})
+	return nil
 }
 
 // ----- internal helpers -----
@@ -1790,7 +1801,7 @@ func (s *AuthService) ListSessions(ctx context.Context, userID uint, currentSID 
 // defense). The whole family dies together: the session row, its
 // refresh-token chain, and — via the sid denylist — its outstanding ACCESS
 // tokens (P0.2/P0.3).
-func (s *AuthService) RevokeSession(ctx context.Context, sessionID string, userID uint, ip string) error {
+func (s *AuthService) revokeSessionAudited(ctx context.Context, sessionID string, userID uint, ip string) error {
 	if s.sessions == nil {
 		// Legacy fallback: refresh-token rows as sessions (P0.3 pre-migration).
 		id, err := strconv.ParseUint(sessionID, 10, 64)
@@ -2109,13 +2120,15 @@ func loginFailedEvent(uid *uint, email, ip, detail string) *models.AuditLog {
 // issuance path a password login uses — including the SAME account-state
 // gate: a disabled account can never mint sessions here, exactly like it
 // cannot via password, OAuth, or refresh.
-func (s *AuthService) IssuePasskeyTokenPair(ctx context.Context, user *models.User, ip, ua string) (TokenPair, UserProfile, error) {
+func (s *AuthService) issuePasskeyTokenPairAudited(ctx context.Context, user *models.User, ip, ua string) (TokenPair, UserProfile, error) {
 	if !user.IsActive || user.AdminSuspended {
 		return TokenPair{}, UserProfile{}, ErrAccountDisabled
 	}
+	ctx = audit.WithActor(ctx, user.ID)
 	pair, err := s.issueTokenPair(ctx, user, ip, ua, "")
 	if err != nil {
 		return TokenPair{}, UserProfile{}, err
 	}
+	s.audits.Record(ctx, &models.AuditLog{UserID: &user.ID, Event: "token_issued", Success: true})
 	return pair, FromUser(user), nil
 }

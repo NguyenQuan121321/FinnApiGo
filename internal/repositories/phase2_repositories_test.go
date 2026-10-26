@@ -21,7 +21,7 @@ func testPhase2DB(t *testing.T) *gorm.DB {
 		&models.Tenant{},
 		&models.User{},
 		&models.Session{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.Permission{},
 		&models.Role{},
 		&models.RolePermission{},
@@ -290,7 +290,7 @@ func TestUserRepository_ListPaginatedAndSetLock(t *testing.T) {
 func TestAuditRepository_VerifyChainAndStreaming(t *testing.T) {
 	ctx := tenant.WithTenant(context.Background(), "tenant-audit")
 	db := testPhase2DB(t)
-	repo := NewAuditRepository(db, WithAuditHMACKey([]byte("test-audit-hmac-key-32-chars!")))
+	repo := NewAuditRepository(db, WithAuditKeys(durableKeys(t, "k1", "k1")))
 
 	uID := uint(1)
 	repo.Record(ctx, &models.AuditLog{

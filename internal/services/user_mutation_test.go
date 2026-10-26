@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ import (
 // session check, login and persistence operation uses the production adapters.
 type interleavedUsers struct {
 	*repositories.UserRepository
-	afterRead func()
+	afterRead func(context.Context)
 }
 
 func (r *interleavedUsers) FindByID(ctx context.Context, id uint) (*models.User, error) {
@@ -36,7 +37,7 @@ func (r *interleavedUsers) FindByID(ctx context.Context, id uint) (*models.User,
 	if err == nil && u != nil && r.afterRead != nil {
 		f := r.afterRead
 		r.afterRead = nil
-		f()
+		f(ctx)
 	}
 	return u, err
 }
@@ -49,7 +50,7 @@ func mutationDB(t *testing.T) *gorm.DB {
 	mutationMust(t, err)
 	conn.SetMaxOpenConns(1)
 	t.Cleanup(func() { mutationMust(t, conn.Close()) })
-	mutationMust(t, db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.Session{}, &models.AccessRevocation{}, &models.Tenant{}, &models.AuditLog{}, &models.UsedToken{}, &models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.UserRole{}))
+	mutationMust(t, db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.Session{}, &models.AccessRevocation{}, &models.Tenant{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}, &models.UsedToken{}, &models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.UserRole{}))
 	return db
 }
 
@@ -106,16 +107,17 @@ func runStaleUserMutations(t *testing.T, db *gorm.DB, kv interface {
 					mutationMust(t, err)
 					mutationMust(t, a.Check(ctx, claims))
 					var authoritative *models.User
-					interleave := func() {
+					interleave := func(ctx context.Context) {
+						mutationDB := database.FromContext(ctx, db)
 						switch transition {
 						case "suspend":
 							mutationMust(t, a.Suspend(ctx, u.ID))
 						case "grant":
 							role := &models.Role{TenantID: tid, Name: "repair-" + id}
-							mutationMust(t, db.Create(role).Error)
+							mutationMust(t, mutationDB.Create(role).Error)
 							permission := &models.Permission{Name: "repair:" + id}
-							mutationMust(t, db.Create(permission).Error)
-							mutationMust(t, db.Create(&models.RolePermission{RoleID: role.ID, PermissionID: permission.ID}).Error)
+							mutationMust(t, mutationDB.Create(permission).Error)
+							mutationMust(t, mutationDB.Create(&models.RolePermission{RoleID: role.ID, PermissionID: permission.ID}).Error)
 							mutationMust(t, rbac.AssignRoleToUser(ctx, u.ID, role.ID))
 						case "credential":
 							password = "ChangedSynthetic42!"
@@ -123,7 +125,7 @@ func runStaleUserMutations(t *testing.T, db *gorm.DB, kv interface {
 							mutationMust(t, err)
 							mutationMust(t, users.CredentialChangeTx(ctx, u.ID, h, func(tx *gorm.DB) error { return sessions.RevokeAllForUserTx(tx, u.ID) }))
 						case "inactive":
-							mutationMust(t, db.Model(&models.User{}).Where("id = ?", u.ID).Update("is_active", false).Error)
+							mutationMust(t, mutationDB.Model(&models.User{}).Where("id = ?", u.ID).Update("is_active", false).Error)
 						case "lockout":
 							until := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 							mutationMust(t, users.IncrementFailedAttempts(ctx, u, &until))
@@ -136,12 +138,20 @@ func runStaleUserMutations(t *testing.T, db *gorm.DB, kv interface {
 					if operation == "email" {
 						token := uuid.NewString()
 						kv.Set("change_email:"+token, fmt.Sprintf("%d:%s:%s", u.ID, u.Email, newEmail), time.Minute)
-						wrapped.afterRead = interleave
+						// SQLite serializes on one connection. The stale-snapshot write
+						// regression stays identical; real MySQL retains an independent commit.
+						wrapped.afterRead = func(inner context.Context) {
+							if db.Name() == "sqlite" {
+								interleave(inner)
+							} else {
+								interleave(ctx)
+							}
+						}
 						mutationMust(t, svc.ConfirmChangeEmail(ctx, token, "127.0.0.1"))
 					} else {
 						stale, err := users.FindByID(ctx, u.ID)
 						mutationMust(t, err)
-						interleave()
+						interleave(ctx)
 						stale.FullName = "" // an intentional zero value must persist.
 						mutationMust(t, users.Update(ctx, stale))
 					}
@@ -291,7 +301,12 @@ func runMutationOwnership(t *testing.T, db *gorm.DB) {
 			svc := NewAuthService(wrapped, repositories.NewRefreshTokenRepository(db), repositories.NewUsedTokenRepository(db), repositories.NewAuditRepository(db), kv, m, config.AuthConfig{}, config.RateLimitConfig{}, config.JWTConfig{}, &mockNotifier{}, nil, nil, nil, nil, WithSessionRepo(repositories.NewSessionRepository(db)))
 			victim := &models.User{Username: uuid.NewString(), Email: uuid.NewString() + "@example.invalid", Password: "hash", IsActive: true, IsEmailVerified: true, FullName: "Name"}
 			mutationMust(t, users.Create(ctx, victim))
-			wrapped.afterRead = func() { mutationMust(t, (&identity.Authority{DB: db}).Suspend(ctx, victim.ID)) }
+			wrapped.afterRead = func(inner context.Context) {
+				if db.Name() != "sqlite" {
+					inner = ctx
+				}
+				mutationMust(t, (&identity.Authority{DB: db}).Suspend(inner, victim.ID))
+			}
 			sudo, err := m.Issue(victim.ID, "user", victim.Email, jwt.TokenTypeSudo, time.Minute)
 			mutationMust(t, err)
 			if operation == "deactivate" {

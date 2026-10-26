@@ -5,6 +5,7 @@ package middleware
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"log/slog"
 	"strings"
 
@@ -167,6 +168,7 @@ func AuthMiddleware(jwtMgr *jwt.JWTManager, pwdVersion VersionSource, opts ...Au
 			}
 		}
 		c.Set(CtxUserID, claims.UserID)
+		c.Request = c.Request.WithContext(audit.WithActor(c.Request.Context(), claims.UserID))
 		c.Set(CtxRole, claims.Role)
 		c.Set(CtxEmail, claims.Email)
 		c.Set(CtxJTI, claims.ID)

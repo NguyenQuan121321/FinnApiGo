@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"gorm.io/gorm"
 	"time"
@@ -16,7 +17,7 @@ func (r *TOTPRepository) Upsert(ctx context.Context, d *models.TOTPDevice) error
 		return err
 	}
 	if d.ID == 0 {
-		return r.db.WithContext(ctx).Create(d).Error
+		return database.FromContext(ctx, r.db).Create(d).Error
 	}
 	return updateScoped(ownedRows(r.db, ctx).Model(&models.TOTPDevice{}).Where("id = ? AND user_id = ?", d.ID, d.UserID).Select("*").Omit("id", "user_id", "created_at"), d)
 }
@@ -58,7 +59,7 @@ func (r *TOTPRepository) ReplaceRecoveryCodes(ctx context.Context, userID uint, 
 			return gorm.ErrRecordNotFound
 		}
 	}
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return database.FromContext(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := ownedRows(tx, ctx).Where("user_id = ?", userID).Delete(&models.RecoveryCode{}).Error; err != nil {
 			return err
 		}

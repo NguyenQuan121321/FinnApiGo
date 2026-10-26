@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"time"
 
 	"gorm.io/gorm"
@@ -22,7 +23,7 @@ func (r *RefreshTokenRepository) Create(ctx context.Context, rt *models.RefreshT
 	if err := requireOwner(r.db, ctx, rt.UserID); err != nil {
 		return err
 	}
-	return r.db.WithContext(ctx).Create(rt).Error
+	return database.FromContext(ctx, r.db).Create(rt).Error
 }
 
 // FindByHash returns the refresh-token row matching the given hash, or nil.
@@ -121,7 +122,7 @@ func (r *RefreshTokenRepository) RevokeAllForUserTx(tx *gorm.DB, userID uint) er
 // delete streams (expired first, then revoked) so a large backlog never
 // holds long locks (P1).
 func (r *RefreshTokenRepository) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
-	db := r.db.WithContext(ctx) // Internal maintenance only; no HTTP route.
+	db := database.FromContext(ctx, r.db) // Internal maintenance only; no HTTP route.
 	expired, err := batchedDelete(db, &models.RefreshToken{}, "expires_at < ?", before)
 	if err != nil {
 		return expired, err

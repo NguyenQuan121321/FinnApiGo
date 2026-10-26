@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"time"
 
 	"gorm.io/gorm"
@@ -23,7 +24,7 @@ func (r *TrustedDeviceRepository) Create(ctx context.Context, d *models.TrustedD
 	if err := requireOwner(r.db, ctx, d.UserID); err != nil {
 		return err
 	}
-	return r.db.WithContext(ctx).Create(d).Error
+	return database.FromContext(ctx, r.db).Create(d).Error
 }
 
 func (r *TrustedDeviceRepository) FindByDeviceHash(ctx context.Context, hash string) (*models.TrustedDevice, error) {

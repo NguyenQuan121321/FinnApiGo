@@ -2,6 +2,7 @@ package repositories
 
 import (
 	"context"
+	"github.com/finnapigo/finnapigo/internal/database"
 
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/tenant"
@@ -11,13 +12,13 @@ import (
 // ownedRows scopes tables without tenant_id through their authoritative owner.
 // Caller-supplied object IDs never select a different tenant.
 func ownedRows(db *gorm.DB, ctx context.Context) *gorm.DB {
-	return db.WithContext(ctx).Where("user_id IN (?)", db.WithContext(ctx).
+	return database.FromContext(ctx, db).Where("user_id IN (?)", database.FromContext(ctx, db).
 		Model(&models.User{}).Select("id").Where("tenant_id = ?", tenant.FromContext(ctx)))
 }
 
 func requireOwner(db *gorm.DB, ctx context.Context, userID uint) error {
 	var count int64
-	if err := db.WithContext(ctx).Model(&models.User{}).
+	if err := database.FromContext(ctx, db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).Count(&count).Error; err != nil {
 		return err
 	}

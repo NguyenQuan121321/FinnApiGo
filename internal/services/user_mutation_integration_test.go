@@ -47,7 +47,7 @@ func TestF02RealUserMutations(t *testing.T) {
 	mutationMust(t, database.RunMigrations(cfg.FormatDSN()))
 	version, dirty, err := database.MigrationsVersion(cfg.FormatDSN())
 	mutationMust(t, err)
-	if version != 5 || dirty {
+	if version != 6 || dirty {
 		t.Fatalf("migration version=%d dirty=%v", version, dirty)
 	}
 	db, err := gorm.Open(mysqldriver.Open(cfg.FormatDSN()), &gorm.Config{Logger: logger.Discard})

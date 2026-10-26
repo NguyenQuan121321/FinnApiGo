@@ -3,6 +3,7 @@ package routes
 
 import (
 	"context"
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"log/slog"
 	"net/http"
 	"time"
@@ -350,12 +351,11 @@ func readyz(db *gorm.DB) gin.HandlerFunc {
 func requestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
-		// Propagate or generate X-Request-ID (§7).
-		requestID := c.GetHeader("X-Request-ID")
-		if requestID == "" {
-			requestID = generateRequestID()
-		}
+		// Generate trusted correlation; a client header cannot impersonate a
+		// prior request or inject unbounded log/signature material.
+		requestID := generateRequestID()
 		c.Set("request_id", requestID)
+		c.Request = c.Request.WithContext(audit.WithCorrelation(c.Request.Context(), requestID))
 		c.Header("X-Request-ID", requestID)
 
 		c.Next()

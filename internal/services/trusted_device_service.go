@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"time"
 
 	"github.com/finnapigo/finnapigo/internal/models"
@@ -30,19 +31,24 @@ type TrustedDeviceInfo struct {
 
 // TrustedDeviceService manages 30-day "remember me" device tokens (P2.4).
 type TrustedDeviceService struct {
-	repo TrustedDeviceRepo
-	ttl  time.Duration
+	repo   TrustedDeviceRepo
+	audits AuditRepo
+	ttl    time.Duration
 }
 
-func NewTrustedDeviceService(repo TrustedDeviceRepo) *TrustedDeviceService {
+func NewTrustedDeviceService(repo TrustedDeviceRepo, audits ...AuditRepo) *TrustedDeviceService {
+	var writer AuditRepo
+	if len(audits) > 0 {
+		writer = audits[0]
+	}
 	return &TrustedDeviceService{
-		repo: repo,
-		ttl:  30 * 24 * time.Hour, // 30 days
+		repo: repo, audits: writer,
+		ttl: 30 * 24 * time.Hour, // 30 days
 	}
 }
 
 // Issue creates a new trusted device token and persists its SHA-256 hash.
-func (s *TrustedDeviceService) Issue(ctx context.Context, userID uint, deviceName, ip string) (string, time.Time, error) {
+func (s *TrustedDeviceService) issueAudited(ctx context.Context, userID uint, deviceName, ip string) (string, time.Time, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", time.Time{}, err
@@ -66,11 +72,14 @@ func (s *TrustedDeviceService) Issue(ctx context.Context, userID uint, deviceNam
 			return "", time.Time{}, err
 		}
 	}
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{UserID: &userID, Event: "trusted_device_issued", Success: true})
+	}
 	return token, expiresAt, nil
 }
 
 // Validate checks whether a provided device token is valid and unrevoked for the user.
-func (s *TrustedDeviceService) Validate(ctx context.Context, userID uint, token string) (bool, error) {
+func (s *TrustedDeviceService) validateAudited(ctx context.Context, userID uint, token string) (bool, error) {
 	if s.repo == nil || token == "" {
 		return false, nil
 	}
@@ -84,6 +93,9 @@ func (s *TrustedDeviceService) Validate(ctx context.Context, userID uint, token 
 	}
 
 	_ = s.repo.TouchUsage(ctx, d.ID, time.Now())
+	if s.audits != nil {
+		s.audits.Record(audit.WithActor(ctx, userID), &models.AuditLog{UserID: &userID, Event: models.AuditEventTrustedDeviceUsed, Success: true})
+	}
 	return true, nil
 }
 
@@ -112,14 +124,49 @@ func (s *TrustedDeviceService) ListByUser(ctx context.Context, userID uint) ([]T
 }
 
 // Revoke revokes a trusted device by id for the owning user.
-func (s *TrustedDeviceService) Revoke(ctx context.Context, id, userID uint) error {
+func (s *TrustedDeviceService) revokeAudited(ctx context.Context, id, userID uint) error {
 	if s.repo == nil {
 		return nil
 	}
-	return s.repo.Revoke(ctx, id, userID)
+	if err := s.repo.Revoke(ctx, id, userID); err != nil {
+		return err
+	}
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{UserID: &userID, Event: models.AuditEventTrustedDeviceRevoked, Success: true})
+	}
+	return nil
 }
 
 func hashDeviceToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+func (s *TrustedDeviceService) Issue(ctx context.Context, userID uint, deviceName, ip string) (string, time.Time, error) {
+	var token string
+	var expires time.Time
+	err := runAuditOperation(ctx, s.audits, func(inner context.Context) error {
+		var err error
+		token, expires, err = s.issueAudited(inner, userID, deviceName, ip)
+		return err
+	})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token, expires, nil
+}
+func (s *TrustedDeviceService) Validate(ctx context.Context, userID uint, token string) (bool, error) {
+	var valid bool
+	err := runAuditOperation(ctx, s.audits, func(inner context.Context) error {
+		var err error
+		valid, err = s.validateAudited(inner, userID, token)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return valid, nil
+}
+func (s *TrustedDeviceService) Revoke(ctx context.Context, id, userID uint) error {
+	return runAuditOperation(ctx, s.audits, func(inner context.Context) error { return s.revokeAudited(inner, id, userID) })
 }

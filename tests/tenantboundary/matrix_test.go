@@ -31,7 +31,7 @@ func TestF01LocalMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.Session{}, &models.RefreshToken{}, &models.AuditLog{}, &models.PasskeyCredential{}, &models.TrustedDevice{}, &models.OAuthIdentity{}, &models.TOTPDevice{}, &models.RecoveryCode{}, &models.Role{}, &models.Permission{}, &models.UserRole{}, &models.RolePermission{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.Session{}, &models.RefreshToken{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}, &models.PasskeyCredential{}, &models.TrustedDevice{}, &models.OAuthIdentity{}, &models.TOTPDevice{}, &models.RecoveryCode{}, &models.Role{}, &models.Permission{}, &models.UserRole{}, &models.RolePermission{}); err != nil {
 		t.Fatal(err)
 	}
 	runF01Matrix(t, db)
@@ -92,7 +92,7 @@ func runF01Matrix(t *testing.T, db *gorm.DB) {
 		if err := totp.Upsert(ctx, &models.TOTPDevice{UserID: u.ID, Secret: "fixture", Enabled: true}); err != nil {
 			t.Fatal(err)
 		}
-		audits.Record(ctx, &models.AuditLog{UserID: &u.ID, Event: "fixture", Detail: "canary-" + tid})
+		audits.Record(ctx, &models.AuditLog{UserID: &u.ID, Event: "canary-" + tid})
 	}
 	issue := func(t *testing.T, tid, role string, perms []string) string {
 		t.Helper()

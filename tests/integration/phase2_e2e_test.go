@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func setupPhase2DB(t *testing.T) *gorm.DB {
 		&models.Tenant{},
 		&models.User{},
 		&models.Session{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.Permission{},
 		&models.Role{},
 		&models.RolePermission{},
@@ -138,8 +139,7 @@ func TestE2E_Phase2_RBAC(t *testing.T) {
 
 func TestE2E_Phase2_AuditHashChainingAndTamperDetection(t *testing.T) {
 	db := setupPhase2DB(t)
-	secret := []byte("cryptographic-audit-ledger-test-key-32b")
-	auditRepo := repositories.NewAuditRepository(db, repositories.WithAuditHMACKey(secret))
+	auditRepo := repositories.NewAuditRepository(db, repositories.WithAuditKeys(audit.EphemeralKeys()))
 	ctx := tenant.WithTenant(context.Background(), "security-org")
 
 	// 1. Record series of audit entries
@@ -163,7 +163,7 @@ func TestE2E_Phase2_AuditHashChainingAndTamperDetection(t *testing.T) {
 	// 3. Tamper with the 2nd record directly in the database!
 	var secondRecord models.AuditLog
 	db.Where("tenant_id = ? AND event = ?", "security-org", "password_changed").First(&secondRecord)
-	db.Model(&secondRecord).Update("detail", "TAMPERED_CONTENT_INJECTED")
+	db.Model(&secondRecord).Update("event", "tampered")
 
 	// 4. Chain verification MUST FAIL and detect the tamper!
 	validTampered, err := auditRepo.VerifyChain(ctx, "security-org")

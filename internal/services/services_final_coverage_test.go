@@ -40,7 +40,7 @@ func TestTOTPService_ComprehensiveBranches(t *testing.T) {
 		&models.TOTPDevice{},
 		&models.RecoveryCode{},
 		&models.PasskeyCredential{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 	)
 
 	userRepo := repositories.NewUserRepository(db)
@@ -1100,7 +1100,7 @@ func TestOAuthService_UnlinkAndLink(t *testing.T) {
 		&models.User{},
 		&models.OAuthIdentity{},
 		&models.PasskeyCredential{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 	)
 
 	userRepo := repositories.NewUserRepository(db)
@@ -1238,7 +1238,7 @@ func TestAdminService_UnlockAndForceLogout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.User{}, &models.Session{}, &models.RefreshToken{}, &models.AuditLog{})
+	_ = db.AutoMigrate(&models.User{}, &models.Session{}, &models.RefreshToken{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{})
 	users := repositories.NewUserRepository(db)
 	sessions := repositories.NewSessionRepository(db)
 	tokens := repositories.NewRefreshTokenRepository(db)
@@ -1438,7 +1438,7 @@ func TestServices_Final_SprintTo90(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.Session{},
 		&models.OAuthIdentity{},
 		&models.PasskeyCredential{},
@@ -1789,7 +1789,7 @@ func TestServices_Final_OverTheTop(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.Session{},
 		&models.UsedToken{},
 		&models.OAuthIdentity{},

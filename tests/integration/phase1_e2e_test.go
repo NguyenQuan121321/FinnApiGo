@@ -33,7 +33,7 @@ func TestE2E_Phase1_UserLifecycle(t *testing.T) {
 		&models.User{},
 		&models.RefreshToken{},
 		&models.Session{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.TOTPDevice{},
 		&models.RecoveryCode{},
 		&models.PasskeyCredential{},

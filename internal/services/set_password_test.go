@@ -34,7 +34,7 @@ func newSQLiteAuthService(t *testing.T) (*AuthService, *gorm.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}); err != nil {
 		t.Fatal(err)
 	}
 	svc := NewAuthService(

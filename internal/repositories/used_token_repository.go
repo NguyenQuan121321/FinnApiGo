@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"time"
 
 	"gorm.io/gorm"
@@ -27,7 +28,7 @@ func (r *UsedTokenRepository) MarkUsed(ctx context.Context, jti, tokenType strin
 	row := &models.UsedToken{
 		JTI: jti, TokenType: tokenType, UserID: userID, ExpiresAt: exp,
 	}
-	err := r.db.WithContext(ctx).Create(row).Error
+	err := database.FromContext(ctx, r.db).Create(row).Error
 	if err != nil {
 		if isGormDuplicate(err) {
 			return false, nil
@@ -40,7 +41,7 @@ func (r *UsedTokenRepository) MarkUsed(ctx context.Context, jti, tokenType strin
 // IsUsed reports whether the jti has been consumed.
 func (r *UsedTokenRepository) IsUsed(ctx context.Context, jti string) (bool, error) {
 	var row models.UsedToken
-	err := r.db.WithContext(ctx).Where("jti = ?", jti).First(&row).Error
+	err := database.FromContext(ctx, r.db).Where("jti = ?", jti).First(&row).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, nil
@@ -55,5 +56,5 @@ func (r *UsedTokenRepository) IsUsed(ctx context.Context, jti string) (bool, err
 // forever is pointless. Deletes run in LIMIT-batched statements against the
 // expires_at index (P1).
 func (r *UsedTokenRepository) PurgeExpired(ctx context.Context, before time.Time) (int64, error) {
-	return batchedDelete(r.db.WithContext(ctx), &models.UsedToken{}, "expires_at < ?", before)
+	return batchedDelete(database.FromContext(ctx, r.db), &models.UsedToken{}, "expires_at < ?", before)
 }

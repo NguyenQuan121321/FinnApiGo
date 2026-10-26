@@ -85,6 +85,10 @@ func run() error {
 	}
 	defer func() { _ = setupTracing(context.Background()) }()
 
+	auditKeys, err := cfg.AuditKeys()
+	if err != nil {
+		return err
+	}
 	// G1 — release mode must acknowledge the audit PII retention policy.
 	if msg := auditRetentionWarning(cfg); msg != "" {
 		slog.Warn(msg)
@@ -111,7 +115,7 @@ func run() error {
 		slog.Warn("MIGRATE_AUTO=true — running GORM AutoMigrate at boot (dev escape hatch; production must use cmd/migrate)")
 		if err := db.AutoMigrate(
 			&models.User{}, &models.RefreshToken{}, &models.Session{}, &models.AccessRevocation{},
-			&models.AuditLog{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
+			&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}, &models.UsedToken{}, &models.TOTPDevice{}, &models.RecoveryCode{},
 			&models.OAuthIdentity{}, &models.PasskeyCredential{},
 		); err != nil {
 			return errors.Join(errors.New("auto-migrate failed"), err)
@@ -122,8 +126,11 @@ func run() error {
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
 	sessionRepo := repositories.NewSessionRepository(db)
-	baseAuditRepo := repositories.NewAuditRepository(db)
-	// auditRepo buffers audit writes on a background worker; it is closed
+	baseAuditRepo := repositories.NewAuditRepository(db, repositories.WithAuditKeys(auditKeys), repositories.WithAuditCapacity(cfg.Audit.MaxPending))
+	if err := baseAuditRepo.ValidateKeyHistory(context.Background()); err != nil {
+		return err
+	}
+	// auditRepo durably admits events before success; it is closed
 	// explicitly in the shutdown sequence (NOT deferred) so the flush is
 	// ordered before the DB pool close. Boot-failure returns below bypass the
 	// flush, but those paths have served no traffic yet.
@@ -287,7 +294,7 @@ func run() error {
 
 	// --- Enterprise Repositories & Services (Phase 2) ---
 	trustedDeviceRepo := repositories.NewTrustedDeviceRepository(db)
-	trustedDeviceSvc := services.NewTrustedDeviceService(trustedDeviceRepo)
+	trustedDeviceSvc := services.NewTrustedDeviceService(trustedDeviceRepo, auditRepo)
 	trustedDeviceHandler := handlers.NewTrustedDeviceHandler(trustedDeviceSvc)
 
 	webhookRepo := repositories.NewWebhookRepository(db)
@@ -454,7 +461,7 @@ func auditRetentionWarning(cfg *config.Config) string {
 	if cfg.Server.GinMode != gin.ReleaseMode || cfg.Audit.RetentionDays > 0 {
 		return ""
 	}
-	return "audit retention: AUDIT_RETENTION_DAYS is unset in release mode — audit rows (PII: email, IP) are kept forever; set a retention window (see README PII/retention policy)"
+	return "audit retention: AUDIT_RETENTION_DAYS is unset in release mode — automatic purge is disabled pending approved policy, legal hold and archive/checkpoint retention (see docs/audit.md)"
 }
 
 // validateMetricsPolicy enforces P0.6 / X1: in release mode, either METRICS_ADDR
@@ -475,7 +482,7 @@ func startJobs(
 	cfg *config.Config,
 	tokenRepo *repositories.RefreshTokenRepository,
 	usedTokenRepo *repositories.UsedTokenRepository,
-	auditRepo *repositories.AuditRepository,
+	_ *repositories.AuditRepository,
 	kv store.Store,
 ) (stop func()) {
 	const (
@@ -490,14 +497,9 @@ func startJobs(
 		if n, err := usedTokenRepo.PurgeExpired(ctx, now); err == nil && n > 0 {
 			slog.Info("cleanup: purged expired used tokens", "count", n)
 		}
-		if cfg.Audit.RetentionDays > 0 {
-			cutoff := now.AddDate(0, 0, -cfg.Audit.RetentionDays)
-			if n, err := auditRepo.PurgeOlderThan(ctx, cutoff); err == nil && n > 0 {
-				slog.Info("cleanup: purged audit rows past retention", "days", cfg.Audit.RetentionDays, "count", n)
-			} else if err != nil {
-				slog.Error("cleanup: audit retention purge failed", "err", err)
-			}
-		}
+		// F03: no automatic audit purge. A duration alone is not an
+		// approved archive/legal-hold/backup-expiry policy (H03).
+
 	}
 	switch {
 	case cfg.Server.RunJobs != nil && *cfg.Server.RunJobs:

@@ -2,7 +2,10 @@ package services
 
 import (
 	"context"
+	"github.com/finnapigo/finnapigo/internal/audit"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -35,7 +38,24 @@ const flushTimeout = 10 * time.Second
 
 // AsyncAuditWriter wraps an AuditRepo to provide asynchronous, non-blocking
 // buffered writes. It satisfies the AuditRepo interface.
+type durableAuditStore interface {
+	Admit(context.Context, *models.AuditLog) error
+	Dispatch(context.Context, int) (int, error)
+	AuditOperation(context.Context, func(context.Context) error, func(error) bool) error
+}
+
+var AuditAdmissions atomic.Int64
+var AuditAdmissionFailures atomic.Int64
+var AuditDelivered atomic.Int64
+var AuditDeliveryFailures atomic.Int64
+var AuditWakeupCoalesced atomic.Int64
+var AuditBacklogPending atomic.Int64
+var AuditBacklogDead atomic.Int64
+var AuditOldestAgeSeconds atomic.Int64
+
 type AsyncAuditWriter struct {
+	durable    durableAuditStore
+	closeOnce  sync.Once
 	repo       AuditRepo
 	inserter   BatchInserter
 	buffer     chan *models.AuditLog
@@ -49,6 +69,12 @@ type AsyncAuditWriter struct {
 // NewAsyncAuditWriter creates a new AsyncAuditWriter. If cfg.BufferSize is 0,
 // it falls back to synchronous mode.
 func NewAsyncAuditWriter(repo AuditRepo, inserter BatchInserter, cfg config.AuditConfig) *AsyncAuditWriter {
+	if durable, ok := repo.(durableAuditStore); ok {
+		w := &AsyncAuditWriter{repo: repo, inserter: inserter, durable: durable, syncMode: cfg.BufferSize <= 0, buffer: make(chan *models.AuditLog, 1), flushBatch: min(max(cfg.FlushBatch, 1), 1000), stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+		go w.durableWorker()
+		return w
+	}
+
 	if cfg.BufferSize <= 0 {
 		return &AsyncAuditWriter{
 			repo:     repo,
@@ -82,6 +108,25 @@ func NewAsyncAuditWriter(repo AuditRepo, inserter BatchInserter, cfg config.Audi
 // drained channel — straggler handlers that finish after srv.Shutdown keep
 // producing audit rows, and they must not die for it.
 func (w *AsyncAuditWriter) Record(ctx context.Context, entry *models.AuditLog) {
+	if w.durable != nil {
+		err := w.durable.Admit(ctx, entry)
+		if err != nil {
+			AuditAdmissionFailures.Add(1)
+			if op := database.CurrentOperation(ctx); op != nil {
+				op.Fail(audit.ErrUnavailable)
+			}
+			slog.Error("audit admission failed", "code", "admission_unavailable")
+			return
+		}
+		AuditAdmissions.Add(1)
+		if w.syncMode && database.CurrentOperation(ctx) == nil {
+			_, _ = w.durable.Dispatch(ctx, 1000)
+		} else {
+			w.wakeup()
+		}
+		return
+	}
+
 	copyEntry := *entry
 	copyEntry.TenantID = tenant.FromContext(ctx)
 	entry = &copyEntry
@@ -195,15 +240,15 @@ func (w *AsyncAuditWriter) Buffered() int {
 // shutdown forever (the orchestrator would SIGKILL and the buffered rows
 // would be lost anyway; a loud log beats a silent hang).
 func (w *AsyncAuditWriter) Close() {
-	if w.syncMode {
+	if w.syncMode && w.durable == nil {
 		return
 	}
 	w.closing.Store(true)
-	close(w.stopCh)
+	w.closeOnce.Do(func() { close(w.stopCh) })
 	select {
 	case <-w.doneCh:
 	case <-time.After(closeWaitTimeout):
-		slog.Error("audit worker did not drain in time — buffered entries may be lost",
+		slog.Error("audit worker did not drain in time — pending events remain in durable outbox",
 			"buffered", len(w.buffer))
 	}
 }
@@ -233,4 +278,57 @@ func (w *AsyncAuditWriter) StreamAll(ctx context.Context, tenantID string) ([]mo
 		return nil, nil
 	}
 	return w.repo.StreamAll(ctx, tenantID)
+}
+
+// AuditOperation propagates admission and commit failures to real service callers.
+func (w *AsyncAuditWriter) AuditOperation(ctx context.Context, fn func(context.Context) error, denial func(error) bool) error {
+	if w.durable == nil {
+		return fn(ctx)
+	}
+	err := w.durable.AuditOperation(database.WithAsyncDelivery(ctx), fn, denial)
+	w.wakeup()
+	return err
+}
+func (w *AsyncAuditWriter) wakeup() {
+	select {
+	case w.buffer <- nil:
+	default:
+		AuditWakeupCoalesced.Add(1)
+	}
+}
+func (w *AsyncAuditWriter) durableWorker() {
+	defer close(w.doneCh)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	flush := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
+		defer cancel()
+		n, err := w.durable.Dispatch(ctx, w.flushBatch)
+		if stats, ok := w.durable.(interface {
+			OutboxStats(context.Context) (int64, int64, time.Duration, error)
+		}); ok {
+			pending, dead, age, statsErr := stats.OutboxStats(ctx)
+			if statsErr == nil {
+				AuditBacklogPending.Store(pending)
+				AuditBacklogDead.Store(dead)
+				AuditOldestAgeSeconds.Store(int64(age.Seconds()))
+			}
+		}
+		AuditDelivered.Add(int64(n))
+		if err != nil {
+			AuditDeliveryFailures.Add(1)
+			slog.Error("audit delivery deferred", "code", "delivery_failed")
+		}
+	}
+	for {
+		select {
+		case <-ticker.C:
+			flush()
+		case <-w.buffer:
+			flush()
+		case <-w.stopCh:
+			flush()
+			return
+		}
+	}
 }

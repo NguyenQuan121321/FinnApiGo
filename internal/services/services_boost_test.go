@@ -433,7 +433,7 @@ func TestAsyncAuditWriter_Coverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.AuditLog{})
+	_ = db.AutoMigrate(&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{})
 	repo := repositories.NewAuditRepository(db)
 
 	wReal := NewAsyncAuditWriter(repo, repo, config.AuditConfig{})
@@ -465,7 +465,7 @@ func TestAuthService_Me_CurrentPwdVersion_ListSessions_RevokeSession(t *testing.
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 		&models.PasskeyCredential{},
@@ -637,7 +637,7 @@ func TestAuthService_AdvancedBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.UsedToken{}, &models.Session{})
+	_ = db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}, &models.UsedToken{}, &models.Session{})
 
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
@@ -761,7 +761,7 @@ func TestAdminService_AllMethods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.Session{})
+	_ = db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}, &models.Session{})
 
 	userRepo := repositories.NewUserRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
@@ -880,7 +880,7 @@ func TestAuthService_CoreLifecycleFlows(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 		&models.TOTPDevice{},
@@ -1091,7 +1091,7 @@ func TestAuthService_Deactivate_And_EraseAccount(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 		&models.TOTPDevice{},
@@ -1227,7 +1227,7 @@ func TestAuthService_RefreshBranches(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 		&models.TOTPDevice{},
@@ -1432,7 +1432,7 @@ func TestAuthService_SetPassword_Branches(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 	)
 	userRepo := repositories.NewUserRepository(db)
@@ -1509,7 +1509,7 @@ func TestOAuthService_FullLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.User{}, &models.OAuthIdentity{}, &models.PasskeyCredential{}, &models.AuditLog{})
+	_ = db.AutoMigrate(&models.User{}, &models.OAuthIdentity{}, &models.PasskeyCredential{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{})
 
 	userRepo := repositories.NewUserRepository(db)
 	oauthRepo := repositories.NewOAuthIdentityRepository(db)
@@ -1633,7 +1633,7 @@ func TestPasskeyService_FullLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.User{}, &models.PasskeyCredential{}, &models.AuditLog{})
+	_ = db.AutoMigrate(&models.User{}, &models.PasskeyCredential{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{})
 
 	userRepo := repositories.NewUserRepository(db)
 	passkeyRepo := repositories.NewPasskeyRepository(db)
@@ -1920,7 +1920,7 @@ func TestAuthService_Logout_And_LogoutAll_Comprehensive(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 	)
@@ -2076,7 +2076,7 @@ func TestAuthService_ConfirmChangeEmail_Comprehensive(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 	)
@@ -2168,7 +2168,7 @@ func TestAuthService_InternalHelpers_Comprehensive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.User{}, &models.UsedToken{}, &models.RefreshToken{}, &models.Session{}, &models.AuditLog{})
+	_ = db.AutoMigrate(&models.User{}, &models.UsedToken{}, &models.RefreshToken{}, &models.Session{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{})
 	userRepo := repositories.NewUserRepository(db)
 	usedTokenRepo := repositories.NewUsedTokenRepository(db)
 	tokenRepo := repositories.NewRefreshTokenRepository(db)
@@ -2288,7 +2288,7 @@ func TestOAuthService_HandleCallback_Branches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.User{}, &models.OAuthIdentity{}, &models.PasskeyCredential{}, &models.AuditLog{})
+	_ = db.AutoMigrate(&models.User{}, &models.OAuthIdentity{}, &models.PasskeyCredential{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{})
 
 	userRepo := repositories.NewUserRepository(db)
 	oauthRepo := repositories.NewOAuthIdentityRepository(db)
@@ -2456,7 +2456,7 @@ func TestAsyncAuditWriter_Buffered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = db.AutoMigrate(&models.AuditLog{})
+	_ = db.AutoMigrate(&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{})
 	repo := repositories.NewAuditRepository(db)
 
 	// Sync mode writer
@@ -2526,7 +2526,7 @@ func TestServices_Comprehensive_Push90(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 		&models.TOTPDevice{},
@@ -2781,7 +2781,7 @@ func TestServices_Final_PushTo90(t *testing.T) {
 	_ = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.Session{},
 		&models.TOTPDevice{},

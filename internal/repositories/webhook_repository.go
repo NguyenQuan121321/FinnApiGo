@@ -2,6 +2,7 @@ package repositories
 
 import (
 	"context"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"strings"
 	"time"
 
@@ -25,7 +26,7 @@ func (r *WebhookRepository) CreateEndpoint(ctx context.Context, ep *models.Webho
 		return err
 	}
 	ep.TenantID = tid
-	return r.db.WithContext(ctx).Create(ep).Error
+	return database.FromContext(ctx, r.db).Create(ep).Error
 }
 
 func (r *WebhookRepository) FindActiveEndpointsByEvent(ctx context.Context, tenantID, event string) ([]models.WebhookEndpoint, error) {
@@ -35,7 +36,7 @@ func (r *WebhookRepository) FindActiveEndpointsByEvent(ctx context.Context, tena
 		return nil, err
 	}
 	var endpoints []models.WebhookEndpoint
-	err = r.db.WithContext(ctx).
+	err = database.FromContext(ctx, r.db).
 		Where("tenant_id = ? AND is_active = ?", tenantID, true).
 		Find(&endpoints).Error
 	if err != nil {
@@ -56,13 +57,13 @@ func (r *WebhookRepository) FindActiveEndpointsByEvent(ctx context.Context, tena
 }
 
 func (r *WebhookRepository) CreateDelivery(ctx context.Context, d *models.WebhookDelivery) error {
-	return r.db.WithContext(ctx).Create(d).Error
+	return database.FromContext(ctx, r.db).Create(d).Error
 }
 
 func (r *WebhookRepository) GetPendingDeliveries(ctx context.Context, limit int) ([]models.WebhookDelivery, error) {
 	var deliveries []models.WebhookDelivery
 	now := time.Now()
-	err := r.db.WithContext(ctx).
+	err := database.FromContext(ctx, r.db).
 		Where("status = ? AND (next_retry_at IS NULL OR next_retry_at <= ?)", "pending", now).
 		Order("created_at ASC").
 		Limit(limit).
@@ -79,7 +80,7 @@ func (r *WebhookRepository) UpdateDeliveryStatus(ctx context.Context, id string,
 		"error_msg":       errMsg,
 		"updated_at":      time.Now(),
 	}
-	return r.db.WithContext(ctx).Model(&models.WebhookDelivery{}).
+	return database.FromContext(ctx, r.db).Model(&models.WebhookDelivery{}).
 		Where("id = ?", id).
 		Updates(updates).Error
 }

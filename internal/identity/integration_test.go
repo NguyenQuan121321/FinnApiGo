@@ -49,7 +49,7 @@ func TestF02RealAdapters(t *testing.T) {
 	must(t, database.RunMigrations(cfg.FormatDSN()))
 	v, dirty, err := database.MigrationsVersion(cfg.FormatDSN())
 	must(t, err)
-	if dirty || v != 5 {
+	if dirty || v != 6 {
 		t.Fatalf("version=%d dirty=%v", v, dirty)
 	}
 	db, err := gorm.Open(mysqldriver.Open(cfg.FormatDSN()), &gorm.Config{Logger: logger.Discard})
