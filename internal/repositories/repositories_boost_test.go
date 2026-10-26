@@ -23,7 +23,7 @@ func fullTestDB(t *testing.T) *gorm.DB {
 	err = db.AutoMigrate(
 		&models.User{},
 		&models.RefreshToken{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.UsedToken{},
 		&models.OAuthIdentity{},
 		&models.PasskeyCredential{},
@@ -357,8 +357,7 @@ func TestRepositories_NotFoundAndEdgeBranches(t *testing.T) {
 func TestAuditRepository_Advanced(t *testing.T) {
 	ctx := context.Background()
 	db := fullTestDB(t)
-	customKey := []byte("custom-secret-key-for-test-32bytes!")
-	repo := NewAuditRepository(db, WithAuditHMACKey(customKey))
+	repo := NewAuditRepository(db, WithAuditKeys(durableKeys(t, "k1", "k1")))
 
 	// 1. VerifyChain on empty tenant
 	ok, err := repo.VerifyChain(tenant.WithTenant(ctx, "empty-tenant"), "empty-tenant")
@@ -412,7 +411,7 @@ func TestAuditRepository_Advanced(t *testing.T) {
 
 	// 6. PurgeOlderThan
 	purged, err := repo.PurgeOlderThan(ctx, time.Now().Add(-time.Hour))
-	if err != nil || purged != 0 {
+	if err == nil || purged != 0 {
 		t.Fatalf("PurgeOlderThan unexpected: purged=%d, err=%v", purged, err)
 	}
 
@@ -931,7 +930,7 @@ func TestRepositories_ExtraCoverage(t *testing.T) {
 	}
 
 	// 5. AuditRepository with empty hmacKey and already-set RecordHash
-	noKeyRepo := NewAuditRepository(db, WithAuditHMACKey(nil))
+	noKeyRepo := NewAuditRepository(db, WithAuditKeys(durableKeys(t, "k1", "k1")))
 	noKeyRepo.Record(ctx, &models.AuditLog{
 		Event:      models.AuditEventLogin,
 		RecordHash: "precomputed",

@@ -159,6 +159,10 @@ func TestV1CrossLanguageContract(t *testing.T) {
 	if _, _, err := jwtlib.NewParser().ParseUnverified(token, &payload); err != nil {
 		t.Fatal(err)
 	}
+	// Pin both implementations to the actual issuance second. Wall time
+	// crossing a second must not turn the +31s negative into valid +30s skew.
+	now = time.Unix(int64(payload["iat"].(float64)), 0)
+	m.now = func() time.Time { return now }
 	fixtures := []contractFixture{}
 	add := func(name, tok, tid, aud string, want bool) {
 		t.Helper()

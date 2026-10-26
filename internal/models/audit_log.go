@@ -37,10 +37,10 @@ const (
 )
 
 // AuditLog records security-relevant actions for compliance / forensics.
-// Writing here is best-effort: an audit failure must never break a request.
+// Version 0 is legacy/unverifiable. Version 1 is admitted transactionally.
 type AuditLog struct {
 	ID         uint      `gorm:"primaryKey"                     json:"id"`
-	TenantID   string    `gorm:"size:36;not null;default:default;index" json:"tenantId"`
+	TenantID   string    `gorm:"size:36;not null;default:default;index;uniqueIndex:ux_audit_sequence,priority:1" json:"tenantId"`
 	UserID     *uint     `gorm:"index"                          json:"userId"` // nil if pre-auth
 	Email      string    `gorm:"size:255"                       json:"email"`  // identity hint pre-login
 	Event      string    `gorm:"size:40;index;not null"         json:"event"`
@@ -50,6 +50,14 @@ type AuditLog struct {
 	PrevHash   string    `gorm:"size:64"                        json:"prevHash,omitempty"`   // P2.6 hash-chain
 	RecordHash string    `gorm:"size:64"                        json:"recordHash,omitempty"` // P2.6 tamper-evident HMAC
 	CreatedAt  time.Time `gorm:"index"                          json:"createdAt"`
+	Version    uint      `gorm:"not null;default:0" json:"version"`
+	EventID    string    `gorm:"size:36;default:null;uniqueIndex" json:"eventId,omitempty"`
+	Sequence   *uint64   `gorm:"uniqueIndex:ux_audit_sequence,priority:2" json:"sequence,omitempty"`
+	KeyID      string    `gorm:"size:64" json:"keyId,omitempty"`
+	ActorKind  string    `gorm:"size:20" json:"actorKind,omitempty"`
+	ActorID    uint      `json:"actorId,omitempty"`
+	RequestID  string    `gorm:"size:36" json:"requestId,omitempty"`
+	Action     string    `gorm:"size:40" json:"action,omitempty"`
 }
 
 func (AuditLog) TableName() string { return "audit_logs" }

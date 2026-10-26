@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 
 	"gorm.io/gorm"
 
@@ -22,7 +23,7 @@ func NewRBACRepository(db *gorm.DB) *RBACRepository {
 // ListPermissions returns all available system permissions.
 func (r *RBACRepository) ListPermissions(ctx context.Context) ([]models.Permission, error) {
 	var perms []models.Permission
-	err := r.db.WithContext(ctx).Order("name ASC").Find(&perms).Error
+	err := database.FromContext(ctx, r.db).Order("name ASC").Find(&perms).Error
 	return perms, err
 }
 
@@ -34,7 +35,7 @@ func (r *RBACRepository) CreateRole(ctx context.Context, role *models.Role, perm
 	}
 	role.TenantID = tid
 
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return database.FromContext(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(role).Error; err != nil {
 			return err
 		}
@@ -60,7 +61,7 @@ func (r *RBACRepository) CreateRole(ctx context.Context, role *models.Role, perm
 
 // AssignRoleToUser associates a role with a user.
 func (r *RBACRepository) AssignRoleToUser(ctx context.Context, userID, roleID uint) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return database.FromContext(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := requireOwner(tx, ctx, userID); err != nil {
 			return err
 		}
@@ -79,7 +80,7 @@ func (r *RBACRepository) AssignRoleToUser(ctx context.Context, userID, roleID ui
 // GetUserPermissions returns all permission names granted to a user across all their roles.
 func (r *RBACRepository) GetUserPermissions(ctx context.Context, userID uint) ([]string, error) {
 	var permNames []string
-	err := r.db.WithContext(ctx).Table("permissions").
+	err := database.FromContext(ctx, r.db).Table("permissions").
 		Joins("JOIN role_permissions ON role_permissions.permission_id = permissions.id").
 		Joins("JOIN user_roles ON user_roles.role_id = role_permissions.role_id").
 		Joins("JOIN users ON users.id = user_roles.user_id").
@@ -94,7 +95,7 @@ func (r *RBACRepository) GetUserPermissions(ctx context.Context, userID uint) ([
 // UserHasPermission checks whether a user holds a specific permission name.
 func (r *RBACRepository) UserHasPermission(ctx context.Context, userID uint, permission string) (bool, error) {
 	var count int64
-	err := r.db.WithContext(ctx).Table("permissions").
+	err := database.FromContext(ctx, r.db).Table("permissions").
 		Joins("JOIN role_permissions ON role_permissions.permission_id = permissions.id").
 		Joins("JOIN user_roles ON user_roles.role_id = role_permissions.role_id").
 		Joins("JOIN users ON users.id = user_roles.user_id").

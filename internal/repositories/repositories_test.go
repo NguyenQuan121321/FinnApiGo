@@ -29,7 +29,7 @@ func testDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.UsedToken{}, &models.OAuthIdentity{}, &models.PasskeyCredential{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}, &models.UsedToken{}, &models.OAuthIdentity{}, &models.PasskeyCredential{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -451,15 +451,15 @@ func TestAuditRepository_PurgeOlderThan_R4(t *testing.T) {
 	defer func() { purgeBatchSize = prev }()
 
 	n, err := repo.PurgeOlderThan(ctx, time.Now().Add(-90*24*time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 3 {
-		t.Fatalf("purged %d rows, want 3", n)
+	if err == nil || n != 0 {
+		t.Fatalf("unapproved purge accepted: rows=%d err=%v", n, err)
 	}
 	var remaining int64
-	db.Model(&models.AuditLog{}).Count(&remaining)
-	if remaining != 2 {
-		t.Fatalf("remaining = %d, want 2 (recent rows survive)", remaining)
+	if err := db.Model(&models.AuditLog{}).Count(&remaining).Error; err != nil {
+		t.Fatal(err)
 	}
+	if remaining != 5 {
+		t.Fatalf("unapproved purge changed history: rows=%d", remaining)
+	}
+
 }

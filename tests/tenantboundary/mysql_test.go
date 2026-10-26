@@ -56,7 +56,7 @@ func TestF01MySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 	version, dirty, err := database.MigrationsVersion(cfg.FormatDSN())
-	if err != nil || dirty || version != 5 {
+	if err != nil || dirty || version != 6 {
 		t.Fatalf("migration state: version=%d dirty=%v err=%v", version, dirty, err)
 	}
 	db, err := gorm.Open(gormmysql.Open(cfg.FormatDSN()), &gorm.Config{Logger: logger.Discard})

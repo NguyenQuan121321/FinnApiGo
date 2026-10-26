@@ -1,6 +1,7 @@
 package services
 
 import (
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"log/slog"
 
 	"context"
@@ -126,7 +127,7 @@ func NewTOTPService(repo TOTPRepo, store store.Store, audits AuditRepo, issuer s
 // stolen access token alone can neither rotate nor disable MFA. A device that
 // was never confirmed (disabled) rotates freely, matching first-time
 // enrollment.
-func (s *TOTPService) Enable(ctx context.Context, userID uint, email, sudoToken string) (string, string, error) {
+func (s *TOTPService) enableAudited(ctx context.Context, userID uint, email, sudoToken string) (string, string, error) {
 	if !s.acquireRotationLock(userID) {
 		return "", "", ErrRateLimited
 	}
@@ -164,6 +165,9 @@ func (s *TOTPService) Enable(ctx context.Context, userID uint, email, sudoToken 
 	if err = s.repo.Upsert(ctx, d); err != nil {
 		return "", "", err
 	}
+	if s.audits != nil {
+		s.audits.Record(ctx, &models.AuditLog{UserID: &userID, Event: "totp_staged", Success: true})
+	}
 	return key.Secret(), key.URL(), nil
 }
 
@@ -191,7 +195,7 @@ func (s *TOTPService) verifySudoToken(token string, userID uint) error {
 // SHA-256 hashes (for login verification) and an AES-256-GCM sealed copy (for
 // the TOTP-gated view endpoint) persist. Issuing a fresh batch also replaces
 // any codes left over from a previous enrollment.
-func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string) ([]string, error) {
+func (s *TOTPService) verifyEnableAudited(ctx context.Context, userID uint, code string) ([]string, error) {
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return nil, err
 	}
@@ -258,7 +262,7 @@ func (s *TOTPService) VerifyEnable(ctx context.Context, userID uint, code string
 // 6-digit TOTP code (validated against the secret, with replay protection) or
 // a recovery code (verified by SHA-256 + constant-time compare, marked used on
 // success). The 6-digit path is intentionally separated so it can stay cheap.
-func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) error {
+func (s *TOTPService) validateAudited(ctx context.Context, userID uint, code string) error {
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return err
 	}
@@ -326,7 +330,7 @@ func (s *TOTPService) Validate(ctx context.Context, userID uint, code string) er
 // code would then reveal all its siblings. On success the caller (handler
 // layer) also mints a short-lived sudo token so follow-up sensitive actions
 // (regenerating) don't re-prompt within the sudo window.
-func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code string) ([]string, error) {
+func (s *TOTPService) viewRecoveryCodesAudited(ctx context.Context, userID uint, code string) ([]string, error) {
 	if err := s.guardBruteForce(ctx, userID); err != nil {
 		return nil, err
 	}
@@ -377,7 +381,7 @@ func (s *TOTPService) ViewRecoveryCodes(ctx context.Context, userID uint, code s
 // The fresh plaintext codes are returned once. This method performs NO TOTP
 // check itself: the HTTP layer gates it behind sudo mode, which requires a
 // verified TOTP-derived token bound to the same user.
-func (s *TOTPService) RegenerateRecoveryCodes(ctx context.Context, userID uint) ([]string, error) {
+func (s *TOTPService) regenerateRecoveryCodesAudited(ctx context.Context, userID uint) ([]string, error) {
 	d, err := s.repo.FindByUserID(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -397,7 +401,7 @@ func (s *TOTPService) RegenerateRecoveryCodes(ctx context.Context, userID uint) 
 // Disable turns off TOTP for the user (P1.1).
 // Requires either a valid sudo token (X-Sudo-Token) OR current password + (TOTP code or recovery code).
 // Disables device, deletes recovery codes, bumps pwd_version, records audit, and sends email alert.
-func (s *TOTPService) Disable(ctx context.Context, userID uint, sudoToken, password, code, ip string) error {
+func (s *TOTPService) disableAudited(ctx context.Context, userID uint, sudoToken, password, code, ip string) error {
 	device, err := s.repo.FindByUserID(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("totp disable: find device: %w", err)
@@ -599,7 +603,7 @@ func (s *TOTPService) recordSuccess(ctx context.Context, userID uint, event, det
 		return
 	}
 	uid := userID
-	s.audits.Record(ctx, &models.AuditLog{
+	s.audits.Record(audit.WithActor(ctx, userID), &models.AuditLog{
 		UserID: &uid, Event: event, Success: true, Detail: detail,
 		CreatedAt: time.Now(),
 	})

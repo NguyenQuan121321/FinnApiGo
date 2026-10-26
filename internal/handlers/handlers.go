@@ -5,6 +5,7 @@ package handlers
 
 import (
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -57,6 +58,8 @@ func statusForError(err error) (int, string) {
 		return http.StatusConflict, err.Error()
 	case errors.Is(err, services.ErrOAuthCodeExchangeFailed), errors.Is(err, services.ErrOAuthTokenVerificationFailed):
 		return http.StatusBadGateway, err.Error()
+	case errors.Is(err, audit.ErrUnavailable):
+		return http.StatusServiceUnavailable, "durable audit unavailable"
 	case errors.Is(err, services.ErrIdentityUnavailable):
 		return http.StatusServiceUnavailable, "identity state unavailable"
 	case errors.Is(err, services.ErrRateLimited):

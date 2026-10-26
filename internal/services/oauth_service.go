@@ -272,7 +272,7 @@ func pkceVerifier() (string, error) {
 // enforces email_verified, links or creates the local user account, and
 // delegates MFA enforcement + token issuance to the shared TokenIssuer — the
 // exact same path as password Login.
-func (s *OAuthService) HandleCallback(ctx context.Context, code, state, ip, ua string) (TokenPair, UserProfile, *MFAPendingResult, error) {
+func (s *OAuthService) handleCallbackAudited(ctx context.Context, code, state, ip, ua string) (TokenPair, UserProfile, *MFAPendingResult, error) {
 	// ---- 1. Consume the CSRF state BEFORE any network exchange ----
 	challenge, err := s.ConsumeState(ctx, state)
 	if err != nil {
@@ -450,7 +450,7 @@ func (s *OAuthService) linkIdentity(ctx context.Context, user *models.User, clai
 
 // Unlink disconnects an OAuth provider from the user's account (P1.6).
 // Refuses if this is the user's only login method without a usable password.
-func (s *OAuthService) Unlink(ctx context.Context, userID uint, provider, ip string) error {
+func (s *OAuthService) unlinkAudited(ctx context.Context, userID uint, provider, ip string) error {
 	existing, err := s.oauthIdents.FindByUserIDAndProvider(ctx, userID, provider)
 	if err != nil {
 		return err

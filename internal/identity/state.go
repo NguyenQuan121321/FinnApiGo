@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"slices"
 	"time"
 
@@ -49,7 +50,7 @@ func (a *Authority) Check(ctx context.Context, c *jwt.Claims) error {
 	if revoked {
 		return ErrInactive
 	}
-	return a.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return database.FromContext(ctx, a.DB).Transaction(func(tx *gorm.DB) error {
 		var u models.User
 		if err := tx.Where("id = ? AND tenant_id = ?", c.UserID, c.TenantID).First(&u).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -107,7 +108,7 @@ func (a *Authority) RevokeAccess(ctx context.Context, jti string, exp time.Time)
 	if jti == "" {
 		return ErrInactive
 	}
-	return a.DB.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&models.AccessRevocation{
+	return database.FromContext(ctx, a.DB).Clauses(clause.OnConflict{DoNothing: true}).Create(&models.AccessRevocation{
 		TenantID: tenant.FromContext(ctx), JTI: jti, ExpiresAt: exp,
 	}).Error
 }
@@ -116,7 +117,7 @@ func (a *Authority) RevokeAccess(ctx context.Context, jti string, exp time.Time)
 // exposed as a new public admin API or a claim of complete refresh containment.
 func (a *Authority) Suspend(ctx context.Context, uid uint) error {
 	tid := tenant.FromContext(ctx)
-	return a.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return database.FromContext(ctx, a.DB).Transaction(func(tx *gorm.DB) error {
 		r := tx.Model(&models.User{}).Where("id = ? AND tenant_id = ?", uid, tid).Updates(map[string]any{
 			"admin_suspended": true, "auth_epoch": gorm.Expr("auth_epoch + 1"), "pwd_version": gorm.Expr("pwd_version + 1"),
 		})

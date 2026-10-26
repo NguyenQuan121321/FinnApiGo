@@ -139,7 +139,7 @@ func (s *passkeyService) BeginRegistration(ctx context.Context, userID uint, in 
 // the library) and persists the credential. The raw request body IS the
 // WebAuthn attestation response — the library is its parser, so the handler
 // forwards c.Request unbound (the global body-size cap still applies).
-func (s *passkeyService) FinishRegistration(ctx context.Context, userID uint, r *http.Request) (*models.PasskeyCredential, error) {
+func (s *passkeyService) finishRegistrationAudited(ctx context.Context, userID uint, r *http.Request) (*models.PasskeyCredential, error) {
 	var staged regSession
 	if err := s.takeJSON(ctx, regSessionKey(userID), &staged); err != nil {
 		return nil, err
@@ -343,7 +343,7 @@ func (s *passkeyService) BeginAuthentication(ctx context.Context, userID uint) (
 
 // FinishAuthentication verifies the assertion against the stored credential,
 // enforces sign-count clone detection, and issues a standard token pair.
-func (s *passkeyService) FinishAuthentication(ctx context.Context, userID uint, r *http.Request) (*PasskeyAuthResult, error) {
+func (s *passkeyService) finishAuthenticationAudited(ctx context.Context, userID uint, r *http.Request) (*PasskeyAuthResult, error) {
 	if s.tokens == nil {
 		return nil, ErrPasskeyNotConfigured
 	}
@@ -402,7 +402,7 @@ func (s *passkeyService) List(ctx context.Context, userID uint) ([]models.Passke
 
 // Revoke removes a credential from active use (user-initiated device
 // removal). The row stays for clone forensics; IDOR scoping is in the repo.
-func (s *passkeyService) Revoke(ctx context.Context, id, userID uint) error {
+func (s *passkeyService) revokeAudited(ctx context.Context, id, userID uint) error {
 	if err := s.repo.RevokeByID(ctx, id, userID); err != nil {
 		return ErrSessionNotFound // uniform "no such device" semantics
 	}

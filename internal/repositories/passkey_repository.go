@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"time"
 
 	"gorm.io/gorm"
@@ -28,7 +29,7 @@ func (r *PasskeyRepository) Create(ctx context.Context, pc *models.PasskeyCreden
 	if err := requireOwner(r.db, ctx, pc.UserID); err != nil {
 		return err
 	}
-	return r.db.WithContext(ctx).Create(pc).Error
+	return database.FromContext(ctx, r.db).Create(pc).Error
 }
 
 // FindByCredentialID returns the credential row with the given ID, or nil

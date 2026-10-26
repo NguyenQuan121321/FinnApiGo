@@ -6,6 +6,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 
 	"github.com/finnapigo/finnapigo/internal/models"
 	"gorm.io/gorm"
@@ -28,7 +29,7 @@ func (r *OAuthIdentityRepository) Create(ctx context.Context, identity *models.O
 	if err := requireOwner(r.db, ctx, identity.UserID); err != nil {
 		return err
 	}
-	return r.db.WithContext(ctx).Create(identity).Error
+	return database.FromContext(ctx, r.db).Create(identity).Error
 }
 
 // FindByProviderAndProviderUserID returns the identity row matching the given

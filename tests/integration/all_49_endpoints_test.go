@@ -66,7 +66,7 @@ func TestAll49Endpoints(t *testing.T) {
 		&models.RefreshToken{},
 		&models.UsedToken{},
 		&models.Session{},
-		&models.AuditLog{},
+		&models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{},
 		&models.TOTPDevice{},
 		&models.RecoveryCode{},
 		&models.PasskeyCredential{},
@@ -166,10 +166,10 @@ func TestAll49Endpoints(t *testing.T) {
 		ID:           "sess-admin",
 		UserID:       adminUser.ID,
 		TenantID:     "default",
-		IPAddress:  "127.0.0.1",
-		UserAgent:  "integration-test",
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-		CreatedAt:  time.Now(),
+		IPAddress:    "127.0.0.1",
+		UserAgent:    "integration-test",
+		ExpiresAt:    time.Now().Add(24 * time.Hour),
+		CreatedAt:    time.Now(),
 		LastActiveAt: time.Now(),
 	})
 

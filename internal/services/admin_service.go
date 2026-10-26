@@ -77,7 +77,7 @@ func (s *AdminService) ListUsers(ctx context.Context, page, limit int, search st
 }
 
 // LockUser locks a user account for lockDuration.
-func (s *AdminService) LockUser(ctx context.Context, adminID, targetUserID uint, lockDuration time.Duration, ip string) error {
+func (s *AdminService) lockUserAudited(ctx context.Context, adminID, targetUserID uint, lockDuration time.Duration, ip string) error {
 	if adminID == targetUserID {
 		return ErrCannotLockSelf
 	}
@@ -101,19 +101,20 @@ func (s *AdminService) LockUser(ctx context.Context, adminID, targetUserID uint,
 	if s.audits != nil {
 		s.audits.Record(ctx, &models.AuditLog{
 			TenantID:  tenant.FromContext(ctx),
-			UserID:    &adminID,
+			UserID:    &targetUserID,
 			Email:     u.Email,
 			Event:     models.AuditEventAdminAction,
 			IPAddress: ip,
 			Success:   true,
 			Detail:    fmt.Sprintf("locked user %d until %s", targetUserID, lockedUntil.Format(time.RFC3339)),
+			Action:    "lock",
 		})
 	}
 	return nil
 }
 
 // UnlockUser unlocks a user account and resets failed login counters.
-func (s *AdminService) UnlockUser(ctx context.Context, adminID, targetUserID uint, ip string) error {
+func (s *AdminService) unlockUserAudited(ctx context.Context, adminID, targetUserID uint, ip string) error {
 	u, err := s.users.FindByID(ctx, targetUserID)
 	if err != nil {
 		return err
@@ -129,19 +130,20 @@ func (s *AdminService) UnlockUser(ctx context.Context, adminID, targetUserID uin
 	if s.audits != nil {
 		s.audits.Record(ctx, &models.AuditLog{
 			TenantID:  tenant.FromContext(ctx),
-			UserID:    &adminID,
+			UserID:    &targetUserID,
 			Email:     u.Email,
 			Event:     models.AuditEventAdminAction,
 			IPAddress: ip,
 			Success:   true,
 			Detail:    fmt.Sprintf("unlocked user %d", targetUserID),
+			Action:    "unlock",
 		})
 	}
 	return nil
 }
 
 // ForceLogout immediately revokes all refresh tokens, sessions, and bumps pwd_version.
-func (s *AdminService) ForceLogout(ctx context.Context, adminID, targetUserID uint, ip string) error {
+func (s *AdminService) forceLogoutAudited(ctx context.Context, adminID, targetUserID uint, ip string) error {
 	u, err := s.users.FindByID(ctx, targetUserID)
 	if err != nil {
 		return err
@@ -170,12 +172,13 @@ func (s *AdminService) ForceLogout(ctx context.Context, adminID, targetUserID ui
 	if s.audits != nil {
 		s.audits.Record(ctx, &models.AuditLog{
 			TenantID:  tenant.FromContext(ctx),
-			UserID:    &adminID,
+			UserID:    &targetUserID,
 			Email:     u.Email,
 			Event:     models.AuditEventAdminAction,
 			IPAddress: ip,
 			Success:   true,
 			Detail:    fmt.Sprintf("forced logout for user %d (sessions and tokens revoked)", targetUserID),
+			Action:    "force_logout",
 		})
 	}
 	return nil

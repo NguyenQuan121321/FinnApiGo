@@ -34,7 +34,7 @@ func TestSharedIssuanceV1AndDurableLogout(t *testing.T) {
 	}
 	conn.SetMaxOpenConns(1)
 	defer func() { _ = conn.Close() }()
-	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.Session{}, &models.AccessRevocation{}, &models.Tenant{}, &models.AuditLog{}, &models.UsedToken{}, &models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.UserRole{}); err != nil {
+	if err := db.AutoMigrate(&models.User{}, &models.RefreshToken{}, &models.Session{}, &models.AccessRevocation{}, &models.Tenant{}, &models.AuditLog{}, &models.AuditHead{}, &models.AuditOutbox{}, &models.AuditBoundary{}, &models.UsedToken{}, &models.Role{}, &models.Permission{}, &models.RolePermission{}, &models.UserRole{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Create(&models.Tenant{ID: "default", Slug: "default", Name: "Default", IsActive: true}).Error; err != nil {

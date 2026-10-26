@@ -185,7 +185,7 @@ func TestRequestLogger_500ErrorAndCustomID(t *testing.T) {
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", w.Code)
 	}
-	if w.Header().Get("X-Request-ID") != "req-12345" {
-		t.Fatalf("expected X-Request-ID header req-12345, got %s", w.Header().Get("X-Request-ID"))
+	if w.Header().Get("X-Request-ID") == "req-12345" || len(w.Header().Get("X-Request-ID")) != 36 {
+		t.Fatalf("expected server-generated X-Request-ID, got %s", w.Header().Get("X-Request-ID"))
 	}
 }

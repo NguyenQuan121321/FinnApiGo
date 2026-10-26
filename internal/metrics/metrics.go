@@ -60,6 +60,28 @@ func Handler(auditDepth func() float64) http.Handler {
 			Help: "Failed TOTP code or recovery-code validations (bad code, replay, lockout guard).",
 		}, func() float64 { return float64(services.TOTPFailures.Load()) }),
 	)
+	for _, c := range []struct {
+		name, help string
+		value      func() float64
+	}{
+		{"audit_admission_inserts_total", "Successful outbox INSERT attempts; enclosing operations can still roll back.", func() float64 { return float64(services.AuditAdmissions.Load()) }},
+		{"audit_admission_failures_total", "Rejected critical audit admissions.", func() float64 { return float64(services.AuditAdmissionFailures.Load()) }},
+		{"audit_delivered_total", "Durable events delivered and acknowledged.", func() float64 { return float64(services.AuditDelivered.Load()) }},
+		{"audit_delivery_failures_total", "Failed delivery attempts deferred to bounded retry or dead letter.", func() float64 { return float64(services.AuditDeliveryFailures.Load()) }},
+		{"audit_wakeups_coalesced_total", "Coalesced RAM wakeups; durable events are retained.", func() float64 { return float64(services.AuditWakeupCoalesced.Load()) }},
+	} {
+		reg.MustRegister(prometheus.NewCounterFunc(prometheus.CounterOpts{Namespace: "finnapigo", Name: c.name, Help: c.help}, c.value))
+	}
+	for _, g := range []struct {
+		name, help string
+		value      func() float64
+	}{
+		{"audit_outbox_pending", "Pending/leased durable events across this process's store.", func() float64 { return float64(services.AuditBacklogPending.Load()) }},
+		{"audit_outbox_dead", "Durable poison events needing operator repair/requeue.", func() float64 { return float64(services.AuditBacklogDead.Load()) }},
+		{"audit_outbox_oldest_seconds", "Age of oldest outstanding durable event.", func() float64 { return float64(services.AuditOldestAgeSeconds.Load()) }},
+	} {
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Namespace: "finnapigo", Name: g.name, Help: g.help}, g.value))
+	}
 	if auditDepth != nil {
 		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 			Namespace: "finnapigo", Name: "audit_buffer_depth",

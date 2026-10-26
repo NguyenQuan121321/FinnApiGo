@@ -2,109 +2,81 @@ package repositories
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
-	"fmt"
-	"log/slog"
-	"time"
 
-	"gorm.io/gorm"
-
+	"github.com/finnapigo/finnapigo/internal/audit"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"github.com/finnapigo/finnapigo/internal/models"
 	"github.com/finnapigo/finnapigo/internal/tenant"
+	"gorm.io/gorm"
+	"log/slog"
+	"time"
 )
 
 const GenesisAuditHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
-// AuditRepository writes security events. Writes are best-effort and never
-// propagate errors to the caller — audit logging must not break requests —
-// but failures ARE logged so silent audit gaps are observable.
 type AuditRepository struct {
-	db      *gorm.DB
-	hmacKey []byte
+	db         *gorm.DB
+	keys       *audit.Keys
+	maxPending int
 }
 
 func NewAuditRepository(db *gorm.DB, opts ...func(*AuditRepository)) *AuditRepository {
-	r := &AuditRepository{
-		db:      db,
-		hmacKey: []byte("audit-hash-chain-default-secret-32b"),
+	// In-memory SQLite has a different database per connection. It is a test
+	// adapter only; MySQL uses its ordinary replica-safe connection pool.
+	if db.Name() == "sqlite" {
+		if pool, err := db.DB(); err == nil {
+			pool.SetMaxOpenConns(1)
+		}
 	}
+	r := &AuditRepository{db: db, keys: audit.EphemeralKeys(), maxPending: 10000}
 	for _, opt := range opts {
 		opt(r)
 	}
 	return r
 }
-
-// WithAuditHMACKey configures custom HMAC secret key for tamper-evident hash chaining (P2.6).
-func WithAuditHMACKey(key []byte) func(*AuditRepository) {
+func WithAuditKeys(keys *audit.Keys) func(*AuditRepository) {
+	return func(r *AuditRepository) { r.keys = keys }
+}
+func WithAuditCapacity(n int) func(*AuditRepository) {
 	return func(r *AuditRepository) {
-		r.hmacKey = key
+		if n > 0 {
+			r.maxPending = n
+		}
 	}
 }
 
-func computeRecordHash(key []byte, prevHash, tenantID, event string, userID uint, email, ip string, success bool, detail string) string {
-	h := hmac.New(sha256.New, key)
-	payload := fmt.Sprintf("%s|%s|%s|%d|%s|%s|%t|%s", prevHash, tenantID, event, userID, email, ip, success, detail)
-	h.Write([]byte(payload))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// Record writes an audit row. Context is threaded for future async/worker
-// migration (§7). Implements tamper-evident hash chaining (P2.6).
-func (r *AuditRepository) Record(ctx context.Context, entry *models.AuditLog) {
-	tid, err := scopeTenant(ctx, entry.TenantID)
+// Record preserves the old consumer interface. Operation records latch errors
+// into the enclosing SQL transaction; callers needing a result use Admit.
+func (r *AuditRepository) Record(ctx context.Context, e *models.AuditLog) {
+	err := r.Admit(ctx, e)
 	if err != nil {
-		slog.Error("audit tenant mismatch", "event", entry.Event)
+		if o := database.CurrentOperation(ctx); o != nil {
+			o.Fail(audit.ErrUnavailable)
+		}
+		slog.Error("audit admission failed", "code", "admission_unavailable")
 		return
 	}
-	entry.TenantID = tid
-	if len(r.hmacKey) > 0 && entry.RecordHash == "" {
-		var last models.AuditLog
-		prevHash := GenesisAuditHash
-		if err := r.db.WithContext(ctx).Where("tenant_id = ?", entry.TenantID).Order("id DESC").First(&last).Error; err == nil && last.RecordHash != "" {
-			prevHash = last.RecordHash
-		}
-		entry.PrevHash = prevHash
-		var uid uint
-		if entry.UserID != nil {
-			uid = *entry.UserID
-		}
-		entry.RecordHash = computeRecordHash(r.hmacKey, prevHash, entry.TenantID, entry.Event, uid, entry.Email, entry.IPAddress, entry.Success, entry.Detail)
-	}
-
-	if err := r.db.WithContext(ctx).Create(entry).Error; err != nil {
-		slog.Error("audit write failed",
-			"event", entry.Event,
-			"user_id", entry.UserID,
-			"err", err,
-		)
+	if database.CurrentOperation(ctx) == nil {
+		_, _ = r.Dispatch(ctx, 100)
 	}
 }
-
-// BatchInsert writes multiple audit rows in one round-trip. Used by the
-// async audit worker (§7). Returns the count actually inserted (0 on error).
 func (r *AuditRepository) BatchInsert(ctx context.Context, entries []*models.AuditLog) int {
-	if len(entries) == 0 {
-		return 0
+	n := 0
+	for _, e := range entries {
+		if err := r.Admit(ctx, e); err != nil {
+			break
+		}
+		n++
 	}
-	if err := r.db.WithContext(ctx).CreateInBatches(entries, 100).Error; err != nil {
-		slog.Error("audit batch insert failed",
-			"batch_size", len(entries),
-			"event", entries[0].Event,
-			"err", err,
-		)
-		return 0
+	if database.CurrentOperation(ctx) == nil {
+		_, _ = r.Dispatch(ctx, 100)
 	}
-	return len(entries)
+	return n
 }
 
-// PurgeOlderThan removes audit rows created before the cutoff, in
-// LIMIT-batched statements (P1 discipline) — audit retention execution for
-// AUDIT_RETENTION_DAYS (R4). Returns the rows removed.
-func (r *AuditRepository) PurgeOlderThan(ctx context.Context, before time.Time) (int64, error) {
-	return batchedDelete(r.db.WithContext(ctx), &models.AuditLog{}, "created_at < ?", before)
+// An arbitrary date is insufficient authorization to destroy signed history.
+func (r *AuditRepository) PurgeOlderThan(context.Context, time.Time) (int64, error) {
+	return 0, audit.ErrPolicy
 }
 
 // FindByUserIDPaginated returns paginated audit events for a user (P1.4).
@@ -117,11 +89,11 @@ func (r *AuditRepository) FindByUserIDPaginated(ctx context.Context, userID uint
 	}
 	offset := (page - 1) * limit
 	var total int64
-	if err := r.db.WithContext(ctx).Model(&models.AuditLog{}).Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).Count(&total).Error; err != nil {
+	if err := database.FromContext(ctx, r.db).Model(&models.AuditLog{}).Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
 	var entries []models.AuditLog
-	err := r.db.WithContext(ctx).
+	err := database.FromContext(ctx, r.db).
 		Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).
 		Order("created_at DESC, id DESC").
 		Offset(offset).
@@ -132,9 +104,9 @@ func (r *AuditRepository) FindByUserIDPaginated(ctx context.Context, userID uint
 
 // AnonymizeUser scrubs PII email from audit records belonging to the erased user (P1.3 GDPR).
 func (r *AuditRepository) AnonymizeUser(ctx context.Context, userID uint) error {
-	return r.db.WithContext(ctx).Model(&models.AuditLog{}).
+	return database.FromContext(ctx, r.db).Model(&models.AuditLog{}).
 		Where("user_id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)).
-		Update("email", "anonymized@gdpr.local").Error
+		Updates(map[string]any{"email": "anonymized@gdpr.local", "ip_address": "", "detail": ""}).Error
 }
 
 // FindAllPaginated returns paginated audit events for a tenant (P2.3 admin).
@@ -152,7 +124,7 @@ func (r *AuditRepository) FindAllPaginated(ctx context.Context, tenantID string,
 	}
 	offset := (page - 1) * limit
 	var total int64
-	q := r.db.WithContext(ctx).Model(&models.AuditLog{})
+	q := database.FromContext(ctx, r.db).Model(&models.AuditLog{})
 	q = q.Where("tenant_id = ?", tenantID)
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -173,45 +145,8 @@ func (r *AuditRepository) StreamAll(ctx context.Context, tenantID string) ([]mod
 		return nil, err
 	}
 	var entries []models.AuditLog
-	q := r.db.WithContext(ctx).Model(&models.AuditLog{})
+	q := database.FromContext(ctx, r.db).Model(&models.AuditLog{})
 	q = q.Where("tenant_id = ?", tenantID)
-	err = q.Order("id ASC").Find(&entries).Error
+	err = q.Order("version ASC, sequence ASC, id ASC").Find(&entries).Error
 	return entries, err
-}
-
-// VerifyChain verifies cryptographic continuity and HMAC integrity of the audit hash chain (P2.6).
-func (r *AuditRepository) VerifyChain(ctx context.Context, tenantID string) (bool, error) {
-	var err error
-	tenantID, err = scopeTenant(ctx, tenantID)
-	if err != nil {
-		return false, err
-	}
-	var entries []models.AuditLog
-	err = r.db.WithContext(ctx).
-		Where("tenant_id = ?", tenantID).
-		Order("id ASC").
-		Find(&entries).Error
-	if err != nil {
-		return false, err
-	}
-	if len(entries) == 0 {
-		return true, nil
-	}
-
-	expectedPrev := GenesisAuditHash
-	for _, e := range entries {
-		if e.PrevHash != expectedPrev {
-			return false, fmt.Errorf("hash chain broken at id %d: expected prev_hash %s, got %s", e.ID, expectedPrev, e.PrevHash)
-		}
-		var uid uint
-		if e.UserID != nil {
-			uid = *e.UserID
-		}
-		computed := computeRecordHash(r.hmacKey, e.PrevHash, e.TenantID, e.Event, uid, e.Email, e.IPAddress, e.Success, e.Detail)
-		if subtle.ConstantTimeCompare([]byte(computed), []byte(e.RecordHash)) != 1 {
-			return false, fmt.Errorf("tampered record at id %d: expected record_hash %s, got %s", e.ID, computed, e.RecordHash)
-		}
-		expectedPrev = e.RecordHash
-	}
-	return true, nil
 }

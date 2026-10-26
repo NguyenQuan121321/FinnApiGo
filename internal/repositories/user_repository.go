@@ -11,6 +11,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"github.com/finnapigo/finnapigo/internal/database"
 	"time"
 
 	"gorm.io/gorm"
@@ -34,13 +35,13 @@ func (r *UserRepository) Create(ctx context.Context, user *models.User) error {
 		return err
 	}
 	user.TenantID = tid
-	return r.db.WithContext(ctx).Create(user).Error
+	return database.FromContext(ctx, r.db).Create(user).Error
 }
 
 func (r *UserRepository) FindByID(ctx context.Context, id uint) (*models.User, error) {
 	var u models.User
 	tid := tenant.FromContext(ctx)
-	q := r.db.WithContext(ctx).Where("id = ?", id)
+	q := database.FromContext(ctx, r.db).Where("id = ?", id)
 	q = q.Where("tenant_id = ?", tid)
 	if err := q.First(&u).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -54,7 +55,7 @@ func (r *UserRepository) FindByID(ctx context.Context, id uint) (*models.User, e
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*models.User, error) {
 	var u models.User
 	tid := tenant.FromContext(ctx)
-	q := r.db.WithContext(ctx).Where("email = ?", email)
+	q := database.FromContext(ctx, r.db).Where("email = ?", email)
 	q = q.Where("tenant_id = ?", tid)
 	if err := q.First(&u).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -68,7 +69,7 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*models
 func (r *UserRepository) FindByUsername(ctx context.Context, username string) (*models.User, error) {
 	var u models.User
 	tid := tenant.FromContext(ctx)
-	q := r.db.WithContext(ctx).Where("username = ?", username)
+	q := database.FromContext(ctx, r.db).Where("username = ?", username)
 	q = q.Where("tenant_id = ?", tid)
 	if err := q.First(&u).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -85,7 +86,7 @@ func (r *UserRepository) Update(ctx context.Context, user *models.User) error {
 	if _, err := scopeTenant(ctx, user.TenantID); err != nil {
 		return err
 	}
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)).
 		Select("username", "full_name"), user)
 }
@@ -96,7 +97,7 @@ func (r *UserRepository) UpdateEmail(ctx context.Context, user *models.User) err
 	if _, err := scopeTenant(ctx, user.TenantID); err != nil {
 		return err
 	}
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)),
 		map[string]any{"email": user.Email, "is_email_verified": user.IsEmailVerified})
 }
@@ -104,7 +105,7 @@ func (r *UserRepository) UpdateEmail(ctx context.Context, user *models.User) err
 // Deactivate never allows a stale caller to reactivate an account. Version
 // increments and session containment remain the service's explicit operations.
 func (r *UserRepository) Deactivate(ctx context.Context, userID uint) error {
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)),
 		map[string]any{"is_active": false})
 }
@@ -116,7 +117,7 @@ func (r *UserRepository) Erase(ctx context.Context, user *models.User) error {
 	if _, err := scopeTenant(ctx, user.TenantID); err != nil {
 		return err
 	}
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)),
 		map[string]any{"email": user.Email, "username": user.Username, "password": "",
 			"full_name": "", "is_active": false, "is_email_verified": false})
@@ -125,7 +126,7 @@ func (r *UserRepository) Erase(ctx context.Context, user *models.User) error {
 // UpdatePassword sets a new bcrypt hash and (optionally) clears lockout state.
 func (r *UserRepository) UpdatePassword(ctx context.Context, user *models.User, hashedPassword string) error {
 	user.Password = hashedPassword
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), map[string]any{"password": hashedPassword})
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), map[string]any{"password": hashedPassword})
 }
 
 // IncrementFailedAttempts bumps the failed-login counter and (when lockUntil
@@ -142,14 +143,14 @@ func (r *UserRepository) IncrementFailedAttempts(ctx context.Context, user *mode
 		user.LockedUntil = lockUntil
 		updates["locked_until"] = lockUntil
 	}
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), updates)
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), updates)
 }
 
 // ResetFailedAttempts clears the counter and lockout timestamp.
 func (r *UserRepository) ResetFailedAttempts(ctx context.Context, user *models.User) error {
 	user.FailedLoginAttempts = 0
 	user.LockedUntil = nil
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), map[string]interface{}{
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), map[string]interface{}{
 		"failed_login_attempts": 0,
 		"locked_until":          nil,
 	})
@@ -159,7 +160,7 @@ func (r *UserRepository) ResetFailedAttempts(ctx context.Context, user *models.U
 // concurrent changes must both land). Access tokens carrying an older
 // version are rejected afterwards (A7).
 func (r *UserRepository) BumpPwdVersion(ctx context.Context, userID uint) error {
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)), map[string]any{"pwd_version": gorm.Expr("pwd_version + 1")})
 }
 
@@ -170,7 +171,7 @@ func (r *UserRepository) BumpPwdVersion(ctx context.Context, userID uint) error 
 // refresh tokens survive — the exact state a password change exists to end.
 // Implements services.TransactionalCredentialChanger.
 func (r *UserRepository) CredentialChangeTx(ctx context.Context, userID uint, hashedPassword string, revokeRefresh func(tx *gorm.DB) error) error {
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	return database.FromContext(ctx, r.db).Transaction(func(tx *gorm.DB) error {
 		if err := updateScoped(tx.Model(&models.User{}).
 			Where("id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)), map[string]interface{}{
 			"password":              hashedPassword,
@@ -190,7 +191,7 @@ func (r *UserRepository) CredentialChangeTx(ctx context.Context, userID uint, ha
 // so the check-then-act window in SetPassword is closed.
 // Implements services.FirstPasswordSetter.
 func (r *UserRepository) SetFirstPassword(ctx context.Context, userID uint, hashedPassword string) (bool, error) {
-	res := r.db.WithContext(ctx).Model(&models.User{}).
+	res := database.FromContext(ctx, r.db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ? AND password = ?", userID, tenant.FromContext(ctx), "").
 		Update("password", hashedPassword)
 	if res.Error != nil {
@@ -201,7 +202,7 @@ func (r *UserRepository) SetFirstPassword(ctx context.Context, userID uint, hash
 
 func (r *UserRepository) SetEmailVerified(ctx context.Context, user *models.User, verified bool) error {
 	user.IsEmailVerified = verified
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), map[string]any{"is_email_verified": verified})
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).Where("id = ? AND tenant_id = ?", user.ID, tenant.FromContext(ctx)), map[string]any{"is_email_verified": verified})
 }
 
 // ListPaginated retrieves users within a tenant with optional search filter (P2.3 admin).
@@ -219,7 +220,7 @@ func (r *UserRepository) ListPaginated(ctx context.Context, tenantID string, pag
 	}
 	offset := (page - 1) * limit
 	var total int64
-	q := r.db.WithContext(ctx).Model(&models.User{})
+	q := database.FromContext(ctx, r.db).Model(&models.User{})
 	q = q.Where("tenant_id = ?", tenantID)
 	if search != "" {
 		searchTerm := "%" + search + "%"
@@ -241,6 +242,6 @@ func (r *UserRepository) SetLock(ctx context.Context, userID uint, lockedUntil *
 	if lockedUntil == nil {
 		updates["failed_login_attempts"] = 0
 	}
-	return updateScoped(r.db.WithContext(ctx).Model(&models.User{}).
+	return updateScoped(database.FromContext(ctx, r.db).Model(&models.User{}).
 		Where("id = ? AND tenant_id = ?", userID, tenant.FromContext(ctx)), updates)
 }
