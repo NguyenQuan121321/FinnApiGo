@@ -184,8 +184,8 @@ func TestE2E_Phase1_UserLifecycle(t *testing.T) {
 	// Audit logs anonymized
 	logs, _, _ := auditRepo.FindByUserIDPaginated(ctx, user.ID, 1, 10)
 	for _, l := range logs {
-		if l.Event == models.AuditEventLogin && l.Email != "anonymized@gdpr.local" {
-			t.Fatalf("audit email not anonymized: got %s, want anonymized@gdpr.local", l.Email)
+		if l.Event == models.AuditEventLogin && l.Email != "" {
+			t.Fatal("v1 audit email not erased")
 		}
 	}
 }

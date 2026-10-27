@@ -49,44 +49,110 @@ func TestConcurrencyLimiter_AllowsUpToCapacity(t *testing.T) {
 	}
 
 	var running atomic.Int64
-	var served atomic.Int64
-	var rejected atomic.Int64
+	var peak atomic.Int64
+	started := make(chan struct{}, 11)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
+	var workers sync.WaitGroup
+	t.Cleanup(func() {
+		releaseAll()
+		done := make(chan struct{})
+		go func() {
+			workers.Wait()
+			close(done)
+		}()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			t.Error("requests did not exit after releasing the handler barrier")
+		}
+	})
 
 	handler := cl.Handler()
 	r := gin.New()
 	r.GET("/", handler, func(c *gin.Context) {
 		n := running.Add(1)
-		if n > 5 {
-			t.Errorf("concurrency exceeded: %d > 5", n)
+		defer running.Add(-1)
+		for {
+			previous := peak.Load()
+			if n <= previous || peak.CompareAndSwap(previous, n) {
+				break
+			}
 		}
-		time.Sleep(2 * time.Millisecond) // hold the slot so concurrent reqs collide
-		running.Add(-1)
-		served.Add(1)
+		started <- struct{}{}
+		<-release
 		c.Status(http.StatusOK)
 	})
 
-	// Fire 10 concurrent requests while the semaphore is full — since the
-	// acquire is non-blocking, only up to 5 can run; the rest are rejected.
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
+	request := func(results chan<- int) {
+		workers.Add(1)
 		go func() {
-			defer wg.Done()
+			defer workers.Done()
 			w := httptest.NewRecorder()
 			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
-			if w.Code == http.StatusTooManyRequests {
-				rejected.Add(1)
-			}
+			results <- w.Code
 		}()
 	}
-	wg.Wait()
-
-	total := served.Load() + rejected.Load()
-	if total != 10 {
-		t.Fatalf("total handled=%d want=10 (served=%d rejected=%d)", total, served.Load(), rejected.Load())
+	expectResponses := func(results <-chan int, count, want int) {
+		t.Helper()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for i := 0; i < count; i++ {
+			select {
+			case code := <-results:
+				if code != want {
+					t.Fatalf("response=%d want=%d", code, want)
+				}
+			case <-timer.C:
+				t.Fatalf("timed out waiting for response %d of %d", i+1, count)
+			}
+		}
 	}
-	if served.Load() > 5 {
-		t.Fatalf("served=%d should not exceed capacity 5", served.Load())
+
+	// Keep exactly five requests admitted until the test explicitly releases
+	// them. Total requests served over multiple waves is not peak concurrency.
+	admitted := make(chan int, 5)
+	for i := 0; i < 5; i++ {
+		request(admitted)
+	}
+	func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for i := 0; i < 5; i++ {
+			select {
+			case <-started:
+			case <-timer.C:
+				t.Fatalf("timed out waiting for admitted request %d of 5", i+1)
+			}
+		}
+	}()
+	if running.Load() != 5 || cl.Available() != 0 {
+		t.Fatalf("occupied: running=%d available=%d want=5,0", running.Load(), cl.Available())
+	}
+
+	excess := make(chan int, 5)
+	for i := 0; i < 5; i++ {
+		request(excess)
+	}
+	expectResponses(excess, 5, http.StatusTooManyRequests)
+	if running.Load() != 5 || peak.Load() != 5 || cl.Available() != 0 {
+		t.Fatalf("excess requests changed occupancy: running=%d peak=%d available=%d", running.Load(), peak.Load(), cl.Available())
+	}
+
+	releaseAll()
+	expectResponses(admitted, 5, http.StatusOK)
+	if running.Load() != 0 || cl.Available() != 5 {
+		t.Fatalf("released: running=%d available=%d want=0,5", running.Load(), cl.Available())
+	}
+
+	later := make(chan int, 1)
+	request(later)
+	expectResponses(later, 1, http.StatusOK)
+	if running.Load() != 0 || peak.Load() != 5 || cl.Available() != 5 {
+		t.Fatalf("reuse: running=%d peak=%d available=%d want=0,5,5", running.Load(), peak.Load(), cl.Available())
 	}
 }
 

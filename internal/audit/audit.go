@@ -146,8 +146,8 @@ func NewKeyRing(current string, encoded map[string]string, checkpointID string, 
 }
 
 func decodeKey(encoded string) ([]byte, error) {
-	b, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil || len(b) < 32 || len(b) > 128 || bytes.Equal(b, bytes.Repeat(b[:min(1, len(b))], len(b))) || strings.Contains(strings.ToLower(string(b)), "default") || strings.Contains(strings.ToLower(string(b)), "secret") {
+	b, err := base64.StdEncoding.Strict().DecodeString(encoded)
+	if err != nil || base64.StdEncoding.EncodeToString(b) != encoded || len(b) < 32 || len(b) > 128 || bytes.Equal(b, bytes.Repeat(b[:min(1, len(b))], len(b))) || strings.Contains(strings.ToLower(string(b)), "default") || strings.Contains(strings.ToLower(string(b)), "secret") {
 		return nil, ErrUnavailable
 	}
 	// Match the authentication key convention: length alone must not accept
@@ -164,6 +164,22 @@ func decodeKey(encoded string) ([]byte, error) {
 		return nil, ErrUnavailable
 	}
 	return b, nil
+}
+
+// RejectSharedMaterial compares resolved key identity, regardless of its source
+// encoding. This also covers file-backed and development-derived recovery keys.
+// Errors deliberately contain neither material nor key identifiers.
+func (k *Keys) RejectSharedMaterial(materials ...[]byte) error {
+	for _, material := range materials {
+		for _, domain := range []map[string][]byte{k.signing, k.checkpoints} {
+			for _, key := range domain {
+				if bytes.Equal(key, material) {
+					return errors.New("audit keys must be separate from authentication/encryption keys")
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // EphemeralKeys is for development/tests only. Production always calls NewKeys

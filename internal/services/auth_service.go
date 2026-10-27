@@ -897,6 +897,11 @@ func (s *AuthService) notifySecurityAsync(ctx context.Context, userID uint, even
 // unknown users so the handler can return an identical message.
 func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
+	// Admission is identical before resolving account existence. Otherwise a
+	// truthful 503 only for known accounts would become an enumeration oracle.
+	if err := admitBeforeExternal(ctx, s.audits, &models.AuditLog{Event: "password_reset_requested", Success: true}); err != nil {
+		return err
+	}
 	user, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
 		return fmt.Errorf("forgot-password: find user: %w", err)
@@ -912,9 +917,6 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email, ip string) erro
 	resetToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
 		jwt.TokenTypeReset, s.jwtCfg.ResetTTL, tenant.FromContext(ctx))
 	if err != nil {
-		return err
-	}
-	if err := admitBeforeExternal(ctx, s.audits, &models.AuditLog{UserID: &user.ID, Event: "password_reset_requested", Success: true}); err != nil {
 		return err
 	}
 	if err := s.notify.SendPasswordReset(ctx, email, resetToken); err != nil {
@@ -975,11 +977,10 @@ func (s *AuthService) resendVerifyEmailAudited(ctx context.Context, email, ip st
 	// existing isDisposableEmail O(1) lookup; runs BEFORE the DB query. Returns
 	// nil (success-like) so an attacker cannot probe which addresses are blocked.
 	if isDisposableEmail(email) {
-		s.audits.Record(ctx, &models.AuditLog{
+		return admitBeforeExternal(ctx, s.audits, &models.AuditLog{
 			Event: models.AuditEventVerifyResendBlocked, Email: email,
 			IPAddress: ip, Success: false, Detail: "disposable domain",
 		})
-		return nil
 	}
 
 	// Layer 5 — per-email throttle: stops repeat bombing of a single inbox.
@@ -995,6 +996,11 @@ func (s *AuthService) resendVerifyEmailAudited(ctx context.Context, email, ip st
 		}
 	}
 
+	// Preserve all rate controls, then make the required admission independent
+	// of whether this address is absent, verified or eligible for a credential.
+	if err := admitBeforeExternal(ctx, s.audits, &models.AuditLog{Event: "verification_requested", Success: true}); err != nil {
+		return err
+	}
 	// Layer 6 — lookup, issue, notify.
 	user, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
@@ -1012,9 +1018,6 @@ func (s *AuthService) resendVerifyEmailAudited(ctx context.Context, email, ip st
 	verifyToken, err := s.jwt.Issue(user.ID, user.Role, user.Email,
 		jwt.TokenTypeEmailVerify, s.jwtCfg.VerifyTTL, tenant.FromContext(ctx))
 	if err != nil {
-		return err
-	}
-	if err := admitBeforeExternal(ctx, s.audits, &models.AuditLog{UserID: &user.ID, Event: "verification_requested", Success: true}); err != nil {
 		return err
 	}
 	if err := s.notify.SendEmailVerification(ctx, user.Email, verifyToken); err != nil {

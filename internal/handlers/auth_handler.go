@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/finnapigo/finnapigo/internal/audit"
 	"github.com/finnapigo/finnapigo/internal/middleware"
 	"github.com/finnapigo/finnapigo/internal/response"
 	"github.com/finnapigo/finnapigo/internal/services"
@@ -247,7 +248,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 // ForgotPassword godoc
 //
 //	@Summary      Request a password-reset email
-//	@Description  Always responds 200 with the same message regardless of whether the email exists (anti-enumeration). A reset link is emailed only when the account exists.
+//	@Description  Responds identically regardless of account existence: neutral 200 normally, or 503 when required durable audit admission is unavailable. A reset link is emailed only when the account exists and admission succeeds.
 //	@Tags         Auth
 //	@Accept       json
 //	@Produce      json
@@ -255,6 +256,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 //	@Success      200 {object} swagger.NullDataEnvelope
 //	@Failure      400 {object} swagger.ErrorEnvelope
 //	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Failure      503 {object} swagger.ErrorEnvelope
 //	@Router       /api/v1/auth/forgot-password [post]
 func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	var req ForgotPasswordRequest
@@ -262,7 +264,10 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 		response.Respond(c, http.StatusBadRequest, err.Error(), nil)
 		return
 	}
-	_ = h.svc.ForgotPassword(c.Request.Context(), req.Email, clientIP(c))
+	if err := h.svc.ForgotPassword(c.Request.Context(), req.Email, clientIP(c)); errors.Is(err, audit.ErrUnavailable) {
+		respondError(c, err)
+		return
+	}
 
 	response.Respond(c, http.StatusOK, "if the email exists, a reset link has been sent", nil)
 }
@@ -422,7 +427,7 @@ func (h *AuthHandler) VerifyEmail(c *gin.Context) {
 // ResendVerifyEmail godoc
 //
 //	@Summary      Resend the verification email
-//	@Description  Responds 200 with the same message whether or not the email exists and whether it is already verified (anti-enumeration); a link is sent only to unverified existing accounts. Exceeding the resend rate limit surfaces a 429 so legitimate clients can back off.
+//	@Description  Responds identically for unknown, verified and unverified accounts: neutral 200 normally, 503 when required durable audit admission fails, or 429 when rate limited. A link is sent only to unverified existing accounts after admission succeeds.
 //	@Tags         Auth
 //	@Accept       json
 //	@Produce      json
@@ -430,6 +435,7 @@ func (h *AuthHandler) VerifyEmail(c *gin.Context) {
 //	@Success      200 {object} swagger.NullDataEnvelope
 //	@Failure      400 {object} swagger.ErrorEnvelope
 //	@Failure      429 {object} swagger.ErrorEnvelope
+//	@Failure      503 {object} swagger.ErrorEnvelope
 //	@Router       /api/v1/auth/resend-verification [post]
 func (h *AuthHandler) ResendVerifyEmail(c *gin.Context) {
 	var req ResendVerifyEmailRequest
@@ -439,10 +445,10 @@ func (h *AuthHandler) ResendVerifyEmail(c *gin.Context) {
 	}
 	err := h.svc.ResendVerifyEmail(c.Request.Context(), req.Email, clientIP(c))
 	// Any resend rate limit is surfaced (lets a legitimate client back off).
-	// Every other outcome — unknown email, already verified, transient
+	// Normal outcomes — unknown email, already verified, transient
 	// notifier failure — returns the identical message so the endpoint never
 	// reveals whether the email exists (OWASP ASVS V3.2 anti-enumeration).
-	if err != nil && errors.Is(err, services.ErrRateLimited) {
+	if errors.Is(err, services.ErrRateLimited) || errors.Is(err, audit.ErrUnavailable) {
 		respondError(c, err)
 		return
 	}

@@ -215,7 +215,7 @@ paths:
     post:
       tags: [auth]
       summary: Request a password-reset email
-      description: Always responds identically whether or not the account exists (no enumeration).
+      description: Identical account-independent responses. Neutral 200 normally; 503 when required durable audit admission fails, before issuing or emailing a reset credential.
       operationId: forgotPassword
       requestBody:
         required: true
@@ -230,6 +230,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '429':
           $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Durable audit unavailable (same response for known and unknown accounts).
 
   /api/v1/auth/reset-password:
     post:
@@ -275,7 +277,7 @@ paths:
     post:
       tags: [auth]
       summary: Re-send the verification email
-      description: Rate-limited per email, per IP, and globally (anti-automation).
+      description: Rate-limited per email, per IP, and globally. Unknown, verified and unverified accounts receive identical responses. Required durable audit admission failure returns 503 before credential issuance or email.
       operationId: resendVerification
       requestBody:
         required: true
@@ -290,6 +292,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '429':
           $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Durable audit unavailable (same response regardless of account state).
 
   /api/v1/auth/google/login:
     get:
