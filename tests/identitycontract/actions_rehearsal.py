@@ -91,6 +91,27 @@ def compose(*args, data=None, check=True, timeout=180, image=None):
                    data=data, env=env, timeout=timeout, check=check)
 
 
+def hostname(service):
+    project,_=identity()
+    return service+'-'+project+'.test'
+
+
+def hosts_update(service=None, address=None):
+    # Only this ephemeral VM's exact task-marked hosts entries. Preserve every
+    # unrelated line. No Windows host/DNS setting, proxy, tunnel or TLS override.
+    project,_=identity()
+    script="""import json,pathlib,sys
+project=sys.argv[1];name,address=json.load(sys.stdin);p=pathlib.Path('/etc/hosts')
+lines=p.read_text().splitlines();marker='# '+project
+if name is None:lines=[line for line in lines if not line.endswith(marker)]
+else:
+ lines=[line for line in lines if not (line.endswith(marker) and name in line.split())]
+ lines.append(address+' '+name+' '+marker)
+p.write_text('\\n'.join(lines)+'\\n')
+"""
+    command(['sudo','python3','-c',script,project],data=json.dumps([hostname(service) if service else None,address]).encode())
+
+
 def config(root, keys, last=None, remove=False):
     current = 'old' if last is None else 'new'
     env = {'GIN_MODE': 'release', 'SERVER_PORT': '8443', 'SERVER_TLS_CERT_FILE': '/run/tls/cert.pem',
@@ -105,7 +126,7 @@ def config(root, keys, last=None, remove=False):
            'AUDIT_CHECKPOINT_KEY_ID': 'checkpoint', 'AUDIT_CHECKPOINT_KEY': keys['checkpoint'],
            'AUDIT_RETENTION_DAYS': '0', 'REDIS_URL': 'redis://:' + keys['redis'] + '@redis:6379/0',
            'SMTP_HOST': 'mail', 'SMTP_PORT': '1025', 'SMTP_FROM': 'f02@example.invalid',
-           'REQUIRE_EMAIL_VERIFIED': 'true', 'CORS_ALLOWED_ORIGINS': 'https://localhost:19443',
+           'REQUIRE_EMAIL_VERIFIED': 'true', 'CORS_ALLOWED_ORIGINS': 'https://'+hostname('diagnostic')+':8443',
            # Runtime network has no Internet. No external breach/provider call;
            # randomly generated synthetic passwords retain strength validation.
            'BREACHED_PASSWORD_CHECK': 'false'}
@@ -116,7 +137,7 @@ def config(root, keys, last=None, remove=False):
                    IDENTITY_STATE_PREVIOUS_SECRET=keys['state-old'], IDENTITY_STATE_PREVIOUS_UNTIL=utc(last + 930))
     private(root / 'finn.env', '\n'.join(name + '=' + value for name, value in env.items()) + '\n')
     diagnostic = {'issuer_origin': 'https://finn-a:8443', 'keys': {'sign-' + current: keys['sign-' + current]},
-                  'browser_origin': 'https://localhost:18443',
+                  'browser_origin': 'https://'+hostname('finn-a')+':8443',
                   'service_kid': 'state-' + current, 'service_secret': keys['state-' + current],
                   'tenants': ['f02-a', 'f02-b', 'default'], 'ca_file': '/run/tls/ca.crt',
                   'cert_file': '/run/tls/cert.pem', 'key_file': '/run/tls/key.pem'}
@@ -150,16 +171,33 @@ def prepare():
     tls = root / 'tls'
     tls.mkdir(mode=0o755)
     command(['openssl', 'req', '-x509', '-newkey', 'rsa:3072', '-nodes', '-sha256', '-days', '2',
-             '-subj', '/CN=' + project, '-keyout', str(tls / 'ca.key'), '-out', str(tls / 'ca.crt')])
+             '-subj', '/CN=' + project, '-keyout', str(tls / 'ca.key'), '-out', str(tls / 'ca.crt'),
+             '-addext','basicConstraints=critical,CA:TRUE,pathlen:0',
+             '-addext','keyUsage=critical,keyCertSign,cRLSign','-addext','subjectKeyIdentifier=hash'])
     (tls / 'ca.key').chmod(0o600)
     for name in ['finn-a', 'finn-b', 'diagnostic', 'mail']:
-        private(tls / (name + '.ext'), 'subjectAltName=DNS:localhost,DNS:' + name + ',IP:127.0.0.1\nextendedKeyUsage=serverAuth\n')
+        private(tls / (name + '.ext'), 'subjectAltName=DNS:localhost,DNS:' + name + ',DNS:'+hostname(name)+',IP:127.0.0.1\n'
+                'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
+                'extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n')
         command(['openssl', 'req', '-new', '-newkey', 'rsa:3072', '-nodes', '-subj', '/CN=' + name,
                  '-keyout', str(tls / (name + '.key')), '-out', str(tls / (name + '.csr'))])
         command(['openssl', 'x509', '-req', '-in', str(tls / (name + '.csr')), '-CA', str(tls / 'ca.crt'),
                  '-CAkey', str(tls / 'ca.key'), '-CAcreateserial', '-days', '2', '-sha256',
                  '-extfile', str(tls / (name + '.ext')), '-out', str(tls / (name + '.crt'))])
         (tls / (name + '.key')).chmod(0o644)  # Individual RO bind; host parent remains0700.
+        command(['openssl','verify','-x509_strict','-CAfile',str(tls/'ca.crt'),str(tls/(name+'.crt'))])
+    # Red control for the original incomplete-CA generator: a valid signature
+    # alone must not pass strict X.509 when CA signing key usage is absent.
+    command(['openssl','req','-x509','-newkey','rsa:3072','-nodes','-sha256','-days','2',
+             '-subj','/CN=incomplete-ca-control','-keyout',str(tls/'bad-ca.key'),'-out',str(tls/'bad-ca.crt'),
+             '-addext','basicConstraints=critical,CA:TRUE','-addext','subjectKeyIdentifier=hash'])
+    command(['openssl','x509','-req','-in',str(tls/'finn-a.csr'),'-CA',str(tls/'bad-ca.crt'),
+             '-CAkey',str(tls/'bad-ca.key'),'-CAcreateserial','-days','2','-sha256',
+             '-extfile',str(tls/'finn-a.ext'),'-out',str(tls/'bad-leaf.crt')])
+    red=command(['openssl','verify','-x509_strict','-CAfile',str(tls/'bad-ca.crt'),str(tls/'bad-leaf.crt')],check=False)
+    if red.returncode==0 or b'key usage' not in (red.stdout+red.stderr).lower():
+        raise RuntimeError('incomplete CA regression did not fail as expected')
+    emit('incomplete_ca_negative_control',status='PASS_DETECTED_EXPECTED_FAILURE',verification='x509_strict',reason='missing_CA_signing_key_usage',actual_exit=red.returncode)
     config(root, keys)
     # Previous strict source already includes every F02/F03 repair. No state or
     # retired configuration rollback. Assert relevant runtime trees identical.
@@ -194,10 +232,24 @@ class Rehearsal:
             mysql_resource_ref=self.project + '-mysql', redis_resource_ref=self.project + '-redis', tls_trust_ref=self.project + '-ca',
             rollback_ref=ROLLBACK, authorization_ref='invoking user F02-actions-rehearsal automatic same-repository PR run',
             consumer_decision_ref='F02-SCOPE-DIAGNOSTIC-20261028', finn_sha=os.environ['F02_HEAD_SHA'], jake_sha=JAKE,
-            replicas=[{'id': 'finn-a', 'origin': 'https://localhost:18443', 'deployment_ref': self.project},
-                      {'id': 'finn-b', 'origin': 'https://localhost:20443', 'deployment_ref': self.project}],
-            consumer_kind='dedicated-contract-probe', consumer_origin='https://localhost:19443', consumer_path='/diagnostic/v1/access',
+            replicas=[{'id': 'finn-a', 'origin': self.url('finn-a'), 'deployment_ref': self.project},
+                      {'id': 'finn-b', 'origin': self.url('finn-b'), 'deployment_ref': self.project}],
+            consumer_kind='dedicated-contract-probe', consumer_origin=self.url('diagnostic'), consumer_path='/diagnostic/v1/access',
             tenant='f02-a', foreign_tenant='f02-b', current_kid='sign-new', previous_kid='sign-old', service_kid='state-new', previous_service_kid='state-old')
+
+    def url(self,service):
+        return ('http://' if service=='mail' else 'https://')+hostname(service)+(':'+str(8025) if service=='mail' else ':8443')
+
+    def route(self,service):
+        cid=compose('ps','-q',service).stdout.decode().strip()
+        info=json.loads(command(['docker','inspect',cid]).stdout)[0]
+        assert info['Config']['Labels']['com.docker.compose.project']==self.project
+        assert len(info['NetworkSettings']['Networks'])==1
+        address=next(iter(info['NetworkSettings']['Networks'].values()))['IPAddress']
+        import ipaddress
+        assert ipaddress.ip_address(address).is_private
+        hosts_update(service,address)
+        emit('owned_direct_route',service=service,origin=self.url(service),container_id=cid,ip_sha256=hashlib.sha256(address.encode()).hexdigest())
 
     def request(self, base, path, body=None, token=None, tenant='f02-a'):
         headers = {'Content-Type': 'application/json', 'X-Tenant-ID': tenant}
@@ -224,12 +276,13 @@ class Rehearsal:
             raise RuntimeError('case failed: ' + name)
 
     def ready(self, service, port):
+        self.route(service)
         deadline = time.monotonic() + 120
         last_status = None
         transport = None
         while time.monotonic() < deadline:
             try:
-                status, _, _ = self.request('https://localhost:' + str(port), '/healthz' if service != 'diagnostic' else '/diagnostic/v1/access')
+                status, _, _ = self.request(self.url(service), '/healthz' if service != 'diagnostic' else '/diagnostic/v1/access')
                 last_status = status
                 if status == (401 if service == 'diagnostic' else 200):
                     self.inventory(service)
@@ -261,37 +314,6 @@ class Rehearsal:
             result=compose('run','--rm','--no-deps','--entrypoint','python','diagnostic','-B','-c',script,check=False,timeout=20)
             emit('startup_private_tls_control',service=service,exit_code=result.returncode,status=int(result.stdout.strip()) if result.stdout.strip().isdigit() else None,
                  failure_classes=[kind for kind in ['PermissionError','SSLCertVerificationError','ConnectionRefusedError','TimeoutError'] if kind in result.stderr.decode(errors='replace')])
-            try:
-                result=compose('exec','-T',service,'/app/migrate','version',check=False,timeout=10)
-                emit('startup_same_container_db_control',exit_code=result.returncode,
-                     version6=b'version=6' in result.stdout+result.stderr,dirty_false=b'dirty=false' in result.stdout+result.stderr)
-            except subprocess.TimeoutExpired:
-                emit('startup_same_container_db_control',status='TIMEOUT')
-            # Temporary diagnosis after the original failure: SIGQUIT stops
-            # only this failed job-owned Go process. Never publish stack args.
-            command(['docker','kill','--signal=QUIT',cid],check=False)
-            time.sleep(1)
-            captured=compose('logs','--no-color','--tail','500',service,check=False)
-            stack=(captured.stdout+captured.stderr).decode(errors='replace')
-            functions=[];main=False
-            for line in stack.splitlines():
-                text=re.sub(r'^.*?\|\s*','',line)
-                if text.startswith('goroutine 1 '):main=True;continue
-                if main and not text.strip():break
-                if main:
-                    match=re.match(r'^([A-Za-z0-9_./@-]+(?:\.\(\*?[A-Za-z0-9_]+\))?\.[A-Za-z0-9_]+)\(',text)
-                    if match:functions.append(match[1])
-            emit('startup_main_stack_functions_only',functions=functions[:40])
-            groups=[];current=[]
-            for line in stack.splitlines():
-                text=re.sub(r'^.*?\|\s*','',line)
-                if text.startswith('goroutine '):
-                    if current:groups.append(current)
-                    current=[]
-                match=re.match(r'^([A-Za-z0-9_./@-]+(?:\.\(\*?[A-Za-z0-9_]+\))?\.[A-Za-z0-9_]+)\(',text)
-                if match:current.append(match[1])
-            if current:groups.append(current)
-            emit('startup_listener_functions_only',groups=[group[:18] for group in groups if any('net/http.' in name or name.startswith('main.run.func') for name in group)][:8])
         raise RuntimeError('service readiness failed: ' + service)
 
     def inventory(self, service):
@@ -314,7 +336,7 @@ class Rehearsal:
         return compose('exec', '-T', 'mysql', 'mysql', '--defaults-extra-file=/run/secrets/mysql-client.cnf', '-N', 'f02', data=sql.encode()).stdout.decode()
 
     def login(self, port=18443, tenant='f02-a'):
-        status, payload, date = self.request('https://localhost:' + str(port), '/api/v1/auth/login',
+        status, payload, date = self.request(self.url('finn-a' if port==18443 else 'finn-b'), '/api/v1/auth/login',
             {'email': tenant + '@example.invalid', 'password': self.keys['password']}, tenant=tenant)
         self.check('seed-login-' + tenant + '-' + str(port), status, 200)
         pair = token_pair(payload, 'login')
@@ -331,16 +353,16 @@ class Rehearsal:
     def fixtures(self):
         self.sql("INSERT INTO tenants(id,slug,name,is_active) VALUES ('f02-a','f02-a','F02 A',1),('f02-b','f02-b','F02 B',1);")
         for tenant in ['f02-a', 'f02-b', 'default']:
-            status, _, _ = self.request('https://localhost:18443', '/api/v1/auth/register',
+            status, _, _ = self.request(self.url('finn-a'), '/api/v1/auth/register',
                 {'username': 'fixture-' + tenant, 'email': tenant + '@example.invalid', 'password': self.keys['password'], 'fullName': 'Synthetic F02'}, tenant=tenant)
             self.check('real-register-' + tenant, status, 201)
             deadline = time.monotonic() + 30
             verification = None
             while time.monotonic() < deadline and verification is None:
-                _, messages, _ = self.request('http://127.0.0.1:18025', '/api/v1/messages')
+                _, messages, _ = self.request(self.url('mail'), '/api/v1/messages')
                 for message in messages.get('messages', []):
                     if any(to['Address'] == tenant + '@example.invalid' for to in message.get('To', [])) and message['Subject'] == 'Verify your email':
-                        _, content, _ = self.request('http://127.0.0.1:18025', '/api/v1/message/' + message['ID'])
+                        _, content, _ = self.request(self.url('mail'), '/api/v1/message/' + message['ID'])
                         found = re.search(r'Use this token to verify your email: (\S+)', content['Text'])
                         if found:
                             verification = mask(found[1])
@@ -348,7 +370,7 @@ class Rehearsal:
                     time.sleep(1)
             if verification is None:
                 raise RuntimeError('synthetic mail verification missing')
-            status, _, _ = self.request('https://localhost:18443', '/api/v1/auth/verify-email', {'token': verification}, tenant=tenant)
+            status, _, _ = self.request(self.url('finn-a'), '/api/v1/auth/verify-email', {'token': verification}, tenant=tenant)
             self.check('real-email-verification-' + tenant, status, 200)
             # Task-owned explicit grants with the same epoch seam as the real
             # repository; no platform/admin role or authority is seeded.
@@ -416,7 +438,7 @@ class Rehearsal:
             probe.consumer(candidate, expected, 'extended-' + name)
         for purpose in ['reset', 'verify-email', 'mfa_pending', 'sudo', 'service', 'obo']:
             token = signed(dict(claims, type=purpose), kid, self.keys[kid])
-            status, _, _ = self.request('https://localhost:18443', '/api/v1/auth/me', token=token)
+            status, _, _ = self.request(self.url('finn-a'), '/api/v1/auth/me', token=token)
             self.check('protected-purpose-' + purpose, status, 401)
         probe.introspect(self.manifest['replicas'][0], self.access, (service[0], self.keys[kid]), 401, label='signing-is-not-service-key')
         emit('extended_matrix', cases=probe.results)
@@ -456,6 +478,7 @@ class Rehearsal:
         compose('up', '-d', 'mysql', 'redis', 'mail')
         for service in ['mysql','redis','mail']:
             self.inventory(service)
+        self.route('mail')
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             try:
@@ -478,7 +501,7 @@ class Rehearsal:
         self.fixtures()
         for tenant in ['f02-a', 'f02-b', 'default']:
             pair, _ = self.login(tenant=tenant)
-            status, _, _ = self.request('https://localhost:19443','/diagnostic/v1/access',token=pair['accessToken'],tenant='forged-header')
+            status, _, _ = self.request(self.url('diagnostic'),'/diagnostic/v1/access',token=pair['accessToken'],tenant='forged-header')
             self.check('signed-tenant-positive-' + tenant,status,200)
         self.phase('baseline')
         self.extended()
@@ -549,9 +572,9 @@ class Rehearsal:
         browser(self)
         for tenant in ['f02-a','f02-b','default']:
             pair,_=self.login(tenant=tenant)
-            status,_,_=self.request('https://localhost:18443','/api/v1/auth/logout-all',body={},token=pair['accessToken'],tenant=tenant)
+            status,_,_=self.request(self.url('finn-a'),'/api/v1/auth/logout-all',body={},token=pair['accessToken'],tenant=tenant)
             self.check('owned-session-logout-all-'+tenant,status,200)
-            status,_,_=self.request('https://localhost:18443','/api/v1/auth/me',token=pair['accessToken'],tenant=tenant)
+            status,_,_=self.request(self.url('finn-a'),'/api/v1/auth/me',token=pair['accessToken'],tenant=tenant)
             self.check('owned-session-inactive-'+tenant,status,401)
         emit('limitations',historical_legacy_browser='NOT_RUN_SYNTHETIC_NEGATIVES_ONLY',actual_jake='NOT_CERTIFIED_J02',
              mfa_passkey_reset_device='NOT_RUN',render_pilot='NOT_RUN',independent_acceptance='PENDING')
@@ -572,6 +595,8 @@ def cleanup():
          session_revocation_claim='only observed API acknowledgments; task store removal destroys remaining synthetic state')
     if result.returncode or remaining or volumes or networks:
         raise RuntimeError('cleanup incomplete')
+    hosts_update()
+    emit('hosts_cleanup',status='PASS',only_exact_project_entries_removed=True)
     # identity() verified this exact absolute child of RUNNER_TEMP; never a repo.
     shutil.rmtree(root)
     emit('private_file_cleanup',status='PASS',runtime_root_removed=not root.exists(),secure_erasure_claim=False)

@@ -48,6 +48,7 @@ class Consumer:
             raise ValueError('separate service purpose required')
         context = ssl.create_default_context(cafile=config['ca_file'])
         context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.verify_flags |= ssl.VERIFY_X509_STRICT
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                                urllib.request.HTTPSHandler(context=context), NoRedirect())
 

@@ -25,6 +25,16 @@ Only loopback ports18443/20443/19443/18025 are published. MySQL/Redis ports are
 private. The six containers have no shared/external network, privileged mode,
 Docker socket, host networking, restart policy or production connection.
 
+Actual host test routes use `<service>-<project>.test:8443` (mail8025), mapped
+only to inspected task-owned bridge addresses in this disposable VM's hosts
+file. The script checks project labels/private addresses, updates each exact
+alias after recreation and removes only its marked entries during cleanup.
+No public DNS, proxy, tunnel or Windows host change is involved. Configured
+loopback publishing is not assumed reachable: the internal bridge's actual
+HTTPS service routes are verified directly. Every leaf SAN names its exact
+reviewed test alias and Docker service; CA key usage and constraints are checked
+with `openssl verify -x509_strict`, not a certificate-verification bypass.
+
 `RUNNER_TEMP/<project>` is restricted0700; independent RNG signing, service,
 audit, checkpoint, recovery, metrics, store and synthetic-account material is
 masked before possible output. Private env/config/TLS/manifest/mail/token data

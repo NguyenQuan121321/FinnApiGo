@@ -15,7 +15,7 @@ from rehearsal import decode, signed
 
 
 SCRIPT = r"""
-const [accounts, password, legacy] = arguments; const done=arguments[arguments.length-1];
+const [accounts, password, legacy, finn, consumer] = arguments; const done=arguments[arguments.length-1];
 (async()=>{
  const results=[];
  function check(name,actual,expected){results.push({case:name,actual,expected});if(actual!==expected)throw new Error(name);}
@@ -23,26 +23,26 @@ const [accounts, password, legacy] = arguments; const done=arguments[arguments.l
  let pair=null, tenant='f02-a', refreshUnknown=false;
  const headers=()=>({'Content-Type':'application/json','X-Tenant-ID':tenant});
  try {
-  const old=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+legacy}});
+  const old=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+legacy}});
   check('synthetic-legacy-reauth',old.status,401);
   for(tenant of accounts){
-   const login=await call('https://localhost:18443/api/v1/auth/login',{method:'POST',headers:headers(),body:JSON.stringify({email:tenant+'@example.invalid',password})});
+   const login=await call(finn+'/api/v1/auth/login',{method:'POST',headers:headers(),body:JSON.stringify({email:tenant+'@example.invalid',password})});
    check('browser-login-'+tenant,login.status,200);
    pair=(await login.json()).data;
    if(!pair || typeof pair.accessToken!=='string' || typeof pair.refreshToken!=='string')throw new Error('shape');
-   const access=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken,'X-Tenant-ID':'forged-header'}});
+   const access=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken,'X-Tenant-ID':'forged-header'}});
    check('browser-consumer-'+tenant,access.status,200);
    refreshUnknown=true;
-   const refreshed=await call('https://localhost:18443/api/v1/auth/refresh-token',{method:'POST',headers:headers(),body:JSON.stringify({refreshToken:pair.refreshToken})});
+   const refreshed=await call(finn+'/api/v1/auth/refresh-token',{method:'POST',headers:headers(),body:JSON.stringify({refreshToken:pair.refreshToken})});
    check('browser-refresh-'+tenant,refreshed.status,200);
    const next=(await refreshed.json()).data;
    if(!next || typeof next.accessToken!=='string' || typeof next.refreshToken!=='string')throw new Error('refresh-shape');
-   const verify=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+next.accessToken}});
+   const verify=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+next.accessToken}});
    check('browser-refreshed-consumer-'+tenant,verify.status,200);
    pair=next; refreshUnknown=false;
-   const logout=await call('https://localhost:18443/api/v1/auth/logout',{method:'POST',headers:{...headers(),Authorization:'Bearer '+pair.accessToken},body:JSON.stringify({refreshToken:pair.refreshToken})});
+   const logout=await call(finn+'/api/v1/auth/logout',{method:'POST',headers:{...headers(),Authorization:'Bearer '+pair.accessToken},body:JSON.stringify({refreshToken:pair.refreshToken})});
    check('browser-logout-'+tenant,logout.status,200);
-   const revoked=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken}});
+   const revoked=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken}});
    check('browser-after-logout-'+tenant,revoked.status,401);
    pair=null;
    check('localStorage-empty-'+tenant,localStorage.length,0);
@@ -53,7 +53,7 @@ const [accounts, password, legacy] = arguments; const done=arguments[arguments.l
   done({status:'PASS_DIAGNOSTIC_BROWSER_ONLY',results,cleanup_unresolved:false});
  } catch(e){
   let acknowledged=false;
-  if(pair){try{const r=await call('https://localhost:18443/api/v1/auth/logout',{method:'POST',headers:{...headers(),Authorization:'Bearer '+pair.accessToken},body:JSON.stringify({refreshToken:pair.refreshToken})});acknowledged=r.status===200;}catch{}}
+  if(pair){try{const r=await call(finn+'/api/v1/auth/logout',{method:'POST',headers:{...headers(),Authorization:'Bearer '+pair.accessToken},body:JSON.stringify({refreshToken:pair.refreshToken})});acknowledged=r.status===200;}catch{}}
   pair=null;
   done({status:'FAIL',results,cleanup_unresolved:refreshUnknown||!acknowledged});
  }
@@ -104,13 +104,13 @@ def browser(rehearsal):
         # Finn's existing CORS allowlist does not include X-Tenant-ID. Keep
         # runtime unchanged: run the diagnostic memory client on Finn's origin
         # for same-origin A/B/default login, with strict diagnostic-only CORS.
-        wd('POST','/session/'+session+'/url',{'url':'https://localhost:18443/healthz'})
+        wd('POST','/session/'+session+'/url',{'url':rehearsal.url('finn-a')+'/healthz'})
         initial=wd('POST','/session/'+session+'/execute/sync',{'script':'return {local:localStorage.length,session:sessionStorage.length,cookies:document.cookie==="",memory:typeof window.f02Memory};','args':[]})
         if initial!={'local':0,'session':0,'cookies':True,'memory':'undefined'}:raise RuntimeError('browser initial persistence')
         emit('browser_open_or_reopen',status='PASS',storage_empty=True,memory_absent=True)
         claims=json.loads(decode(rehearsal.access.split('.')[1]));claims.pop('contract_ver')
         legacy=mask(signed(claims,'sign-new',rehearsal.keys['sign-new']))
-        result=wd('POST','/session/'+session+'/execute/async',{'script':SCRIPT,'args':[['f02-a','f02-b','default'],rehearsal.keys['password'],legacy]})
+        result=wd('POST','/session/'+session+'/execute/async',{'script':SCRIPT,'args':[['f02-a','f02-b','default'],rehearsal.keys['password'],legacy,rehearsal.url('finn-a'),rehearsal.url('diagnostic')]})
         emit('browser_matrix',report=result,boundary='actual Finn + diagnostic UI; synthetic legacy shape; no Jake/MFA certification')
         if result.get('status')!='PASS_DIAGNOSTIC_BROWSER_ONLY' or result.get('cleanup_unresolved') is not False:raise RuntimeError('browser matrix failed')
         wd('POST','/session/'+session+'/refresh',{})

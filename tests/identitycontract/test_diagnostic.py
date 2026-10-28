@@ -63,7 +63,8 @@ class DiagnosticHTTPS(unittest.TestCase):
 
     def test_real_tls_consumer_and_upstream(self):
         server=serve(self.config,('127.0.0.1',0));thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-        http=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=self.config['ca_file'])))
+        context=ssl.create_default_context(cafile=self.config['ca_file']);context.verify_flags|=ssl.VERIFY_X509_STRICT
+        http=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=context))
         try:
             request=urllib.request.Request('https://localhost:'+str(server.server_port)+'/diagnostic/v1/access',headers={'Authorization':'Bearer '+self.token()})
             with http.open(request,timeout=5) as response:self.assertEqual(response.code,200)
