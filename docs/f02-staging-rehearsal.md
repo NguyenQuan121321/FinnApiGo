@@ -1,5 +1,10 @@
 # F02 staging acceptance rehearsal
 
+The separately authorized [ephemeral Actions rehearsal](f02-actions-rehearsal.md)
+uses actual Finn/TLS/stores and a deployed strict diagnostic consumer. Its scope,
+automatic operations and remaining manual/browser/Jake acceptance limitations
+are explicit there; it does not certify Render or replace independent acceptance.
+
 This runbook prepares the remaining original F02 acceptance. It changes no
 runtime policy and authorizes no operational action. F02 remains BLOCKED until
 the actual staging matrix, accountable owners and consumer boundary are accepted.

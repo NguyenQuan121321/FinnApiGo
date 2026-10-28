@@ -1,0 +1,89 @@
+name: F02 isolated real-clock rehearsal
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: f02-rehearsal-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  rehearsal:
+    name: F02 actual Finn TLS rotation and fault rehearsal
+    if: >-
+      github.repository == 'NguyenQuan121321/FinnApiGo' &&
+      github.event.repository.private == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'codex/f02-actions-rehearsal'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      F02_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      F02_PROJECT: f02-${{ github.run_id }}-${{ github.run_attempt }}
+      F02_ROOT: ${{ runner.temp }}/f02-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout tested merge without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify public standard-runner eligibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(gh api repos/NguyenQuan121321/FinnApiGo --jq '.visibility')" = public
+          echo 'USD0 target: public repository, standard ubuntu-24.04; no new cache/artifact/package upload.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Prepare isolated keys, TLS, strict rollback source
+        run: python3 -B tests/identitycontract/actions_rehearsal.py prepare
+      - name: Build actual release, diagnostic and previous strict release
+        run: |
+          set -euo pipefail
+          docker build -t "finnapigo:$F02_PROJECT" .
+          docker build -f tests/identitycontract/diagnostic.Dockerfile -t "f02-diagnostic:$F02_PROJECT" .
+          docker build -t "f02-rollback:$F02_PROJECT" "$F02_ROOT/rollback-source"
+      - name: Scan the exact rehearsal release image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: finnapigo:${{ env.F02_PROJECT }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          cache: 'false'
+      - name: Scan the exact diagnostic image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: f02-diagnostic:${{ env.F02_PROJECT }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          cache: 'false'
+      - name: Scan the exact strict rollback image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: f02-rollback:${{ env.F02_PROJECT }}
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: true
+          cache: 'false'
+      - name: Install browser trust utility only on ephemeral runner
+        run: |
+          set -euo pipefail
+          if ! command -v certutil >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install --no-install-recommends -y libnss3-tools
+          fi
+      - name: Diagnostic HTTPS regression controls
+        working-directory: tests/identitycontract
+        run: python3 -B -m unittest -v test_diagnostic.py
+      - name: Execute real release and real-clock matrix
+        run: python3 -B tests/identitycontract/actions_rehearsal.py run
+      - name: Always remove only this job project and private files
+        if: ${{ always() }}
+        run: python3 -B tests/identitycontract/actions_rehearsal.py cleanup
