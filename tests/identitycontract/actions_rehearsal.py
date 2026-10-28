@@ -251,6 +251,26 @@ class Rehearsal:
             script="import ssl,urllib.request;h=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile='/run/tls/ca.crt')));r=h.open('https://"+service+":8443/healthz',timeout=5);print(r.code)"
             result=compose('run','--rm','--no-deps','--entrypoint','python','diagnostic','-B','-c',script,check=False,timeout=20)
             emit('startup_private_tls_control',service=service,exit_code=result.returncode,status=int(result.stdout.strip()) if result.stdout.strip().isdigit() else None)
+            try:
+                result=compose('exec','-T',service,'/app/migrate','version',check=False,timeout=10)
+                emit('startup_same_container_db_control',exit_code=result.returncode,
+                     version6=b'version=6' in result.stdout+result.stderr,dirty_false=b'dirty=false' in result.stdout+result.stderr)
+            except subprocess.TimeoutExpired:
+                emit('startup_same_container_db_control',status='TIMEOUT')
+            # Temporary diagnosis after the original failure: SIGQUIT stops
+            # only this failed job-owned Go process. Never publish stack args.
+            command(['docker','kill','--signal=QUIT',cid],check=False)
+            time.sleep(1)
+            stack=compose('logs','--no-color','--tail','500',service,check=False).stdout.decode(errors='replace')
+            functions=[];main=False
+            for line in stack.splitlines():
+                text=re.sub(r'^.*?\|\s*','',line)
+                if text.startswith('goroutine 1 '):main=True;continue
+                if main and not text.strip():break
+                if main:
+                    match=re.match(r'^([A-Za-z0-9_./@-]+(?:\.\(\*?[A-Za-z0-9_]+\))?\.[A-Za-z0-9_]+)\(',text)
+                    if match:functions.append(match[1])
+            emit('startup_main_stack_functions_only',functions=functions[:40])
         raise RuntimeError('service readiness failed: ' + service)
 
     def inventory(self, service):
