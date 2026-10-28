@@ -244,14 +244,23 @@ class Rehearsal:
                    'audit', 'metrics', 'certificate', 'dial tcp', 'no such', 'connection refused', 'TLS', 'fatal']
         cid=compose('ps','--all','-q',service).stdout.decode().strip()
         inspected=json.loads(command(['docker','inspect',cid]).stdout)[0]
+        variables=dict(value.split('=',1) for value in inspected['Config']['Env'])
+        tcp=compose('exec','-T',service,'cat','/proc/net/tcp','/proc/net/tcp6',check=False)
+        listen_ports=[]
+        for line in tcp.stdout.decode().splitlines():
+            fields=line.split()
+            if len(fields)>3 and fields[3]=='0A':listen_ports.append(int(fields[1].split(':')[-1],16))
         progress=['database connected','store: Redis-backed','email: SMTP notifier enabled','server listening','finnapigo fatal','server error','server stopped cleanly']
         emit('startup_failed', service=service, matched_categories=[word for word in allowed if word.lower() in raw.lower()],
              progress=[word for word in progress if word in raw],last_http_status=last_status,transport_error_type=transport,
+             expected_port_configured=variables.get('SERVER_PORT')=='8443',release_mode=variables.get('GIN_MODE')=='release',
+             expected_tls_configured=variables.get('SERVER_TLS_CERT_FILE')=='/run/tls/cert.pem',listening_ports=sorted(set(listen_ports)),
              state={key:inspected['State'][key] for key in ['Status','Running','ExitCode','OOMKilled','StartedAt','FinishedAt']})
         if service in ['finn-a','finn-b']:
             script="import ssl,urllib.request;h=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile='/run/tls/ca.crt')));r=h.open('https://"+service+":8443/healthz',timeout=5);print(r.code)"
             result=compose('run','--rm','--no-deps','--entrypoint','python','diagnostic','-B','-c',script,check=False,timeout=20)
-            emit('startup_private_tls_control',service=service,exit_code=result.returncode,status=int(result.stdout.strip()) if result.stdout.strip().isdigit() else None)
+            emit('startup_private_tls_control',service=service,exit_code=result.returncode,status=int(result.stdout.strip()) if result.stdout.strip().isdigit() else None,
+                 failure_classes=[kind for kind in ['PermissionError','SSLCertVerificationError','ConnectionRefusedError','TimeoutError'] if kind in result.stderr.decode(errors='replace')])
             try:
                 result=compose('exec','-T',service,'/app/migrate','version',check=False,timeout=10)
                 emit('startup_same_container_db_control',exit_code=result.returncode,
@@ -273,6 +282,16 @@ class Rehearsal:
                     match=re.match(r'^([A-Za-z0-9_./@-]+(?:\.\(\*?[A-Za-z0-9_]+\))?\.[A-Za-z0-9_]+)\(',text)
                     if match:functions.append(match[1])
             emit('startup_main_stack_functions_only',functions=functions[:40])
+            groups=[];current=[]
+            for line in stack.splitlines():
+                text=re.sub(r'^.*?\|\s*','',line)
+                if text.startswith('goroutine '):
+                    if current:groups.append(current)
+                    current=[]
+                match=re.match(r'^([A-Za-z0-9_./@-]+(?:\.\(\*?[A-Za-z0-9_]+\))?\.[A-Za-z0-9_]+)\(',text)
+                if match:current.append(match[1])
+            if current:groups.append(current)
+            emit('startup_listener_functions_only',groups=[group[:18] for group in groups if any('net/http.' in name or name.startswith('main.run.func') for name in group)][:8])
         raise RuntimeError('service readiness failed: ' + service)
 
     def inventory(self, service):
