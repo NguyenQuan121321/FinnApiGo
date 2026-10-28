@@ -134,6 +134,8 @@ def config(root, keys, last=None, remove=False):
 def prepare():
     project, root = identity()
     root.mkdir(mode=0o700, exist_ok=False)
+    with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as stream:
+        stream.write('F02_ROOT=' + str(root) + '\n')
     keys = {name: rng() for name in ['sign-old', 'sign-new', 'state-old', 'state-new', 'audit', 'checkpoint', 'metrics']}
     keys.update(recovery=mask(secrets.token_hex(32)), redis=mask(secrets.token_hex(32)),
                 **{'mysql-root': mask(secrets.token_hex(32)), 'mysql-app': mask(secrets.token_hex(32)),

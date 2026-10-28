@@ -25,7 +25,6 @@ jobs:
     env:
       F02_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       F02_PROJECT: f02-${{ github.run_id }}-${{ github.run_attempt }}
-      F02_ROOT: ${{ runner.temp }}/f02-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout tested merge without persistent credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
