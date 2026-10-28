@@ -132,6 +132,10 @@ is added. Future cleanup must preserve security through expiry plus skew.
 
 ## Rotation, rollout and rollback
 
+The executable remaining acceptance plan is
+[f02-staging-rehearsal.md](f02-staging-rehearsal.md). Its offline preparation and
+probe results do not satisfy actual staging, owner or unchanged Jake acceptance.
+
 1. On authorized synthetic staging, apply additive migration 0005; record actual
    schema version, indexes, row counts, revision pair and TLS/storage inventory.
 2. Provision independent current signing/service keys and IDs. For signing
