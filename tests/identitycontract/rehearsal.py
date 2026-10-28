@@ -35,13 +35,23 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def origin(value):
-    parsed = urllib.parse.urlsplit(value)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or
-            parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
+    if not isinstance(value, str) or any(ord(c) <= 32 or ord(c) == 127 for c in value) or any(c in value for c in "\\?#"):
         raise Blocked("exact HTTPS origin required")
-    if parsed.hostname.lower() == "finnapigo.onrender.com":
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        host = (parsed.hostname or "").encode("idna").decode("ascii").lower().removesuffix(".")
+        port = parsed.port
+    except (ValueError, UnicodeError):
+        raise Blocked("unsupported HTTPS origin spelling") from None
+    if (parsed.scheme != "https" or not host or parsed.username is not None or
+            parsed.password is not None or parsed.path not in ("", "/") or
+            parsed.netloc.endswith(":") or port == 0):
+        raise Blocked("exact HTTPS origin required")
+    if len(host) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in host.split(".")):
+        raise Blocked("supported DNS hostname required")
+    if host == "finnapigo.onrender.com":
         raise Blocked("known production origin is forbidden")
-    return value.rstrip("/")
+    return "https://" + host + (":" + str(port) if port not in (None, 443) else "")
 
 
 def secret(name):
@@ -97,7 +107,7 @@ def validate(manifest):
 
 class Probe:
     def __init__(self, manifest):
-        self.m = manifest
+        self.m = validate(manifest)
         # Explicit trust store or OS defaults. No certificate-validation bypass.
         context = ssl.create_default_context(cafile=os.environ.get("F02_CA_FILE") or None)
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}),
@@ -179,31 +189,68 @@ def negatives(claims, kid, key):
     yield "missing-algorithm", signed(claims, kid, key, None)
 
 
+def token_pair(payload, operation):
+    pair = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(pair, dict) or not all(isinstance(pair.get(k), str) and pair[k].strip() for k in ("accessToken", "refreshToken")):
+        raise Blocked("invalid " + operation + " token-pair response")
+    return {k: pair[k] for k in ("accessToken", "refreshToken")}
+
+
+def cleanup_session(probe, replica, pair, refresh_unvalidated=False):
+    """One bounded attempt, no secret/error text and no implied revocation."""
+    result = {"case": replica["id"] + ":synthetic-session-cleanup", "status": "BLOCKED",
+              "http_status": None, "expected": 200, "observed_unix": int(time.time()),
+              "cleanup_unresolved": True}
+    if pair is None:
+        result["reason"] = "cleanup_credentials_unavailable"
+    else:
+        try:
+            status, _ = probe.request(replica["origin"], "/api/v1/auth/logout", token=pair["accessToken"], body={"refreshToken": pair["refreshToken"]})
+            result.update(http_status=status, status="PASS" if status == 200 else "FAIL", cleanup_unresolved=status != 200, logout_acknowledged=status == 200)
+            if status != 200:
+                result["reason"] = "cleanup_not_acknowledged"
+            elif refresh_unvalidated:
+                # The fallback logout receipt cannot establish the fate of an
+                # unknown/unvalidated replacement created by refresh rotation.
+                result.update(status="BLOCKED", cleanup_unresolved=True, reason="refresh_outcome_unvalidated")
+        except Exception:  # Best effort must not replace the original failure.
+            result["reason"] = "cleanup_request_failed"
+    probe.results.append(result)
+    return not result["cleanup_unresolved"]
+
+
 def login_rehearsal(probe, replica, signing, kid, service, reauth):
-    """Use the actual issuer; always attempt cleanup of the synthetic session."""
-    status, data = probe.request(replica["origin"], "/api/v1/auth/login", body={
-        "email": secret("F02_SYNTHETIC_EMAIL"), "password": secret("F02_SYNTHETIC_PASSWORD")})
-    probe.check(replica["id"] + ":actual-login", status, 200)
-    pair = data["data"]
-    if pair.get("mfaRequired"):
-        raise Blocked("MFA-enabled synthetic account requires reviewed browser/device ceremony")
+    """Use the actual issuer and retain usable cleanup credentials on failure."""
+    cleanup_pair = None
+    refresh_unvalidated = False
     try:
+        status, data = probe.request(replica["origin"], "/api/v1/auth/login", body={
+            "email": secret("F02_SYNTHETIC_EMAIL"), "password": secret("F02_SYNTHETIC_PASSWORD")})
+        probe.check(replica["id"] + ":actual-login", status, 200)
+        if isinstance(data, dict) and isinstance(data.get("data"), dict) and data["data"].get("mfaRequired"):
+            raise Blocked("MFA-enabled synthetic account requires reviewed browser/device ceremony")
+        pair = token_pair(data, "login")
+        cleanup_pair = pair
         verify(pair["accessToken"], {kid: signing}, probe.m["tenant"], "jakeai-service", int(time.time()))
         probe.introspect(replica, pair["accessToken"], service, label="actual-issuer-key-and-state")
         probe.consumer(pair["accessToken"], 200, replica["id"] + ":actual-issued-access")
         if reauth:
+            refresh_unvalidated = True
             status, refreshed = probe.request(replica["origin"], "/api/v1/auth/refresh-token", body={"refreshToken": pair["refreshToken"]})
             probe.check(replica["id"] + ":actual-refresh", status, 200)
-            pair = refreshed["data"]
-            verify(pair["accessToken"], {kid: signing}, probe.m["tenant"], "jakeai-service", int(time.time()))
-            probe.introspect(replica, pair["accessToken"], service, label="refreshed-state")
+            replacement = token_pair(refreshed, "refresh")
+            verify(replacement["accessToken"], {kid: signing}, probe.m["tenant"], "jakeai-service", int(time.time()))
+            probe.introspect(replica, replacement["accessToken"], service, label="refreshed-state")
+            cleanup_pair = replacement
+            refresh_unvalidated = False
     finally:
-        status, _ = probe.request(replica["origin"], "/api/v1/auth/logout", token=pair["accessToken"], body={"refreshToken": pair["refreshToken"]})
-        probe.check(replica["id"] + ":synthetic-session-cleanup", status, 200)
+        failed = sys.exc_info()[0] is not None
+        if not cleanup_session(probe, replica, cleanup_pair, refresh_unvalidated) and not failed:
+            raise Blocked("synthetic-session cleanup unresolved")
 
 
 def run(probe, phase):
-    m = probe.m
+    m = validate(probe.m)
     now = int(time.time())
     if phase == "overlap" and not m["last_old_issuance_unix"] <= now < min(m["last_old_issuance_unix"] + 930, m["service_overlap_until_unix"]):
         raise Blocked("outside actual signing/service overlap window")
@@ -238,17 +285,28 @@ def run(probe, phase):
             probe.introspect(replica, candidate, service, expected, label=name)
         login_rehearsal(probe, replica, signing, kid, service, phase in ("reauth", "rollback"))
         if phase in ("overlap", "retired", "rollback"):
+            expected = 200 if phase == "overlap" else 401
+            probe.consumer(token, 200, replica["id"] + ":current-signing-control")
             probe.introspect(replica, old_token, service, 200 if phase == "overlap" else 401, label="captured-previous-access")
+            probe.consumer(old_token, expected, "captured-previous-access")
             old_service = (m["previous_service_kid"], secret("F02_PREVIOUS_SERVICE_KEY"))
             probe.introspect(replica, token, old_service, 200 if phase == "overlap" else 401, label="previous-service")
-            # A fresh challenge uses an authoritative live session, avoiding natural
-            # expiry as the reason for rejection. It is NOT an issuer-produced token.
-            challenge = signed(claims, m["previous_kid"], secret("F02_PREVIOUS_SIGNING_KEY"))
+            # Renew only challenge times, retaining the authoritative session and
+            # grants. Paired current-key positives prevent expiry/dead state from
+            # masquerading as retirement. Neither challenge is issuer-produced.
+            issued = int(time.time())
+            challenge_claims = dict(claims, iat=issued, nbf=issued, exp=issued + 900)
+            current_challenge = signed(challenge_claims, kid, signing)
+            probe.introspect(replica, current_challenge, service, label="current-signing-fresh-control")
+            probe.consumer(current_challenge, 200, "current-signing-fresh-control")
+            challenge = signed(challenge_claims, m["previous_kid"], secret("F02_PREVIOUS_SIGNING_KEY"))
             probe.introspect(replica, challenge, service, 200 if phase == "overlap" else 401, label="previous-signing-fresh-challenge")
+            probe.consumer(challenge, expected, "previous-signing-fresh-challenge")
         if phase in ("reauth", "rollback"):
             legacy = secret("F02_LEGACY_ACCESS_TOKEN")
             status, _ = probe.request(replica["origin"], "/api/v1/auth/me", token=legacy)
             probe.check(replica["id"] + ":legacy-reauth-required", status, 401)
+            probe.consumer(legacy, 401, "legacy-reauth-required")
     probe.consumer(token, 503 if outage else 200, phase)
     if not outage:
         for name, candidate in negatives(claims, kid, signing):

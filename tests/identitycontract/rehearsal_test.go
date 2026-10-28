@@ -17,7 +17,7 @@ func TestF02RehearsalTool(t *testing.T) {
 	if !ok {
 		t.Fatal("locate fixed rehearsal test directory")
 	}
-	cmd := exec.Command(python, "-B", "-m", "unittest", "-v", "test_rehearsal.py") // #nosec G204 -- fixed interpreter, arguments and repository test directory.
+	cmd := exec.Command(python, "-B", "-m", "unittest", "-v", "test_rehearsal.py", "test_rehearsal_repairs.py") // #nosec G204 -- fixed interpreter, arguments and repository test directory.
 	cmd.Dir = filepath.Dir(source)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
