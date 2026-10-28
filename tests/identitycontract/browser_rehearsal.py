@@ -130,6 +130,7 @@ def browser(rehearsal,label):
         # Each window uses same-origin fetch. Exact origin+source postMessage
         # handoff preserves Finn's existing CSP/CORS without an HTTP proxy.
         wd('POST','/session/'+session+'/url',{'url':rehearsal.url('finn-a')+'/healthz'})
+        if not wd('POST','/session/'+session+'/execute/sync',{'script':'return location.origin===arguments[0];','args':[rehearsal.url('finn-a')]}):raise RuntimeError('browser auth origin mismatch')
         auth_window=wd('GET','/session/'+session+'/window')
         opened=wd('POST','/session/'+session+'/execute/sync',{'script':"window.f02Diagnostic=window.open(arguments[0]+'/browser',arguments[1]);return !!window.f02Diagnostic;",'args':[rehearsal.url('diagnostic'),rehearsal.project]})
         if not opened:raise RuntimeError('browser diagnostic window blocked')
@@ -137,6 +138,7 @@ def browser(rehearsal,label):
         children=[handle for handle in handles if handle!=auth_window]
         if len(children)!=1:raise RuntimeError('browser window identity')
         wd('POST','/session/'+session+'/window',{'handle':children[0]})
+        wd('POST','/session/'+session+'/url',{'url':rehearsal.url('diagnostic')+'/browser'})
         bridge=wd('POST','/session/'+session+'/execute/sync',{'script':CONSUMER_BRIDGE,'args':[rehearsal.url('finn-a')]})
         if bridge!={'opener':True,'storage_empty':True}:raise RuntimeError('browser message origin setup')
         wd('POST','/session/'+session+'/window',{'handle':auth_window})
