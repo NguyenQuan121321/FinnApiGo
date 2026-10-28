@@ -27,10 +27,13 @@ class Consumer:
         self.keys = config['keys']
         if not 1 <= len(self.keys) <= 2:
             raise ValueError('explicit current/previous keys required')
+        decoded = set()
         for kid, value in self.keys.items():
             key = base64.b64decode(value, validate=True)
-            if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', kid) or len(key) < 32 or len(set(key)) < 16:
+            if (not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', kid) or len(key) < 32 or len(set(key)) < 16
+                    or base64.b64encode(key).decode() != value or key in decoded):
                 raise ValueError('strong configured key required')
+            decoded.add(key)
         self.retired = config.get('retired', {})
         if len(self.keys) == 2:
             previous = config['previous_kid']
@@ -39,7 +42,9 @@ class Consumer:
                 raise ValueError('immutable real previous-key deadline required')
         elif self.retired:
             raise ValueError('unexpected retirement configuration')
-        if config['service_secret'] in self.keys.values():
+        service_key = base64.b64decode(config['service_secret'], validate=True)
+        if (service_key in decoded or len(service_key) < 32 or len(set(service_key)) < 16
+                or base64.b64encode(service_key).decode() != config['service_secret']):
             raise ValueError('separate service purpose required')
         context = ssl.create_default_context(cafile=config['ca_file'])
         context.minimum_version = ssl.TLSVersion.TLSv1_2

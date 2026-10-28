@@ -247,6 +247,9 @@ class Rehearsal:
         bindings = info['HostConfig']['PortBindings'] or {}
         assert all(binding['HostIp'] == '127.0.0.1' for values in bindings.values() for binding in (values or []))
         assert len(info['NetworkSettings']['Networks']) == 1
+        for network in info['NetworkSettings']['Networks'].values():
+            inspected = json.loads(command(['docker','network','inspect',network['NetworkID']]).stdout)[0]
+            assert inspected['Internal'] and inspected['Labels']['com.docker.compose.project'] == self.project
         for replica in self.manifest['replicas']:
             if replica['id'] == service:
                 replica['deployment_ref'] = cid + '@' + info['Image']
@@ -397,6 +400,8 @@ class Rehearsal:
     def run(self):
         compose('pull', 'mysql', 'redis', 'mail', timeout=300)
         compose('up', '-d', 'mysql', 'redis', 'mail')
+        for service in ['mysql','redis','mail']:
+            self.inventory(service)
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
             try:

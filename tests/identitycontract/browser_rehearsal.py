@@ -47,7 +47,7 @@ const [accounts, password, legacy] = arguments; const done=arguments[arguments.l
    pair=null;
    check('localStorage-empty-'+tenant,localStorage.length,0);
    check('sessionStorage-empty-'+tenant,sessionStorage.length,0);
-   check('cookies-empty-'+tenant,document.cookie,'');
+   check('cookies-empty-'+tenant,document.cookie==='',true);
   }
   window.f02Memory=null;
   done({status:'PASS_DIAGNOSTIC_BROWSER_ONLY',results,cleanup_unresolved:false});
@@ -102,14 +102,17 @@ def browser(rehearsal):
         emit('browser_identity',browser_version=capabilities['capabilities']['browserVersion'],accept_insecure_certs=capabilities['capabilities'].get('acceptInsecureCerts'))
         wd('POST','/session/'+session+'/timeouts',{'script':65000})
         wd('POST','/session/'+session+'/url',{'url':'https://localhost:19443/browser'})
+        initial=wd('POST','/session/'+session+'/execute/sync',{'script':'return {local:localStorage.length,session:sessionStorage.length,cookies:document.cookie==="",memory:typeof window.f02Memory};','args':[]})
+        if initial!={'local':0,'session':0,'cookies':True,'memory':'undefined'}:raise RuntimeError('browser initial persistence')
+        emit('browser_open_or_reopen',status='PASS',storage_empty=True,memory_absent=True)
         claims=json.loads(decode(rehearsal.access.split('.')[1]));claims.pop('contract_ver')
         legacy=mask(signed(claims,'sign-new',rehearsal.keys['sign-new']))
         result=wd('POST','/session/'+session+'/execute/async',{'script':SCRIPT,'args':[['f02-a','f02-b','default'],rehearsal.keys['password'],legacy]})
         emit('browser_matrix',report=result,boundary='actual Finn + diagnostic UI; synthetic legacy shape; no Jake/MFA certification')
         if result.get('status')!='PASS_DIAGNOSTIC_BROWSER_ONLY' or result.get('cleanup_unresolved') is not False:raise RuntimeError('browser matrix failed')
         wd('POST','/session/'+session+'/refresh',{})
-        storage=wd('POST','/session/'+session+'/execute/sync',{'script':'return {local:localStorage.length,session:sessionStorage.length,cookies:document.cookie,memory:typeof window.f02Memory};','args':[]})
-        if storage!={'local':0,'session':0,'cookies':'','memory':'undefined'}:raise RuntimeError('browser persistence')
+        storage=wd('POST','/session/'+session+'/execute/sync',{'script':'return {local:localStorage.length,session:sessionStorage.length,cookies:document.cookie==="",memory:typeof window.f02Memory};','args':[]})
+        if storage!={'local':0,'session':0,'cookies':True,'memory':'undefined'}:raise RuntimeError('browser persistence')
         emit('browser_reload',status='PASS',storage_empty=True,memory_lost=True)
     finally:
         if session:
