@@ -20,29 +20,41 @@ const [accounts, password, legacy, finn, consumer] = arguments; const done=argum
  const results=[];
  function check(name,actual,expected){results.push({case:name,actual,expected});if(actual!==expected)throw new Error(name);}
  const call=(url,options={})=>fetch(url,{cache:'no-store',credentials:'omit',...options});
+ const consumerCall=(token,forged=false)=>new Promise((resolve,reject)=>{
+  const target=window.f02Diagnostic, id=crypto.randomUUID();
+  const receive=event=>{if(event.origin===consumer && event.source===target && event.data?.type==='f02-result' && event.data.id===id){clearTimeout(timer);removeEventListener('message',receive);resolve({status:event.data.status});}};
+  const timer=setTimeout(()=>{removeEventListener('message',receive);reject(new Error('consumer message timeout'));},10000);
+  addEventListener('message',receive);
+  target.postMessage({type:'f02-request',id,token,forged},consumer);
+ });
  let pair=null, tenant='f02-a', refreshUnknown=false;
  const headers=()=>({'Content-Type':'application/json','X-Tenant-ID':tenant});
  try {
-  const old=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+legacy}});
+  const old=await consumerCall(legacy);
   check('synthetic-legacy-reauth',old.status,401);
   for(tenant of accounts){
    const login=await call(finn+'/api/v1/auth/login',{method:'POST',headers:headers(),body:JSON.stringify({email:tenant+'@example.invalid',password})});
    check('browser-login-'+tenant,login.status,200);
    pair=(await login.json()).data;
    if(!pair || typeof pair.accessToken!=='string' || typeof pair.refreshToken!=='string')throw new Error('shape');
-   const access=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken,'X-Tenant-ID':'forged-header'}});
+   check('authenticated-localStorage-empty-'+tenant,localStorage.length,0);
+   check('authenticated-sessionStorage-empty-'+tenant,sessionStorage.length,0);
+   check('authenticated-cookies-empty-'+tenant,document.cookie==='',true);
+   const access=await consumerCall(pair.accessToken,true);
    check('browser-consumer-'+tenant,access.status,200);
    refreshUnknown=true;
    const refreshed=await call(finn+'/api/v1/auth/refresh-token',{method:'POST',headers:headers(),body:JSON.stringify({refreshToken:pair.refreshToken})});
    check('browser-refresh-'+tenant,refreshed.status,200);
    const next=(await refreshed.json()).data;
    if(!next || typeof next.accessToken!=='string' || typeof next.refreshToken!=='string')throw new Error('refresh-shape');
-   const verify=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+next.accessToken}});
+   const verify=await consumerCall(next.accessToken);
    check('browser-refreshed-consumer-'+tenant,verify.status,200);
    pair=next; refreshUnknown=false;
+   check('refreshed-localStorage-empty-'+tenant,localStorage.length,0);
+   check('refreshed-sessionStorage-empty-'+tenant,sessionStorage.length,0);
    const logout=await call(finn+'/api/v1/auth/logout',{method:'POST',headers:{...headers(),Authorization:'Bearer '+pair.accessToken},body:JSON.stringify({refreshToken:pair.refreshToken})});
    check('browser-logout-'+tenant,logout.status,200);
-   const revoked=await call(consumer+'/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken}});
+   const revoked=await consumerCall(pair.accessToken);
    check('browser-after-logout-'+tenant,revoked.status,401);
    pair=null;
    check('localStorage-empty-'+tenant,localStorage.length,0);
@@ -55,13 +67,27 @@ const [accounts, password, legacy, finn, consumer] = arguments; const done=argum
   let acknowledged=false;
   if(pair){try{const r=await call(finn+'/api/v1/auth/logout',{method:'POST',headers:{...headers(),Authorization:'Bearer '+pair.accessToken},body:JSON.stringify({refreshToken:pair.refreshToken})});acknowledged=r.status===200;}catch{}}
   pair=null;
-  done({status:'FAIL',results,cleanup_unresolved:refreshUnknown||!acknowledged});
+  done({status:'FAIL',results,error_type:e.name,cleanup_unresolved:refreshUnknown||!acknowledged});
  }
 })().catch(()=>done({status:'FAIL',cleanup_unresolved:true}));
 """
 
+CONSUMER_BRIDGE = r"""
+const finn=arguments[0], parent=window.opener;
+window.addEventListener('message',async event=>{
+ if(event.origin!==finn || event.source!==parent || event.data?.type!=='f02-request')return;
+ const {id,token,forged}=event.data;
+ if(typeof id!=='string' || typeof token!=='string')return;
+ let status=0;
+ try{const headers={Authorization:'Bearer '+token};if(forged)headers['X-Tenant-ID']='forged-header';
+ const response=await fetch('/diagnostic/v1/access',{cache:'no-store',credentials:'omit',headers});status=response.status;}catch{}
+ parent.postMessage({type:'f02-result',id,status},finn);
+});
+return {opener:!!parent,storage_empty:localStorage.length===0&&sessionStorage.length===0&&document.cookie===''};
+"""
 
-def browser(rehearsal):
+
+def browser(rehearsal,label):
     from actions_rehearsal import command, emit, mask
     root = rehearsal.root
     home = root / 'browser-home'
@@ -101,17 +127,27 @@ def browser(rehearsal):
         session=capabilities['sessionId']
         emit('browser_identity',browser_version=capabilities['capabilities']['browserVersion'],accept_insecure_certs=capabilities['capabilities'].get('acceptInsecureCerts'))
         wd('POST','/session/'+session+'/timeouts',{'script':65000})
-        # Finn's existing CORS allowlist does not include X-Tenant-ID. Keep
-        # runtime unchanged: run the diagnostic memory client on Finn's origin
-        # for same-origin A/B/default login, with strict diagnostic-only CORS.
+        # Each window uses same-origin fetch. Exact origin+source postMessage
+        # handoff preserves Finn's existing CSP/CORS without an HTTP proxy.
         wd('POST','/session/'+session+'/url',{'url':rehearsal.url('finn-a')+'/healthz'})
+        auth_window=wd('GET','/session/'+session+'/window')
+        opened=wd('POST','/session/'+session+'/execute/sync',{'script':"window.f02Diagnostic=window.open(arguments[0]+'/browser',arguments[1]);return !!window.f02Diagnostic;",'args':[rehearsal.url('diagnostic'),rehearsal.project]})
+        if not opened:raise RuntimeError('browser diagnostic window blocked')
+        handles=wd('GET','/session/'+session+'/window/handles')
+        children=[handle for handle in handles if handle!=auth_window]
+        if len(children)!=1:raise RuntimeError('browser window identity')
+        wd('POST','/session/'+session+'/window',{'handle':children[0]})
+        bridge=wd('POST','/session/'+session+'/execute/sync',{'script':CONSUMER_BRIDGE,'args':[rehearsal.url('finn-a')]})
+        if bridge!={'opener':True,'storage_empty':True}:raise RuntimeError('browser message origin setup')
+        wd('POST','/session/'+session+'/window',{'handle':auth_window})
         initial=wd('POST','/session/'+session+'/execute/sync',{'script':'return {local:localStorage.length,session:sessionStorage.length,cookies:document.cookie==="",memory:typeof window.f02Memory};','args':[]})
         if initial!={'local':0,'session':0,'cookies':True,'memory':'undefined'}:raise RuntimeError('browser initial persistence')
         emit('browser_open_or_reopen',status='PASS',storage_empty=True,memory_absent=True)
         claims=json.loads(decode(rehearsal.access.split('.')[1]));claims.pop('contract_ver')
-        legacy=mask(signed(claims,'sign-new',rehearsal.keys['sign-new']))
+        kid='sign-old' if rehearsal.last is None else 'sign-new'
+        legacy=mask(signed(claims,kid,rehearsal.keys[kid]))
         result=wd('POST','/session/'+session+'/execute/async',{'script':SCRIPT,'args':[['f02-a','f02-b','default'],rehearsal.keys['password'],legacy,rehearsal.url('finn-a'),rehearsal.url('diagnostic')]})
-        emit('browser_matrix',report=result,boundary='actual Finn + diagnostic UI; synthetic legacy shape; no Jake/MFA certification')
+        emit('browser_matrix',label=label,report=result,boundary='actual Finn + diagnostic windows; exact origin/source handoff, synthetic legacy shape; no Jake/MFA certification')
         if result.get('status')!='PASS_DIAGNOSTIC_BROWSER_ONLY' or result.get('cleanup_unresolved') is not False:raise RuntimeError('browser matrix failed')
         wd('POST','/session/'+session+'/refresh',{})
         storage=wd('POST','/session/'+session+'/execute/sync',{'script':'return {local:localStorage.length,session:sessionStorage.length,cookies:document.cookie==="",memory:typeof window.f02Memory};','args':[]})

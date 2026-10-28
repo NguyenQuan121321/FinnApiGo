@@ -116,12 +116,15 @@ release acceptance remain NOT_RUN or pending. This rehearsal supplies real
 ephemeral topology evidence only. It does not pass all original F02/G0-G6
 criteria, start J02/F04 or assert Render health.
 
-The WebDriver client runs JavaScript on Finn's HTTPS health-document origin for
-same-origin A/B/default authentication. Existing Finn CORS deliberately omits
-X-Tenant-ID; it is not broadened. Only the diagnostic test service permits that
-exact Finn origin, GET and Authorization/X-Tenant-ID preflight, without cookies
-or Allow-Credentials. This is a diagnostic browser transport, not an added Finn
-UI or certification of the production frontend.
+The WebDriver client uses two verified HTTPS windows. Finn performs same-origin
+A/B/default authentication; the diagnostic window performs same-origin access
+checks. A memory-only postMessage handoff checks both exact origin and window
+source, carries no credential in a URL and returns only status. Finn CSP/CORS
+remain unchanged; diagnostic cross-origin preflight is denied. Browser preflight
+runs before the timed rotation, then repeats after retirement and strict
+rollback. Storage is checked while authenticated, after refresh/logout and on
+reload/reopen. This diagnostic transport is not a new Finn UI or certification
+of a production frontend or Jake client.
 
 See [the original operator runbook](f02-staging-rehearsal.md) for manual staging
 boundaries and [the identity contract](identity-v1.md) for unchanged policy.

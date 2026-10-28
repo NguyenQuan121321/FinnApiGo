@@ -137,7 +137,6 @@ def config(root, keys, last=None, remove=False):
                    IDENTITY_STATE_PREVIOUS_SECRET=keys['state-old'], IDENTITY_STATE_PREVIOUS_UNTIL=utc(last + 930))
     private(root / 'finn.env', '\n'.join(name + '=' + value for name, value in env.items()) + '\n')
     diagnostic = {'issuer_origin': 'https://finn-a:8443', 'keys': {'sign-' + current: keys['sign-' + current]},
-                  'browser_origin': 'https://'+hostname('finn-a')+':8443',
                   'service_kid': 'state-' + current, 'service_secret': keys['state-' + current],
                   'tenants': ['f02-a', 'f02-b', 'default'], 'ca_file': '/run/tls/ca.crt',
                   'cert_file': '/run/tls/cert.pem', 'key_file': '/run/tls/key.pem'}
@@ -515,6 +514,11 @@ class Rehearsal:
             pair, _ = self.login(tenant=tenant)
             status, _, _ = self.request(self.url('diagnostic'),'/diagnostic/v1/access',token=pair['accessToken'],tenant='forged-header')
             self.check('signed-tenant-positive-' + tenant,status,200)
+        from browser_rehearsal import browser
+        pair,_=self.login()
+        self.access=pair['accessToken']
+        time.sleep(2.2)
+        browser(self,'baseline-preflight')
         self.phase('baseline')
         self.extended()
         final = [self.login(port) for port in [18443,20443]]
@@ -573,9 +577,8 @@ class Rehearsal:
             time.sleep(10)
             self.phase('retired',label=dependency+'-restored')
         self.phase('reauth')
-        from browser_rehearsal import browser
         time.sleep(2.2)
-        browser(self)
+        browser(self,'post-retirement')
         compose('stop','-t','30','finn-a','finn-b')
         compose('up','-d','--force-recreate','finn-a','finn-b',image='f02-rollback:'+self.project)
         self.ready('finn-a',18443)
@@ -584,7 +587,7 @@ class Rehearsal:
         self.manifest['finn_sha']=ROLLBACK
         self.phase('rollback')
         time.sleep(2.2)
-        browser(self)
+        browser(self,'post-strict-rollback')
         for tenant in ['f02-a','f02-b','default']:
             pair,_=self.login(tenant=tenant)
             status,_,_=self.request(self.url('finn-a'),'/api/v1/auth/logout-all',body={},token=pair['accessToken'],tenant=tenant)

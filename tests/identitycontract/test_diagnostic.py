@@ -101,19 +101,19 @@ class DiagnosticHTTPS(unittest.TestCase):
         for purpose in ['reset','sudo','service','obo']:
             self.assertEqual(consumer.check(self.token(claims=dict(self.claims,type=purpose))),401)
 
-    def test_browser_preflight_is_exact_origin_and_method_only(self):
-        config=dict(self.config,browser_origin='https://localhost:18443')
+    def test_cross_origin_preflight_is_denied(self):
+        config=dict(self.config)
         server=serve(config,('127.0.0.1',0));thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         http=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=config['ca_file'])))
         try:
-            for origin,method,expected in [('https://localhost:18443','GET',204),('https://other.invalid','GET',403),('https://localhost:18443','POST',403)]:
+            for origin,method,expected in [('https://localhost:18443','GET',403),('https://other.invalid','GET',403),('https://localhost:18443','POST',403)]:
                 request=urllib.request.Request('https://localhost:'+str(server.server_port)+'/diagnostic/v1/access',method='OPTIONS',headers={'Origin':origin,'Access-Control-Request-Method':method})
                 try:response=http.open(request,timeout=5)
                 except urllib.error.HTTPError as error:response=error
                 with response:
                     self.assertEqual(response.code,expected)
                     self.assertIsNone(response.headers.get('Access-Control-Allow-Credentials'))
-                    self.assertEqual(response.headers.get('Access-Control-Allow-Origin'),origin if expected==204 else None)
+                    self.assertIsNone(response.headers.get('Access-Control-Allow-Origin'))
         finally:server.shutdown();server.server_close();thread.join(timeout=5)
 
 
