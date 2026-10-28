@@ -116,6 +116,7 @@ def config(root, keys, last=None, remove=False):
                    IDENTITY_STATE_PREVIOUS_SECRET=keys['state-old'], IDENTITY_STATE_PREVIOUS_UNTIL=utc(last + 930))
     private(root / 'finn.env', '\n'.join(name + '=' + value for name, value in env.items()) + '\n')
     diagnostic = {'issuer_origin': 'https://finn-a:8443', 'keys': {'sign-' + current: keys['sign-' + current]},
+                  'browser_origin': 'https://localhost:18443',
                   'service_kid': 'state-' + current, 'service_secret': keys['state-' + current],
                   'tenants': ['f02-a', 'f02-b', 'default'], 'ca_file': '/run/tls/ca.crt',
                   'cert_file': '/run/tls/cert.pem', 'key_file': '/run/tls/key.pem'}
@@ -224,20 +225,32 @@ class Rehearsal:
 
     def ready(self, service, port):
         deadline = time.monotonic() + 120
+        last_status = None
+        transport = None
         while time.monotonic() < deadline:
             try:
                 status, _, _ = self.request('https://localhost:' + str(port), '/healthz' if service != 'diagnostic' else '/diagnostic/v1/access')
+                last_status = status
                 if status == (401 if service == 'diagnostic' else 200):
                     self.inventory(service)
                     return
-            except (OSError, urllib.error.URLError):
-                pass
+            except (OSError, urllib.error.URLError) as error:
+                transport = type(getattr(error, 'reason', error)).__name__
             time.sleep(2)
         # Allowlisted startup messages only; never publish raw container logs.
         raw = compose('logs', '--no-color', '--tail', '60', service, check=False).stdout.decode(errors='replace')
         allowed = ['key ID required', 'invalid authentication key', 'insufficient diversity', 'database', 'permission denied',
                    'audit', 'metrics', 'certificate', 'dial tcp', 'no such', 'connection refused', 'TLS', 'fatal']
-        emit('startup_failed', service=service, matched_categories=[word for word in allowed if word.lower() in raw.lower()])
+        cid=compose('ps','--all','-q',service).stdout.decode().strip()
+        inspected=json.loads(command(['docker','inspect',cid]).stdout)[0]
+        progress=['database connected','store: Redis-backed','email: SMTP notifier enabled','server listening','finnapigo fatal','server error','server stopped cleanly']
+        emit('startup_failed', service=service, matched_categories=[word for word in allowed if word.lower() in raw.lower()],
+             progress=[word for word in progress if word in raw],last_http_status=last_status,transport_error_type=transport,
+             state={key:inspected['State'][key] for key in ['Status','Running','ExitCode','OOMKilled','StartedAt','FinishedAt']})
+        if service in ['finn-a','finn-b']:
+            script="import ssl,urllib.request;h=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile='/run/tls/ca.crt')));r=h.open('https://"+service+":8443/healthz',timeout=5);print(r.code)"
+            result=compose('run','--rm','--no-deps','--entrypoint','python','diagnostic','-B','-c',script,check=False,timeout=20)
+            emit('startup_private_tls_control',service=service,exit_code=result.returncode,status=int(result.stdout.strip()) if result.stdout.strip().isdigit() else None)
         raise RuntimeError('service readiness failed: ' + service)
 
     def inventory(self, service):

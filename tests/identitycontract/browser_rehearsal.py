@@ -23,26 +23,26 @@ const [accounts, password, legacy] = arguments; const done=arguments[arguments.l
  let pair=null, tenant='f02-a', refreshUnknown=false;
  const headers=()=>({'Content-Type':'application/json','X-Tenant-ID':tenant});
  try {
-  const old=await call('/diagnostic/v1/access',{headers:{Authorization:'Bearer '+legacy}});
+  const old=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+legacy}});
   check('synthetic-legacy-reauth',old.status,401);
   for(tenant of accounts){
    const login=await call('https://localhost:18443/api/v1/auth/login',{method:'POST',headers:headers(),body:JSON.stringify({email:tenant+'@example.invalid',password})});
    check('browser-login-'+tenant,login.status,200);
    pair=(await login.json()).data;
    if(!pair || typeof pair.accessToken!=='string' || typeof pair.refreshToken!=='string')throw new Error('shape');
-   const access=await call('/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken,'X-Tenant-ID':'forged-header'}});
+   const access=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken,'X-Tenant-ID':'forged-header'}});
    check('browser-consumer-'+tenant,access.status,200);
    refreshUnknown=true;
    const refreshed=await call('https://localhost:18443/api/v1/auth/refresh-token',{method:'POST',headers:headers(),body:JSON.stringify({refreshToken:pair.refreshToken})});
    check('browser-refresh-'+tenant,refreshed.status,200);
    const next=(await refreshed.json()).data;
    if(!next || typeof next.accessToken!=='string' || typeof next.refreshToken!=='string')throw new Error('refresh-shape');
-   const verify=await call('/diagnostic/v1/access',{headers:{Authorization:'Bearer '+next.accessToken}});
+   const verify=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+next.accessToken}});
    check('browser-refreshed-consumer-'+tenant,verify.status,200);
    pair=next; refreshUnknown=false;
    const logout=await call('https://localhost:18443/api/v1/auth/logout',{method:'POST',headers:{...headers(),Authorization:'Bearer '+pair.accessToken},body:JSON.stringify({refreshToken:pair.refreshToken})});
    check('browser-logout-'+tenant,logout.status,200);
-   const revoked=await call('/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken}});
+   const revoked=await call('https://localhost:19443/diagnostic/v1/access',{headers:{Authorization:'Bearer '+pair.accessToken}});
    check('browser-after-logout-'+tenant,revoked.status,401);
    pair=null;
    check('localStorage-empty-'+tenant,localStorage.length,0);
@@ -101,7 +101,10 @@ def browser(rehearsal):
         session=capabilities['sessionId']
         emit('browser_identity',browser_version=capabilities['capabilities']['browserVersion'],accept_insecure_certs=capabilities['capabilities'].get('acceptInsecureCerts'))
         wd('POST','/session/'+session+'/timeouts',{'script':65000})
-        wd('POST','/session/'+session+'/url',{'url':'https://localhost:19443/browser'})
+        # Finn's existing CORS allowlist does not include X-Tenant-ID. Keep
+        # runtime unchanged: run the diagnostic memory client on Finn's origin
+        # for same-origin A/B/default login, with strict diagnostic-only CORS.
+        wd('POST','/session/'+session+'/url',{'url':'https://localhost:18443/healthz'})
         initial=wd('POST','/session/'+session+'/execute/sync',{'script':'return {local:localStorage.length,session:sessionStorage.length,cookies:document.cookie==="",memory:typeof window.f02Memory};','args':[]})
         if initial!={'local':0,'session':0,'cookies':True,'memory':'undefined'}:raise RuntimeError('browser initial persistence')
         emit('browser_open_or_reopen',status='PASS',storage_empty=True,memory_absent=True)
