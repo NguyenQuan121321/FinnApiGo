@@ -225,6 +225,7 @@ class Rehearsal:
         self.last_phase = 0
         self.last_public_request = 0
         self.pairs = []
+        os.environ['F02_CA_FILE']=str(self.root/'tls/ca.crt')
         context = ssl.create_default_context(cafile=str(self.root / 'tls/ca.crt'))
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context), NoRedirect())
         self.manifest = json.loads((HERE / 'staging.example.json').read_text())
@@ -232,7 +233,7 @@ class Rehearsal:
             platform_owner='NguyenQuan121321', risk_disposition_ref='F02-LOCAL-STAGING-RISK-001 extended by invoking user to Actions',
             mysql_resource_ref=self.project + '-mysql', redis_resource_ref=self.project + '-redis', tls_trust_ref=self.project + '-ca',
             rollback_ref=ROLLBACK, authorization_ref='invoking user F02-actions-rehearsal automatic same-repository PR run',
-            consumer_decision_ref='F02-SCOPE-DIAGNOSTIC-20261028', finn_sha=os.environ['F02_HEAD_SHA'], jake_sha=JAKE,
+            consumer_decision_ref='F02-SCOPE-DIAGNOSTIC-20261028', finn_sha=command(['git','rev-parse','HEAD']).stdout.decode().strip(), jake_sha=JAKE,
             replicas=[{'id': 'finn-a', 'origin': self.url('finn-a'), 'deployment_ref': self.project},
                       {'id': 'finn-b', 'origin': self.url('finn-b'), 'deployment_ref': self.project}],
             consumer_kind='dedicated-contract-probe', consumer_origin=self.url('diagnostic'), consumer_path='/diagnostic/v1/access',
@@ -580,6 +581,7 @@ class Rehearsal:
         self.ready('finn-a',18443)
         self.ready('finn-b',20443)
         emit('strict_artifact_rollback',source=ROLLBACK,retired_keys_restored=False,latest_store_state_retained=True)
+        self.manifest['finn_sha']=ROLLBACK
         self.phase('rollback')
         time.sleep(2.2)
         browser(self)
