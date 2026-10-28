@@ -223,6 +223,7 @@ class Rehearsal:
             mask(value)
         self.last = None
         self.last_phase = 0
+        self.last_public_request = 0
         self.pairs = []
         context = ssl.create_default_context(cafile=str(self.root / 'tls/ca.crt'))
         self.http = urllib.request.build_opener(urllib.request.ProxyHandler({}), urllib.request.HTTPSHandler(context=context), NoRedirect())
@@ -252,6 +253,10 @@ class Rehearsal:
         emit('owned_direct_route',service=service,origin=self.url(service),container_id=cid,ip_sha256=hashlib.sha256(address.encode()).hexdigest())
 
     def request(self, base, path, body=None, token=None, tenant='f02-a'):
+        if path in ['/api/v1/auth/register','/api/v1/auth/login','/api/v1/auth/verify-email','/api/v1/auth/refresh-token']:
+            wait=self.last_public_request+0.3-time.monotonic()
+            if wait>0:time.sleep(wait)
+            self.last_public_request=time.monotonic()
         headers = {'Content-Type': 'application/json', 'X-Tenant-ID': tenant}
         if token:
             headers['Authorization'] = 'Bearer ' + token
@@ -391,6 +396,10 @@ class Rehearsal:
         if fresh:
             pair, _ = self.login()
             self.access = pair['accessToken']
+        # Default shared IP limiter is ten admissions per two-second window.
+        # Drain bootstrap/seed traffic before the independent guarded client;
+        # never raise limits or retry a failed case into a PASS.
+        time.sleep(2.2)
         self.last_phase = time.monotonic()
         self.manifest['last_old_issuance_unix'] = self.last if self.last is not None else json.loads(decode(self.access.split('.')[1]))['iat']
         self.manifest['service_overlap_until_unix'] = self.manifest['last_old_issuance_unix'] + 930
@@ -413,6 +422,7 @@ class Rehearsal:
         return env
 
     def extended(self):
+        time.sleep(1.1)  # Preserve the independent120/s introspection limit.
         claims = json.loads(decode(self.access.split('.')[1]))
         probe = Probe(self.manifest)
         service = ('state-old', self.keys['state-old']) if self.last is None else ('state-new', self.keys['state-new'])
@@ -434,6 +444,7 @@ class Rehearsal:
         for field in ['tenant_id', 'permissions', 'roles', 'scopes', 'id', 'UID', 'Auth_Epoch']:
             candidates.append(('alias-' + field, signed(dict(claims, **{field: 'forbidden'}), kid, self.keys[kid]), 401))
         for name, candidate, expected in candidates:
+            time.sleep(0.02)
             probe.introspect(self.manifest['replicas'][0], candidate, service, expected, label='extended-' + name)
             probe.consumer(candidate, expected, 'extended-' + name)
         for purpose in ['reset', 'verify-email', 'mfa_pending', 'sudo', 'service', 'obo']:
@@ -562,6 +573,7 @@ class Rehearsal:
             self.phase('retired',label=dependency+'-restored')
         self.phase('reauth')
         from browser_rehearsal import browser
+        time.sleep(2.2)
         browser(self)
         compose('stop','-t','30','finn-a','finn-b')
         compose('up','-d','--force-recreate','finn-a','finn-b',image='f02-rollback:'+self.project)
@@ -569,6 +581,7 @@ class Rehearsal:
         self.ready('finn-b',20443)
         emit('strict_artifact_rollback',source=ROLLBACK,retired_keys_restored=False,latest_store_state_retained=True)
         self.phase('rollback')
+        time.sleep(2.2)
         browser(self)
         for tenant in ['f02-a','f02-b','default']:
             pair,_=self.login(tenant=tenant)
