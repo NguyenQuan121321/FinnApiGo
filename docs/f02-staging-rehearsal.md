@@ -46,6 +46,14 @@ returns BLOCKED. Reference IDs attest evidence to be independently inspected;
 the probe cannot prove inventory, isolation, authorization or revision from labels.
 Every listed route must reach its named replica, without load-balancer ambiguity.
 List the exact consumer protected GET route and its required synthetic grant.
+Issuer and consumer origins are validated before secret lookup or network use,
+including direct runner calls. Supported DNS/IDNA hostnames are canonicalized to
+lowercase ASCII, with one terminal dot and default port443 removed. The known
+production hostname is excluded after canonicalization, including case, IDNA and
+terminal-dot spellings. Unsupported hostname/port forms, whitespace/control
+characters, backslashes and empty userinfo/query/fragment spellings are rejected.
+The manifest hash still binds the exact reviewed input bytes; canonicalization
+does not attest that any other HTTPS hostname is isolated staging.
 
 ## Executable probe
 
@@ -80,9 +88,20 @@ MFA-enabled accounts require an owner-operated browser/device ceremony; the API
 password probe reports BLOCKED rather than bypassing MFA/CAPTCHA controls.
 
 The runner performs real HTTPS introspection/protected GETs and synthetic
-login/logout; reauth/rollback also refresh the temporary session. It attempts
-logout after login verification failure. A network/process interruption can leave
-a synthetic session for the authorized owner to clean up; record that exception.
+login/logout; reauth/rollback also refresh the temporary session. Login and refresh
+must return an object with a `data` object containing nonempty string `accessToken`
+and `refreshToken`. Refresh replaces cleanup credentials only after shape, signature,
+claims and authoritative introspection validation. An error preserves the original
+failure and makes one best-effort logout attempt using the last usable pair, with
+the same10-second request bound and no retry. Missing credentials, a failed request
+or non200 logout is recorded as unresolved; no logout is invented without credentials.
+After an unvalidated refresh outcome, even fallback logout200 is only an
+acknowledgment for that attempt: `cleanup_unresolved:true`/BLOCKED remains until
+the owner reconciles any unknown replacement session/credentials. Successful
+replacement validation plus logout200 records the cleanup acknowledgment, not a
+general refresh-family/revocation-SLA guarantee. Cleanup failures never mask the
+original error. A network/process interruption can also leave a synthetic session
+for the authorized owner to clean up; retain these failure/NOT_RUN denominators.
 It signs malformed challenges with the dedicated test material, never logs or
 persists tokens, refuses redirects/proxies/HTTP/TLS bypass, and excludes the known
 production origin. The manifest's isolation attestation is still an owner duty;
@@ -112,16 +131,25 @@ configuration version and actual instance inventory after every transition.
 | 4 | Configure `JWT_KEY_ID`, `JWT_SECRET`, `JWT_PREVIOUS_KEY_ID`, `JWT_SECRET_PREVIOUS`, `JWT_PREVIOUS_LAST_ISSUED_AT=T`; and `IDENTITY_STATE_KEY_ID`, `IDENTITY_STATE_SECRET`, `IDENTITY_STATE_PREVIOUS_KEY_ID`, `IDENTITY_STATE_PREVIOUS_SECRET`, `IDENTITY_STATE_PREVIOUS_UNTIL=U` | Secret-manager versions/IDs only. T <= U <= T+930s in this rehearsal. Keep other audit/recovery/application keys distinct. Owner records startup success and exact config on every replica |
 | 5 | Deploy Finn current-key configuration, then enable the approved strict consumer configuration. Inject fresh actual Finn access; run `--phase overlap` before both deadlines | Real issuer-before-consumer deployment timestamps, new-only issuance on every replica; both signing/service keys accepted during overlap; no synthetic claim of Jake runtime enforcement |
 | 6 | Restart a named replica under the same immutable T/U; repeat overlap if time remains | Restart does not reset either deadline. Capture instance/config identity and real UTC/clock offset; finish within window or record NOT_RUN |
-| 7 | At/after T+930s and U, inject fresh current access; run `--phase retired`; restart replica with unchanged expired config and repeat | Current key stays accepted. Old service credential rejected. Fresh, otherwise-valid old-key challenge rejected on every replica despite unexpired exp/current authoritative session; restart must not renew overlap |
+| 7 | At/after T+930s and U, inject fresh current access; run `--phase retired`; restart replica with unchanged expired config and repeat | Current key stays accepted at Finn and consumer. Old service credential rejected. Genuine previous access and fresh, otherwise-valid old-key challenge rejected by Finn and the identified consumer despite unexpired challenge exp/current authoritative session; restart must not renew overlap |
 | 8 | Remove previous signing/service secret references and IDs/timestamps in an approved configuration version; repeat retired on all replicas | Actual removal/configuration receipts and secret-manager disable/retirement custody receipt; do not infer removal merely from expired access tokens |
 | 9 | Owner isolates **only the dedicated** MySQL dependency; run `--phase mysql-outage`; restore and rerun positive phase. Repeat for Redis using `--phase redis-outage` | Both trusted introspection and protected delivery return 503, including consumer. Do not confuse inactive401 with unavailable503; preserve outage/restore timestamps |
-| 10 | Run `--phase reauth`, then browser ceremony below; no legacy bridge remains | Actual issuer login, current kid, state, refresh, cleanup and legacy401; browser/API evidence separate |
+| 10 | Run `--phase reauth`, then browser ceremony below; no legacy bridge remains | Actual issuer login, current kid, state, refresh, cleanup receipt/unresolved outcome; legacy401 directly at Finn API and consumer; browser/API evidence separate |
 | 11 | Perform reviewed secure rollback or protected-access shutdown; run `--phase rollback` after retirement | Strict v1 and authoritative state retained; no old-key resurrection, permissive Jake verifier, schema down or stale security-state restore |
 | 12 | Revoke/clean up only run-owned synthetic sessions/fixtures, remove temporary secret-manager access per approved plan | Cleanup receipts, final replica/config IDs, failed/skipped denominators and owner review; retain redacted immutable evidence |
 
-During overlap the runner creates a fresh old-key challenge from current
-authoritative session claims and expects 200; after retirement the equivalent
-fresh challenge must return 401 while current access returns 200. These are
+During overlap the runner sends genuine captured previous access and a fresh
+old-key challenge over current authoritative session claims directly to both Finn
+introspection and the identified consumer, expecting200 at each. In retired and
+rollback phases both endpoints must return401 for each previous-key input, while
+the current-key control remains200. The fresh challenge must remain otherwise
+valid/unexpired and use the live tenant/session/subject/version/permissions; an
+expired token, dead session or tenant mismatch cannot substitute for this control.
+The runner sets challenge iat/nbf to the actual current clock and exp to+900s,
+then requires the identical claims signed by the current key to pass both Finn
+and consumer immediately before the previous-key challenge. Neither paired
+challenge is evidence of actual issuer issuance or an extension of user access.
+Reauth/rollback also require direct consumer legacy401. These are
 probe-produced challenges, **not old issuer issuance**. This distinguishes actual
 key retirement from natural 900+30-second access expiry without backdating the
 clock or forging rollout evidence. The runner also checks genuine old access
@@ -159,7 +187,7 @@ traffic; rerun positives/negatives, reauthenticate and record rollback completio
 | Actual issuer/service wiring | Real login on each deployed replica; minimized trusted introspection200, protected API/consumer200; exact revisions/config/keys |
 | Policy negatives | Missing/wrong purpose, audience, issuer, algorithm, kid, tenant, uid/sub and mandatory claims rejected; expected tenant mismatch403; no service credential401 |
 | Cross-language | Existing `TestV1CrossLanguageContract` Go/Python corpus plus actual staged verdicts; reference never replaces Jake acceptance |
-| Rotation/retirement | Genuine old token overlap, new-only issuance, real deadlines, fresh old-key challenges, service overlap/expiry, restart and actual old-material removal |
+| Rotation/retirement | Direct Finn and consumer old-access/challenge overlap200 then retired/rollback401 with current200; genuine new-only issuance receipts, real deadlines, service overlap/expiry, restart and actual old-material removal |
 | Dependencies | Actual isolated MySQL/Redis faults503, restore positives; no FAIL_OPEN or absence substitution |
 | Issuer-first | Platform completion receipts place all Finn v1 issuers before strict consumer enablement; approved explicit legacy cutoff/removal |
 | Browser/API/rollback | Real device ceremony, API login/refresh/logout, memory-only credentials, strict secure rollback, synthetic cleanup |
@@ -173,3 +201,9 @@ dedicated: existing suites may flush Redis. Never point them at staging/shared
 stores to obtain acceptance. Missing daemon/stores means local real-store NOT_RUN.
 Offline orchestration tests, SQLite/memory adapters, mocked clocks and automatic
 CI services establish only their stated local/disposable boundaries.
+The Go wrapper runs all original8 offline cases plus12 review-repair cases. Its
+deliberately incorrect consumer accepts a fresh retired-key challenge while Finn
+rejects it; the actual runner must report FAIL. Other controls exercise malformed
+refresh through login/refresh/finally, original-error preservation, unresolved
+cleanup/redaction, production hostname rejection before execution and safe
+nonproduction-shaped origins. No production DNS/HTTP request proves these fixes.
