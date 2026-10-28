@@ -238,7 +238,8 @@ class Rehearsal:
                 transport = type(getattr(error, 'reason', error)).__name__
             time.sleep(2)
         # Allowlisted startup messages only; never publish raw container logs.
-        raw = compose('logs', '--no-color', '--tail', '60', service, check=False).stdout.decode(errors='replace')
+        captured = compose('logs', '--no-color', '--tail', '60', service, check=False)
+        raw = (captured.stdout + captured.stderr).decode(errors='replace')
         allowed = ['key ID required', 'invalid authentication key', 'insufficient diversity', 'database', 'permission denied',
                    'audit', 'metrics', 'certificate', 'dial tcp', 'no such', 'connection refused', 'TLS', 'fatal']
         cid=compose('ps','--all','-q',service).stdout.decode().strip()
@@ -261,7 +262,8 @@ class Rehearsal:
             # only this failed job-owned Go process. Never publish stack args.
             command(['docker','kill','--signal=QUIT',cid],check=False)
             time.sleep(1)
-            stack=compose('logs','--no-color','--tail','500',service,check=False).stdout.decode(errors='replace')
+            captured=compose('logs','--no-color','--tail','500',service,check=False)
+            stack=(captured.stdout+captured.stderr).decode(errors='replace')
             functions=[];main=False
             for line in stack.splitlines():
                 text=re.sub(r'^.*?\|\s*','',line)
