@@ -1,0 +1,99 @@
+# Only actions_rehearsal.py may populate these per-job references. No secrets here.
+x-finn: &finn
+  image: ${F02_ISSUER_IMAGE:?required}
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: [/tmp]
+  mem_limit: 384m
+  networks: [isolated]
+  restart: "no"
+services:
+  mysql:
+    image: mysql@sha256:5cf1e1293ea42e077e6a22114e6773b9aae3bb8f9933a2acd5a9721518ff8f5b
+    user: "999:999"
+    security_opt: [no-new-privileges:true]
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql-root
+      MYSQL_DATABASE: f02
+      MYSQL_USER: f02
+      MYSQL_PASSWORD_FILE: /run/secrets/mysql-app
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ${F02_ROOT:?required}/mysql-root:/run/secrets/mysql-root:ro
+      - ${F02_ROOT:?required}/mysql-app:/run/secrets/mysql-app:ro
+      - ${F02_ROOT:?required}/mysql-client.cnf:/run/secrets/mysql-client.cnf:ro
+    command: [--innodb-buffer-pool-size=134217728, --max-connections=40]
+    mem_limit: 1g
+    networks: [isolated]
+    restart: "no"
+  redis:
+    image: redis@sha256:a7aad82554197a54c653388bfded882a59d6b4a02468484bc31bae6772dcc42c
+    user: "999:999"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [redis-server, /run/secrets/redis.conf]
+    volumes:
+      - redis-data:/data
+      - ${F02_ROOT:?required}/redis.conf:/run/secrets/redis.conf:ro
+    mem_limit: 192m
+    networks: [isolated]
+    restart: "no"
+  mail:
+    image: axllent/mailpit@sha256:938ce54b7b946ef3f45a03e119952cf7e67a7969d61f45a3ed055442a77e00f4
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    ports: ["127.0.0.1:18025:8025"]
+    mem_limit: 128m
+    networks: [isolated]
+    restart: "no"
+    environment:
+      MP_SMTP_TLS_CERT: /run/tls/cert.pem
+      MP_SMTP_TLS_KEY: /run/tls/key.pem
+      MP_SMTP_REQUIRE_STARTTLS: "true"
+      MP_DISABLE_VERSION_CHECK: "true"
+    volumes:
+      - ${F02_ROOT:?required}/tls/mail.crt:/run/tls/cert.pem:ro
+      - ${F02_ROOT:?required}/tls/mail.key:/run/tls/key.pem:ro
+  finn-a:
+    <<: *finn
+    env_file: ["${F02_ROOT:?required}/finn.env"]
+    ports: ["127.0.0.1:18443:8443"]
+    volumes:
+      - ${F02_ROOT:?required}/tls/finn-a.crt:/run/tls/cert.pem:ro
+      - ${F02_ROOT:?required}/tls/finn-a.key:/run/tls/key.pem:ro
+      - ${F02_ROOT:?required}/tls/ca.crt:/run/tls/ca.crt:ro
+  finn-b:
+    <<: *finn
+    env_file: ["${F02_ROOT:?required}/finn.env"]
+    ports: ["127.0.0.1:20443:8443"]
+    volumes:
+      - ${F02_ROOT:?required}/tls/finn-b.crt:/run/tls/cert.pem:ro
+      - ${F02_ROOT:?required}/tls/finn-b.key:/run/tls/key.pem:ro
+      - ${F02_ROOT:?required}/tls/ca.crt:/run/tls/ca.crt:ro
+  diagnostic:
+    image: ${F02_DIAGNOSTIC_IMAGE:?required}
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ports: ["127.0.0.1:19443:8443"]
+    volumes:
+      - ${F02_ROOT:?required}/diagnostic.json:/run/f02/diagnostic.json:ro
+      - ${F02_ROOT:?required}/tls/ca.crt:/run/tls/ca.crt:ro
+      - ${F02_ROOT:?required}/tls/diagnostic.crt:/run/tls/cert.pem:ro
+      - ${F02_ROOT:?required}/tls/diagnostic.key:/run/tls/key.pem:ro
+    mem_limit: 192m
+    networks: [isolated]
+    restart: "no"
+networks:
+  isolated:
+    internal: true
+volumes:
+  mysql-data:
+  redis-data:
