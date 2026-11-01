@@ -1,5 +1,5 @@
 # Multi-stage build for FinnApiGo.
-FROM golang:1.26.10-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
 WORKDIR /src
 ENV GOTOOLCHAIN=local
 
